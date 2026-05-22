@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TerminalConfig",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "default": true
+    },
+    "defaultProfileId": {
+      "type": "string",
+      "minLength": 1,
+      "default": "auto"
+    },
+    "manualTerminalPath": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "startupCommand": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "defaultWorkingDirectory": {
+      "type": "string",
+      "minLength": 1,
+      "default": "Downloads/portus-session"
+    },
+    "fontSize": {
+      "type": "integer",
+      "minimum": 10,
+      "maximum": 24,
+      "default": 16
+    },
+    "maxSessions": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 5
+    },
+    "idleTimeoutMs": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1800000
+    }
+  }
+}

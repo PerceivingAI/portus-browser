@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CommandConfig",
+  "type": "object",
+  "description": "Phase 1 placeholder. Canonical config schema is defined in docs/CONFIG.md and will be implemented with Zod in Phase 2.",
+  "additionalProperties": true
+}

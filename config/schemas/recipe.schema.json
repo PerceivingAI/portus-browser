@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://portus.local/schemas/recipe.schema.json",
+  "title": "Portus Recipe Record",
+  "description": "Minimal management schema for agent-interpreted Portus recipes. Rich workflow structure is preferred, but recipes only need id, name, and content to be listed, managed, and interpreted by an agent.",
+  "type": "object",
+  "required": ["id", "name", "content"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "description": "Stable slug used by CLI management commands."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-readable recipe name."
+    },
+    "content": {
+      "description": "Recipe meaning. May be plain text or a structured object the agent can interpret.",
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "object",
+          "additionalProperties": true
+        }
+      ]
+    },
+    "kind": {
+      "type": "string",
+      "minLength": 1
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "intent": {
+      "type": "string",
+      "minLength": 1
+    },
+    "savedContext": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "desiredState": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "constraints": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "output": {
+      "description": "Expected response or artifact. The TypeScript/Zod schema defines the preferred structure.",
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "object",
+          "additionalProperties": true
+        }
+      ]
+    },
+    "notes": {
+      "type": "string",
+      "minLength": 1
+    },
+    "examples": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "additionalProperties": true
+}
