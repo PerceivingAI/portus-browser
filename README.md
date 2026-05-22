@@ -2,7 +2,7 @@
 
 Portus Browser lets a user and an AI agent co-navigate one or more visible browser sessions from the terminal.
 
-The user keeps the browser visible and approved. The agent uses the `portus-browser` CLI and Portus routes commands through a local Broker and the browser Extension.
+The agent uses the `portus-browser` CLI and Portus routes commands through a local Broker and the browser Extension allowing the user to have different settings, security profiles, and allow/block lists on different browser types.
 
 ## What Portus Browser Does
 
@@ -15,9 +15,9 @@ Portus Browser lets an agent:
 - take page snapshots and screenshots
 - inspect console and network data
 - use saved browser recipes
-- work across Chrome, Edge, Brave, and Chromium
+- work across multiple Chrome, Edge, and Chromium windows at the same time.
 
-Portus Browser is local first and the Broker runs on the user's machine. Browser actions go through the installed Extension and native messaging hosts allowing the user to use different security profiles, allow/block lists, and settings on different browser types.
+Portus Browser is local first and the Broker runs on the user's machine.
 
 ## Quick Start
 
@@ -56,11 +56,12 @@ If the list is empty, the Bridge is not connected yet in the extension popup.
 
 ## Main Parts
 
-- Portus Extension: the browser extension UI, popup, side panel, Settings view, Terminal view, and browser bridge.
-- Portus Broker: the local command router and source of truth for saved settings profiles.
-- Portus Browser CLI: the terminal command agents use. The command is `portus-browser`.
+- Extension: the browser extension UI, popup, side panel, Settings view, Terminal view, and browser bridge.
+- Broker: the local command router and source of truth for saved settings profiles.
+- Browser CLI: the terminal command agents use. The command is `portus-browser`.
 - Native hosts: local browser native messaging programs used by the Extension.
 - Portus Browser skill: onboarding instructions that teach an AI agent how to use the CLI safely.
+
 
 ## Supported Browsers
 
