@@ -1,0 +1,4 @@
+interface:
+  display_name: "Portus Browser"
+  short_description: "Use Portus Browser CLI for visible browser control"
+  default_prompt: "Use $portus-browser to operate the visible browser through Portus Browser CLI."

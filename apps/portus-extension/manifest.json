@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "Portus Browser",
+  "version": "0.1.0",
+  "description": "Portus Browser bridge for local, user-approved browser co-navigation.",
+  "icons": {
+    "16": "assets/panel-icon-16.png",
+    "32": "assets/icon-32.png",
+    "48": "assets/icon-48.png",
+    "128": "assets/icon-128.png"
+  },
+  "permissions": [
+    "activeTab",
+    "debugger",
+    "nativeMessaging",
+    "permissions",
+    "scripting",
+    "sidePanel",
+    "storage",
+    "tabs",
+    "webRequest",
+    "windows"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "dist/background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Portus Browser",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "assets/icon-16.png",
+      "32": "assets/icon-32.png",
+      "48": "assets/icon-48.png",
+      "128": "assets/icon-128.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  }
+}

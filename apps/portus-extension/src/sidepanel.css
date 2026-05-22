@@ -1,0 +1,28 @@
+.xterm .xterm-scrollable-element > .scrollbar.vertical {
+  background: transparent;
+}
+
+.xterm .xterm-scrollable-element > .scrollbar.vertical > .slider {
+  left: 4px !important;
+  width: 10px !important;
+}
+
+.xterm .xterm-viewport::-webkit-scrollbar {
+  width: 8px;
+}
+
+.xterm .xterm-viewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.xterm .xterm-viewport::-webkit-scrollbar-thumb {
+  background: var(--border);
+  background-clip: content-box;
+  border-left: 1px solid transparent;
+  border-right: 1px solid transparent;
+  border-radius: 9999px;
+}
+
+.xterm .xterm-viewport::-webkit-scrollbar-button {
+  display: none;
+}
