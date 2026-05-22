@@ -1,4 +1,4 @@
-# Portus Browser Public Docs
+# Portus Browser
 
 Portus Browser lets a user and an AI agent co-navigate one or more visible browser sessions from the terminal.
 
