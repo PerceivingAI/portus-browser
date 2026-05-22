@@ -137,7 +137,6 @@ Supported `--browser` values:
 
 - `chrome`
 - `edge`
-- `brave`
 - `chromium`
 
 If you install the extension in more than one browser type, run the native host install once per browser type with that browser's extension ID.
