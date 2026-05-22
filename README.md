@@ -63,6 +63,9 @@ If the list is empty, the Bridge is not connected yet in the extension popup.
 - Portus Browser skill: onboarding instructions that teach an AI agent how to use the CLI safely.
 
 
+![Portus Browser GUI views](docs/images/gui_views.png)
+
+
 ## Supported Browsers
 
 Portus Browser targets Chromium-based browsers:
