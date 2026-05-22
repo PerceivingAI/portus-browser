@@ -1,8 +1,8 @@
 # Portus Browser
 
-Portus Browser lets a user and an AI agent co-navigate one or more visible browser sessions from the terminal.
+Portus Browser lets a user and an AI agent (Codex, Pi, Claude Code, and others) co-navigate one or more visible browser sessions from the terminal.
 
-The agent uses the `portus-browser` CLI and Portus routes commands through a local Broker and the browser Extension allowing the user to have different settings, security profiles, and allow/block lists on different browser types.
+Any agent in your system can use the `portus-browser` CLI and Portus routes commands through a local Broker and the browser Extension allowing the user to have different settings, security profiles, and allow/block lists on different browser types. You can also use the built int Terminal Panel on the browser extension.
 
 ## What Portus Browser Does
 
