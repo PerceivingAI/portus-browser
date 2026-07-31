@@ -3,9 +3,11 @@ import { TerminalErrorPayloadSchema, type TerminalErrorPayload } from "@portus/t
 import type { PtyAdapter, PtyExitEvent, PtyProcess, PtySpawnOptions } from "./index.js";
 
 export class NodePtyAdapter implements PtyAdapter {
+  constructor(private readonly spawnPty: typeof spawn = spawn) {}
+
   spawn(options: PtySpawnOptions): PtyProcess {
     try {
-      const pty = spawn(options.command, options.args, {
+      const pty = this.spawnPty(options.command, options.args, {
         name: terminalName(),
         cols: options.cols,
         rows: options.rows,

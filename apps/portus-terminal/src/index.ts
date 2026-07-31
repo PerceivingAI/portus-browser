@@ -106,18 +106,20 @@ export class WorkingDirectoryResolver {
   private readonly env: Record<string, string | undefined>;
   private readonly platform: NodeJS.Platform;
   private readonly fileSystem: FileSystemAdapter;
+  private readonly pathApi: typeof path.win32;
 
   constructor(options: WorkingDirectoryResolverOptions = {}) {
     this.env = options.env ?? readProcessEnv();
     this.platform = options.platform ?? process.platform;
     this.fileSystem = options.fileSystem ?? new NodeFileSystemAdapter();
+    this.pathApi = this.platform === "win32" ? path.win32 : path.posix;
   }
 
   async resolve(input: string = DEFAULT_TERMINAL_WORKING_DIRECTORY): Promise<string> {
     const directory = input === DEFAULT_TERMINAL_WORKING_DIRECTORY
       ? this.defaultSessionDirectory()
       : input;
-    if (!path.isAbsolute(directory)) {
+    if (!this.pathApi.isAbsolute(directory)) {
       throw terminalError("TERMINAL_UNAVAILABLE", `Terminal working directory must be absolute: ${directory}.`, { directory });
     }
     if (input === DEFAULT_TERMINAL_WORKING_DIRECTORY) {
@@ -134,7 +136,7 @@ export class WorkingDirectoryResolver {
       ? this.env.USERPROFILE ?? this.env.HOME
       : this.env.HOME ?? this.env.USERPROFILE;
     if (!home) throw terminalError("TERMINAL_UNAVAILABLE", "Cannot resolve the user Downloads folder for terminal sessions.");
-    return path.join(home, "Downloads", "portus-session");
+    return this.pathApi.join(home, "Downloads", "portus-session");
   }
 }
 

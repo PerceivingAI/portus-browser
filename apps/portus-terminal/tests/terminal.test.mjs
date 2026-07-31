@@ -103,7 +103,7 @@ function fixedClock(...dates) {
 
 function windowsManager(options = {}) {
   const home = WINDOWS_TEST_HOME;
-  const cwd = path.join(home, "Downloads", "portus-session");
+  const cwd = path.win32.join(home, "Downloads", "portus-session");
   const fileSystem = new FakeFileSystem([cwd]);
   const ptyAdapter = new FakePtyAdapter();
   const shellDetector = new ShellDetector({
@@ -158,7 +158,7 @@ test("resolves and creates the default Downloads portus-session directory", asyn
     fileSystem
   });
   const directory = await resolver.resolve();
-  assert.equal(directory, path.join(WINDOWS_TEST_HOME, "Downloads", "portus-session"));
+  assert.equal(directory, path.win32.join(WINDOWS_TEST_HOME, "Downloads", "portus-session"));
   assert.deepEqual(fileSystem.created, [directory]);
 });
 
@@ -281,7 +281,9 @@ test("production PTY adapter sanitizes env and maps spawn failures", () => {
     TERM: "xterm"
   });
 
-  const adapter = new NodePtyAdapter();
+  const adapter = new NodePtyAdapter(() => {
+    throw new Error("spawn failed");
+  });
   assert.throws(() => adapter.spawn({
     command: "C:/definitely/missing/portus-terminal.exe",
     args: [],
