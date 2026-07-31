@@ -110,13 +110,16 @@ export function SelectField({
   placeholder?: string;
   "aria-label"?: string;
 }): React.JSX.Element {
+  const selectedOption = options.find((option) => option.value === value);
   const control = (
     <Select {...(disabled === undefined ? {} : { disabled })} onValueChange={onChange} value={value}>
       <SelectTrigger
         aria-label={ariaLabel}
         id={id}
       >
-        <SelectValue placeholder={placeholder} />
+        <SelectValue placeholder={placeholder}>
+          {selectedOption?.label}
+        </SelectValue>
       </SelectTrigger>
       <SelectContent>
         <SelectGroup>
