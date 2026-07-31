@@ -10,20 +10,14 @@
     "128": "assets/icon-128.png"
   },
   "permissions": [
-    "activeTab",
     "debugger",
     "nativeMessaging",
-    "permissions",
     "scripting",
     "sidePanel",
     "storage",
     "tabs",
     "webRequest",
     "windows"
-  ],
-  "optional_host_permissions": [
-    "http://*/*",
-    "https://*/*"
   ],
   "host_permissions": [
     "<all_urls>"

@@ -33,7 +33,6 @@ import { connectRuntimePort, isRecord, readLocalStorageValue, readStatus, readSt
 import {
   describeOriginPolicy,
   labelForBridgeState,
-  labelForPermissionState,
   policyInputForOrigin
 } from "./gui/status.js";
 import type { PortusExtensionStatus } from "./index.js";
@@ -217,7 +216,6 @@ export function SidePanelApp(): React.JSX.Element {
   }
 
   const bridgeState = status?.bridgeState ?? "unknown";
-  const permissionState = status?.permissionState ?? "unknown";
   const bridgeActionType = status?.bridgeState === "connected" ? "portus.bridge.disconnect" : "portus.bridge.connect";
   const activeView = view ?? "terminal";
   const viewToggleLabel = activeView === "terminal" ? "Open Settings" : "Open Terminal";
@@ -769,8 +767,7 @@ function SettingsPanel({
       >
         <StatusGrid
           rows={[
-            { label: "Permission", value: status?.permissionState ?? "unknown" },
-            { label: "Portus Policy", value: status ? describeOriginPolicy(status) : "neutral" }
+            { label: "Agent Access", value: status ? describeOriginPolicy(status) : "unknown" }
           ]}
         />
       </Section>

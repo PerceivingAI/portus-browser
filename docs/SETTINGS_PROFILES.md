@@ -6,22 +6,21 @@ They let the user keep different security and terminal settings without deleting
 
 ## What A Profile Contains
 
-A settings profile contains every user-modifiable setting in the Settings view.
+A settings profile's content contains the user-modifiable values in the Settings view:
 
-This includes:
-
-- selected profile
 - auto-save setting
 - terminal enable setting
 - selected terminal
 - manual terminal path
 - optional startup command
 - origin policy enable setting
-- allow list URLs
-- block list URLs
+- allowlist URLs
+- blocklist URLs
 - command policy settings
 - retention settings
-- every other setting exposed in the Settings view
+- panel and extension-icon preferences
+
+The active profile selection and profile name are profile metadata, not values nested inside the profile content.
 
 The only forgiving setting when applying a profile is the selected terminal. A profile can name a terminal that does not exist on another computer. In that case, the UI can fall back to an available terminal. The profile content still stores the original terminal setting.
 
@@ -86,20 +85,23 @@ The Broker does not use profile management as a separate runtime policy system. 
 
 ## Origin Policy
 
-Origin Policy controls URL allow/block behavior.
+Origin Policy is the agent-authorization boundary for URL access.
+
+The Extension permanently has Chrome host access for normal web pages through `"<all_urls>"`. Portus does not maintain a second site-by-site Chrome permission model and does not request or revoke host access when policy lists change.
 
 The Settings view includes:
 
 - `Enable Policies`
 - `Clear URLs`
-- allow list
-- block list
+- `Blocklist` and `Allowlist` modes
+- Allowed and Blocked origin lists
+- per-command controls under `CLI Commands`
 
-`Enable Policies` is on by default. If it is off, URL allow/block enforcement is bypassed without deleting the stored URLs.
+`Enable Policies` is on by default. In blocklist mode, an origin is allowed unless it matches the Blocked list. In allowlist mode, an origin is blocked unless it matches the Allowed list. Turning policy off bypasses both URL lists without deleting them or disabling command policy.
 
-`Clear URLs` clears all URLs from the currently selected allow or block list after confirmation.
+The popup and Settings view report the current origin as `Agent Access`: `allowed`, `blocked`, `disabled`, or `unsupported`.
 
-These settings are part of the active settings profile.
+`Clear URLs` clears all URLs from the currently selected allow or block list after confirmation. These settings are part of the active settings profile.
 
 ## Rename And Delete
 

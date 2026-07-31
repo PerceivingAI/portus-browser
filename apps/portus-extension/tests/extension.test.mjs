@@ -24,6 +24,8 @@ test("packages an action popup for bridge visibility controls", async () => {
   assert.ok(manifest.permissions.includes("sidePanel"));
   assert.ok(manifest.permissions.includes("debugger"));
   assert.deepEqual(manifest.host_permissions, ["<all_urls>"]);
+  assert.equal("optional_host_permissions" in manifest, false);
+  assert.equal(manifest.permissions.includes("activeTab"), false);
   assert.match(popupHtml, /id="root"/);
   assert.match(popupHtml, /dist\/gui\.css/);
   assert.match(popupHtml, /dist\/popup\.js/);
@@ -93,7 +95,7 @@ test("connects bridge through native messaging only when requested", async () =>
   assert.ok(port);
   assert.equal(port.messages[0].type, "bridge.register");
   assert.equal(port.messages[0].payload.browserName, "Chrome");
-  assert.deepEqual(port.messages[0].payload.capabilities, ["tabs", "windows", "screenshots", "snapshots", "actions", "advanced-debugger", "permissions", "events"]);
+  assert.deepEqual(port.messages[0].payload.capabilities, ["tabs", "windows", "screenshots", "snapshots", "actions", "advanced-debugger", "policy", "events"]);
   assert.deepEqual(port.messages[0].payload.policyPreferences, {
     originPolicyEnabled: true,
     policyMode: "blocklist",
@@ -412,62 +414,31 @@ test("handles routed tab commands from broker", async () => {
   assert.deepEqual(port.messages.at(-1).result, { closed: true, tabId: 2 });
 });
 
-test("requests and revokes optional origin permission", async () => {
+test("status exposes policy without a separate Chrome permission state", async () => {
   const fixture = createChromeFixture();
-  const bridge = createPortusExtensionBridge(fixture.chrome, {
-    now: () => new Date("2026-04-28T00:00:00.000Z")
-  });
-
-  const record = await bridge.requestOriginPermission("https://example.com", "snapshot");
-  assert.equal(record.origin, "https://example.com");
-  assert.equal(record.granted, true);
-  assert.deepEqual(fixture.permissionRequests, ["https://example.com/*"]);
-
-  const status = await bridge.getStatus();
-  assert.equal(status.allowlist.length, 1);
-
-  const revoke = await bridge.revokeOriginPermission("https://example.com");
-  assert.deepEqual(revoke, { revoked: true, origin: "https://example.com" });
-  assert.deepEqual(fixture.permissionRemovals, ["https://example.com/*"]);
-  assert.equal((await bridge.getStatus()).allowlist.length, 0);
-});
-
-test("reports active origin permission state separately from bridge visibility", async () => {
-  const fixture = createChromeFixture({ permissionContains: false });
   const bridge = createConnectedBridge(fixture);
 
   const status = await bridge.getStatus();
 
   assert.equal(status.bridgeState, "connected");
   assert.equal(status.activeTabOrigin, "https://example.com");
-  assert.equal(status.permissionState, "missing");
-  assert.equal(status.allowlist.length, 0);
+  assert.equal(status.policyPreferences.policyMode, "blocklist");
+  assert.equal("permissionState" in status, false);
+  assert.equal("allowlist" in status, false);
+  assert.equal("permissions" in fixture.chrome, false);
 });
 
-test("runtime permission request and revoke update active origin status", async () => {
-  const fixture = createChromeFixture({ permissionContains: false });
-  const bridge = createConnectedBridge(fixture);
+test("rejects removed permission runtime messages", async () => {
+  const bridge = createConnectedBridge(createChromeFixture());
 
-  const requestResult = await bridge.handleRuntimeMessage({
+  await assert.rejects(() => bridge.handleRuntimeMessage({
     type: "portus.permission.request",
-    origin: "https://example.com",
-    reason: "manual test"
-  });
-  assert.equal(requestResult.permission.origin, "https://example.com");
-  assert.equal(requestResult.status.permissionState, "granted");
-  assert.deepEqual(fixture.permissionRequests, ["https://example.com/*"]);
-  assert.equal((await bridge.getStatus()).permissionState, "granted");
-
-  const revokeResult = await bridge.handleRuntimeMessage({
+    origin: "https://example.com"
+  }), { code: "INVALID_MESSAGE" });
+  await assert.rejects(() => bridge.handleRuntimeMessage({
     type: "portus.permission.revoke",
     origin: "https://example.com"
-  });
-  assert.equal(revokeResult.revoked, true);
-  assert.equal(revokeResult.origin, "https://example.com");
-  assert.equal(revokeResult.status.permissionState, "missing");
-  assert.deepEqual(fixture.permissionRemovals, ["https://example.com/*"]);
-  assert.equal((await bridge.getStatus()).permissionState, "missing");
-  assert.equal((await bridge.getStatus()).bridgeState, "connected");
+  }), { code: "INVALID_MESSAGE" });
 });
 
 test("runtime policy origin mutations include refreshed status for side panel controls", async () => {
@@ -489,17 +460,6 @@ test("runtime policy origin mutations include refreshed status for side panel co
   assert.equal(result.status.policyPreferences.allowedOrigins[0].origin, "https://www.google.com");
 });
 
-test("routes permission list to extension allowlist", async () => {
-  const fixture = createChromeFixture();
-  const bridge = createConnectedBridge(fixture);
-  await bridge.requestOriginPermission("https://example.com", "manual test");
-
-  const result = await bridge.dispatchNativeRequest(request("req_permissions", "permission.list"));
-
-  assert.equal(result.permissions.length, 1);
-  assert.equal(result.permissions[0].origin, "https://example.com");
-  assert.equal(result.permissions[0].granted, true);
-});
 
 test("persists policy preferences and routes policy commands", async () => {
   const fixture = createChromeFixture();
@@ -1382,13 +1342,6 @@ test("dry-run dismiss reports target without clicking", async () => {
   assert.equal(fixture.actions.length, 0);
 });
 
-test("returns permission required before snapshot and action injection", async () => {
-  const fixture = createChromeFixture({ permissionContains: false });
-  const bridge = createConnectedBridge(fixture);
-
-  await assert.rejects(() => bridge.captureSnapshot(1), { code: "PERMISSION_REQUIRED" });
-  await assert.rejects(() => bridge.performAction("scroll", { tabId: 1 }), { code: "PERMISSION_REQUIRED" });
-});
 
 test("maps Chrome tab failures to TAB_NOT_FOUND", async () => {
   const fixture = createChromeFixture({
@@ -1402,14 +1355,14 @@ test("maps Chrome tab failures to TAB_NOT_FOUND", async () => {
   await assert.rejects(() => bridge.captureScreenshot(404), { code: "TAB_NOT_FOUND" });
 });
 
-test("maps Chrome capture and injection failures to PERMISSION_REQUIRED", async () => {
+test("maps Chrome access failures to BROWSER_ACCESS_DENIED", async () => {
   const captureFixture = createChromeFixture({
     captureVisibleTab() {
       return Promise.reject(new Error("Cannot access contents of the page."));
     }
   });
   const captureBridge = createConnectedBridge(captureFixture);
-  await assert.rejects(() => captureBridge.captureScreenshot(1), { code: "PERMISSION_REQUIRED" });
+  await assert.rejects(() => captureBridge.captureScreenshot(1), { code: "BROWSER_ACCESS_DENIED" });
 
   const scriptFixture = createChromeFixture({
     executeScript() {
@@ -1417,7 +1370,7 @@ test("maps Chrome capture and injection failures to PERMISSION_REQUIRED", async 
     }
   });
   const scriptBridge = createConnectedBridge(scriptFixture);
-  await assert.rejects(() => scriptBridge.captureSnapshot(1), { code: "PERMISSION_REQUIRED" });
+  await assert.rejects(() => scriptBridge.captureSnapshot(1), { code: "BROWSER_ACCESS_DENIED" });
 });
 
 test("integrates extension bridge with native host and broker visibility", async () => {
@@ -1550,7 +1503,7 @@ function settingsProfileState(overrides = {}) {
   };
 }
 
-test("terminal settings do not mutate bridge, policy, UX, or permission state", async () => {
+test("terminal settings do not mutate bridge, policy, or UX state", async () => {
   const fixture = createChromeFixture();
   const bridge = createPortusExtensionBridge(fixture.chrome, {
     now: () => new Date("2026-04-28T00:00:00.000Z")
@@ -1569,7 +1522,6 @@ test("terminal settings do not mutate bridge, policy, UX, or permission state", 
   assert.equal(after.bridgeState, before.bridgeState);
   assert.deepEqual(after.policyPreferences, before.policyPreferences);
   assert.deepEqual(after.uxPreferences, before.uxPreferences);
-  assert.deepEqual(after.allowlist, before.allowlist);
   assert.equal(fixture.ports.length, 0);
 });
 
@@ -1719,8 +1671,6 @@ test("disabling terminal kills terminal transport without touching bridge", asyn
 function createChromeFixture(overrides = {}) {
   const ports = [];
   const connectedHostNames = [];
-  const permissionRequests = [];
-  const permissionRemovals = [];
   const capturedWindows = [];
   const actions = [];
   const actionTitles = [];
@@ -1742,8 +1692,6 @@ function createChromeFixture(overrides = {}) {
   const fixture = {
     ports,
     connectedHostNames,
-    permissionRequests,
-    permissionRemovals,
     capturedWindows,
     actions,
     actionTitles,
@@ -1816,19 +1764,6 @@ function createChromeFixture(overrides = {}) {
         update(windowId) {
           fixture.windowFocused = windowId;
           return Promise.resolve({ id: windowId, focused: true });
-        }
-      },
-      permissions: {
-        contains() {
-          return Promise.resolve(overrides.permissionContains ?? true);
-        },
-        request(permissions) {
-          permissionRequests.push(...(permissions.origins ?? []));
-          return Promise.resolve(true);
-        },
-        remove(permissions) {
-          permissionRemovals.push(...(permissions.origins ?? []));
-          return Promise.resolve(true);
         }
       },
       storage: {

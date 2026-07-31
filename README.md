@@ -2,7 +2,7 @@
 
 Portus Browser lets a user and an AI agent (Codex, Pi, Claude Code, and others) co-navigate one or more visible browser sessions from the terminal.
 
-Any agent in your system can use the `portus-browser` CLI and Portus routes commands through a local Broker and the browser Extension allowing the user to have different settings, security policies, and allow/block lists on different browsers. You can also use the built in Terminal on the browser extension.
+Any agent in your system can use the `portus-browser` CLI. Portus routes commands through a local Broker and browser Extension, allowing each browser to use its own settings profile, origin policy, command policy, and terminal settings.
 
 ## What Portus Browser Does
 
@@ -18,6 +18,12 @@ Portus Browser lets an agent:
 - work across multiple Chrome, Edge, and Chromium windows at the same time.
 
 Portus Browser is local first and the Broker runs on the user's machine.
+
+## Access And Policy
+
+The Extension permanently requests Chrome host access for normal web pages through `"<all_urls>"`; there is no site-by-site Chrome permission request or revoke workflow. While the Bridge is connected, Portus origin policy and command policy are the authorization boundary for agent actions.
+
+Blocked origins return `ORIGIN_BLOCKED`. Protected browser pages and other targets Chrome cannot expose return `BROWSER_ACCESS_DENIED`.
 
 ## Quick Start
 
@@ -88,7 +94,7 @@ Native messaging registration is platform-specific. Use the installer command fo
 
 ## Public Docs Map
 
-- `docs/INSTALL.md`: build, install, and run instructions.
-- `docs/SETTINGS_PROFILES.md`: security profiles and settings behavior.
-- `docs/TROUBLESHOOTING.md`: common setup checks.
+- `docs/INSTALL.md`: build, install, access disclosure, and run instructions.
+- `docs/SETTINGS_PROFILES.md`: settings profiles and policy behavior.
+- `docs/TROUBLESHOOTING.md`: common setup, policy, and browser-access checks.
 - `AGENT_SKILL.md`: how to install and use the Portus Browser skill.

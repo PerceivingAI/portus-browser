@@ -66,12 +66,6 @@ export const commandGroups: Array<{ title: string; commands: Array<{ type: Comma
     ]
   },
   {
-    title: "Chrome Permissions",
-    commands: [
-      { type: "permission.list", label: "List Permissions" }
-    ]
-  },
-  {
     title: "Bridge",
     commands: [
       { type: "bridge.disconnect", label: "Disconnect Bridge From CLI" }

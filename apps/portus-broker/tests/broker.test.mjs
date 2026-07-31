@@ -38,7 +38,7 @@ const registration = {
   extensionVersion: "0.1.0",
   extensionId: "chrome-extension-id",
   bridgeStatus: "connected",
-  capabilities: ["tabs", "events", "screenshots", "snapshots", "actions", "permissions"]
+  capabilities: ["tabs", "events", "screenshots", "snapshots", "actions", "policy"]
 };
 
 test("validates config at startup and exposes named pipe endpoint", () => {
@@ -290,14 +290,17 @@ test("routes commands only to bridge-connected sessions with required capabiliti
   const bridgeClient = {
     async sendCommand(command) {
       routed.push(command);
-      if (command.type === "permission.list") {
+      if (command.type === "policy.get") {
         return {
-          permissions: [{
-            origin: "https://example.com",
-            granted: true,
-            source: "extension",
-            scope: "origin"
-          }]
+          policy: {
+            originPolicyEnabled: true,
+            policyMode: "blocklist",
+            allowedOrigins: [],
+            blockedOrigins: [],
+            commandPolicy: DEFAULT_COMMAND_POLICY,
+            advancedBackendEnabled: false,
+            sessionStepRetentionLimit: 10
+          }
         };
       }
       return {
@@ -326,10 +329,10 @@ test("routes commands only to bridge-connected sessions with required capabiliti
   assert.equal(routed[0].type, "tab.list");
   assert.equal(routed[0].targetBrowserId, browserId);
 
-  const permissions = await broker.handleRequest(request("req_003", "permission.list", { browserId }));
-  assert.equal(permissions.ok, true);
-  assert.equal(permissions.result.permissions[0].origin, "https://example.com");
-  assert.equal(routed[1].type, "permission.list");
+  const policy = await broker.handleRequest(request("req_003", "policy.get", { browserId }));
+  assert.equal(policy.ok, true);
+  assert.equal(policy.result.policy.policyMode, "blocklist");
+  assert.equal(routed[1].type, "policy.get");
 
   await broker.handleRequest(request("req_004", "bridge.disconnect", { browserId }), { bridgeClient });
   const afterDisconnect = await broker.handleRequest(request("req_005", "tab.list", { browserId }));
@@ -1006,7 +1009,7 @@ test("uses configured defaults for built-in settings profiles", async () => {
     brokerToken: TEST_BROKER_TOKEN,
     now: fixedClock(),
     config: {
-      permissions: {
+      policy: {
         defaultAllowlist: ["https://allowed.example"],
         defaultBlocklist: ["https://blocked.example"],
         sessionStepRetentionLimit: 25

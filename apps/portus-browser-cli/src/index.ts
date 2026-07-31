@@ -30,7 +30,6 @@ import {
   SnapshotSchema,
   TabSchema,
   WaitResultSchema,
-  PermissionRecordSchema,
   createPortusError,
   type ActionResult,
   type BrowserSession,
@@ -42,7 +41,6 @@ import {
   type FillFormResult,
   type NetworkGetResult,
   type NetworkListResult,
-  type PermissionRecord,
   type PolicyPreferences,
   type PortusError,
   type RequestEnvelope,
@@ -198,9 +196,6 @@ const RecipeRecordResultSchema = z.object({
   diagnostics: z.array(z.unknown()).optional()
 }).strict();
 
-const PermissionListResultSchema = z.object({
-  permissions: z.array(PermissionRecordSchema)
-}).strict();
 
 const PolicyResultSchema = z.object({
   policy: PolicyPreferencesSchema
@@ -504,8 +499,6 @@ export async function runPortusBrowserCli(
         return success(output, await handleNetwork(context, parsed));
       case "recipes":
         return success(output, await handleRecipes(context, parsed));
-      case "permissions":
-        return success(output, await handlePermissions(context, parsed));
       case "policy":
         return success(output, await handlePolicy(context, parsed));
       case "wait":
@@ -657,28 +650,6 @@ async function handleSnapshot(context: CliContext, parsed: ParsedArgs): Promise<
   };
 }
 
-async function handlePermissions(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
-  const subcommand = parsed.positionals[0];
-  if (!subcommand) throw usageError("Permission subcommand is required.");
-
-  if (subcommand === "list") {
-    if (parsed.positionals.length > 1) throw usageError("permissions list does not accept positional arguments.");
-    const payload: Record<string, unknown> = {};
-    const browserFlag = readOptionalStringFlag(parsed, "browser");
-    if (browserFlag !== undefined) payload.browserId = await resolveBrowserTarget(context, browserFlag);
-    const result = PermissionListResultSchema.parse(await context.broker.request("permission.list", payload, context.timeoutMs));
-    return {
-      ok: true,
-      permissions: result.permissions
-    };
-  }
-
-  if (subcommand === "request" || subcommand === "revoke") {
-    throw usageError("Permission request and revoke are GUI-first in v1. Use the Portus Browser extension popup.");
-  }
-
-  throw usageError(`Unknown permission subcommand: ${subcommand}.`);
-}
 
 async function handlePolicy(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
   const area = parsed.positionals[0];
@@ -1407,7 +1378,6 @@ function renderSuccess(output: OutputMode, result: Record<string, unknown>): str
   if (isRecord(result.network)) return renderNetworkTable(result.network as NetworkListResult | NetworkGetResult);
   if (Array.isArray(result.recipes)) return renderRecipeTable(result.recipes as Array<Record<string, unknown>>);
   if (isRecord(result.recipe)) return `${JSON.stringify(result.recipe, null, 2)}\n`;
-  if (Array.isArray(result.permissions)) return renderPermissionTable(result.permissions as PermissionRecord[]);
   if (Array.isArray(result.entries)) return renderPolicyEntryTable(result.entries as PolicyPreferences["allowedOrigins"]);
   if (typeof result.retention === "number") return renderTable(["RETENTION"], [{ RETENTION: String(result.retention) }]);
   if (isRecord(result.policy)) return renderPolicyTable(result.policy as PolicyPreferences);
@@ -1577,19 +1547,6 @@ function renderRecipeTable(recipes: Array<Record<string, unknown>>): string {
   return renderTable(["RECIPE_ID", "NAME", "KIND", "RICH_SCHEMA", "ISSUES", "DESCRIPTION"], rows);
 }
 
-function renderPermissionTable(permissions: PermissionRecord[]): string {
-  const rows = [...permissions]
-    .sort((a, b) => a.origin.localeCompare(b.origin))
-    .map((permission) => ({
-      ORIGIN: permission.origin,
-      GRANTED: String(permission.granted),
-      SOURCE: permission.source,
-      SCOPE: permission.scope,
-      GRANTED_AT: permission.grantedAt ?? "",
-      REASON: permission.reason ?? ""
-    }));
-  return renderTable(["ORIGIN", "GRANTED", "SOURCE", "SCOPE", "GRANTED_AT", "REASON"], rows);
-}
 
 function renderPolicyTable(policy: PolicyPreferences): string {
   return renderTable(["MODE", "ALLOWED", "BLOCKED", "RETENTION"], [{
@@ -1953,7 +1910,7 @@ function exitCodeForError(error: PortusError): number {
     CONFIG_INVALID: 3,
     BROKER_UNAVAILABLE: 4,
     NATIVE_HOST_UNAVAILABLE: 4,
-    PERMISSION_REQUIRED: 5,
+    BROWSER_ACCESS_DENIED: 5,
     ORIGIN_BLOCKED: 5,
     COMMAND_DISABLED_BY_POLICY: 5,
     BROWSER_SESSION_UNAVAILABLE: 6,

@@ -19,7 +19,6 @@
   },
   "dependencies": {
     "@portus/actions": "workspace:*",
-    "@portus/permissions": "workspace:*",
     "@portus/protocol": "workspace:*",
     "@portus/snapshots": "workspace:*",
     "@portus/terminal": "workspace:*",

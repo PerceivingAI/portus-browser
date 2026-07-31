@@ -27,13 +27,13 @@ test("default config is valid and keeps v1 security constraints", () => {
   assert.equal(DEFAULT_PORTUS_CONFIG.terminal.startupCommand, null);
   assert.equal(DEFAULT_PORTUS_CONFIG.terminal.defaultWorkingDirectory, "Downloads/portus-session");
   assert.equal(DEFAULT_PORTUS_CONFIG.terminal.fontSize, 16);
-  assert.equal(DEFAULT_PORTUS_CONFIG.permissions.defaultPolicyMode, "blocklist");
-  assert.deepEqual(DEFAULT_PORTUS_CONFIG.permissions.defaultBlocklist, []);
-  assert.equal(DEFAULT_PORTUS_CONFIG.permissions.defaultCommandPolicy["screenshot.capture"], true);
-  assert.equal(DEFAULT_PORTUS_CONFIG.permissions.defaultCommandPolicy["snapshot.capture"], true);
-  assert.equal(DEFAULT_PORTUS_CONFIG.permissions.defaultCommandPolicy["action.click"], true);
-  assert.equal(DEFAULT_PORTUS_CONFIG.permissions.defaultCommandPolicy["tab.open"], true);
-  assert.equal(DEFAULT_PORTUS_CONFIG.permissions.sessionStepRetentionLimit, 10);
+  assert.equal(DEFAULT_PORTUS_CONFIG.policy.defaultPolicyMode, "blocklist");
+  assert.deepEqual(DEFAULT_PORTUS_CONFIG.policy.defaultBlocklist, []);
+  assert.equal(DEFAULT_PORTUS_CONFIG.policy.defaultCommandPolicy["screenshot.capture"], true);
+  assert.equal(DEFAULT_PORTUS_CONFIG.policy.defaultCommandPolicy["snapshot.capture"], true);
+  assert.equal(DEFAULT_PORTUS_CONFIG.policy.defaultCommandPolicy["action.click"], true);
+  assert.equal(DEFAULT_PORTUS_CONFIG.policy.defaultCommandPolicy["tab.open"], true);
+  assert.equal(DEFAULT_PORTUS_CONFIG.policy.sessionStepRetentionLimit, 10);
 });
 
 test("partial config merges over defaults", () => {
@@ -49,22 +49,24 @@ test("partial config merges over defaults", () => {
 
 test("arrays replace instead of concatenate", () => {
   const merged = mergeConfig(DEFAULT_PORTUS_CONFIG, {
-    permissions: {
+    policy: {
       defaultAllowlist: ["https://example.com"],
       defaultBlocklist: ["https://blocked.example"],
       sessionStepRetentionLimit: 25
     }
   });
   const parsed = parseConfig(merged);
-  assert.deepEqual(parsed.permissions.defaultAllowlist, ["https://example.com"]);
-  assert.deepEqual(parsed.permissions.defaultBlocklist, ["https://blocked.example"]);
-  assert.equal(parsed.permissions.sessionStepRetentionLimit, 25);
+  assert.deepEqual(parsed.policy.defaultAllowlist, ["https://example.com"]);
+  assert.deepEqual(parsed.policy.defaultBlocklist, ["https://blocked.example"]);
+  assert.equal(parsed.policy.sessionStepRetentionLimit, 25);
 });
 
 test("unknown keys and disabled v1 security features fail validation", () => {
   assert.equal(PortusConfigSchema.safeParse({ unknown: true }).success, false);
   assert.equal(PortusConfigSchema.safeParse({ security: { allowDebuggerApi: true } }).success, false);
   assert.equal(PortusConfigSchema.safeParse({ broker: { allowRemoteConnections: true } }).success, false);
+  assert.equal(PortusConfigSchema.safeParse({ permissions: {} }).success, false);
+  assert.equal(PortusConfigSchema.safeParse({ extension: { permissionsMode: "minimal" } }).success, false);
 });
 
 test("invalid config maps to typed Portus error", () => {

@@ -414,31 +414,14 @@ test("dismiss sends popup cleanup payloads and renders result", async () => {
   });
 });
 
-test("permissions list renders extension allowlist and request/revoke are GUI-first", async () => {
-  const broker = createMockBroker({
-    "browser.list": { browsers },
-    "permission.list": {
-      permissions: [{
-        origin: "https://example.com",
-        granted: true,
-        source: "extension",
-        scope: "origin",
-        requestedAt: "2026-04-28T00:00:00.000Z",
-        grantedAt: "2026-04-28T00:00:00.000Z",
-        reason: "manual test"
-      }]
-    }
-  });
+test("removed permissions commands fail before contacting the broker", async () => {
+  const broker = createMockBroker({});
 
-  const listed = await runPortusBrowserCli(["permissions", "list", "--browser", "1", "--json"], { brokerClient: broker });
-  const request = await runPortusBrowserCli(["permissions", "request", "https://example.com", "--browser", "1", "--json"], { brokerClient: broker });
+  const result = await runPortusBrowserCli(["permissions", "list", "--browser", "1", "--json"], { brokerClient: broker });
 
-  assert.equal(listed.exitCode, 0);
-  assert.deepEqual(broker.requests.map((item) => item.type), ["browser.list", "permission.list"]);
-  assert.equal(broker.requests[1].payload.browserId, "br_000001");
-  assert.equal(JSON.parse(listed.stdout).permissions[0].origin, "https://example.com");
-  assert.equal(request.exitCode, 2);
-  assert.match(JSON.parse(request.stderr).error.message, /GUI-first/);
+  assert.equal(result.exitCode, 2);
+  assert.deepEqual(broker.requests, []);
+  assert.equal(JSON.parse(result.stderr).error.code, "INVALID_MESSAGE");
 });
 
 test("policy commands route visible-browser allow, block, and retention updates", async () => {
@@ -995,7 +978,7 @@ function browser(browserId, browserName, browserLabel, connectedAt) {
     extensionVersion: "0.1.0",
     connectedAt,
     lastHeartbeat: connectedAt,
-    capabilities: ["tabs", "windows", "permissions", "events"],
+    capabilities: ["tabs", "windows", "policy", "events"],
     bridgeStatus: "connected",
     status: "available",
     browserLabel

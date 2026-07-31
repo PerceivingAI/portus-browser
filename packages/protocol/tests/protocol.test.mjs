@@ -144,7 +144,7 @@ test("validates success and error response envelopes", () => {
 
 test("exports all documented error codes", () => {
   assert.equal(ErrorCodeSchema.options.length, 23);
-  assert.ok(ErrorCodeSchema.options.includes("PERMISSION_REQUIRED"));
+  assert.ok(ErrorCodeSchema.options.includes("BROWSER_ACCESS_DENIED"));
   assert.ok(ErrorCodeSchema.options.includes("ORIGIN_BLOCKED"));
   assert.ok(ErrorCodeSchema.options.includes("COMMAND_DISABLED_BY_POLICY"));
   assert.ok(ErrorCodeSchema.options.includes("DISMISS_TARGET_NOT_FOUND"));

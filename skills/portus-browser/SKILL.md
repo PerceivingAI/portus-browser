@@ -239,14 +239,12 @@ portus-browser network get --browser 1 --tab-id <tabId> <requestId> --json
 
 Do not use diagnostics as a substitute for user-visible verification when the user asked about rendered behavior.
 
-## Policy And Permissions
+## Policy
 
 The user controls Portus policy from the extension UI. Do not pre-check or second-guess policy before executing a direct user request. Try the command and report policy errors plainly.
-
-Useful read/list commands:
+Useful list commands:
 
 ```powershell
-portus-browser permissions list --browser 1 --json
 portus-browser policy allow list --browser 1 --json
 portus-browser policy block list --browser 1 --json
 portus-browser policy retention get --browser 1 --json
@@ -334,7 +332,7 @@ Common next steps:
 - `BRIDGE_DISCONNECTED`: ask the user to connect the extension Bridge.
 - `COMMAND_DISABLED_BY_POLICY`: tell the user the command is disabled in Settings.
 - `ORIGIN_BLOCKED`: tell the user the active policy blocked the origin.
-- `PERMISSION_REQUIRED`: tell the user browser host permission is required.
+- `BROWSER_ACCESS_DENIED`: tell the user the target page cannot be controlled and select a regular HTTP(S) tab if appropriate.
 - `TAB_NOT_FOUND`: refresh `tabs` and target a current tab id.
 - `TARGET_NOT_FOUND`: refresh `browsers` or `tabs`, then retry with current ids.
 - `COMMAND_TIMEOUT`: verify page state, then retry only if the action is safe.

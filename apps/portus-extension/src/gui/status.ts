@@ -15,26 +15,10 @@ export function labelForBridgeState(state: string): string {
   }
 }
 
-export function labelForPermissionState(state: string): string {
-  switch (state) {
-    case "granted":
-      return "Granted";
-    case "missing":
-      return "Missing";
-    case "requested":
-      return "Requested";
-    case "denied":
-      return "Denied";
-    case "error":
-      return "Error";
-    default:
-      return "Unknown";
-  }
-}
 
 export function badgeToneForState(state: string): "secondary" | "success" | "warning" | "destructive" {
-  if (state === "connected" || state === "granted") return "success";
-  if (state === "connecting" || state === "disconnecting" || state === "missing" || state === "denied" || state === "unavailable" || state === "disabled") return "warning";
+  if (state === "connected" || state === "allowed") return "success";
+  if (state === "connecting" || state === "disconnecting" || state === "blocked" || state === "unavailable" || state === "disabled") return "warning";
   if (state === "error") return "destructive";
   return "secondary";
 }
@@ -44,9 +28,9 @@ export function describeOriginPolicy(status: PortusExtensionStatus): string {
   if (!origin) return "unsupported";
   if (status.policyPreferences.originPolicyEnabled === false) return "disabled";
   if (status.policyPreferences.policyMode === "blocklist") {
-    return status.policyPreferences.blockedOrigins.some((entry) => policyOriginMatches(entry.origin, origin)) ? "blocked" : "neutral";
+    return status.policyPreferences.blockedOrigins.some((entry) => policyOriginMatches(entry.origin, origin)) ? "blocked" : "allowed";
   }
-  return status.policyPreferences.allowedOrigins.some((entry) => policyOriginMatches(entry.origin, origin)) ? "allowed" : "not allowed";
+  return status.policyPreferences.allowedOrigins.some((entry) => policyOriginMatches(entry.origin, origin)) ? "allowed" : "blocked";
 }
 
 export function policyOriginMatches(pattern: string, origin: string): boolean {

@@ -189,9 +189,6 @@ const ROUTED_REQUEST_TYPES = new Set([
   "console.clear",
   "network.list",
   "network.get",
-  "permission.list",
-  "permission.request",
-  "permission.revoke",
   "policy.get",
   "policy.allow.add",
   "policy.allow.remove",
@@ -227,15 +224,12 @@ const REQUIRED_CAPABILITY_BY_REQUEST_TYPE = new Map<string, string>([
   ["console.clear", "actions"],
   ["network.list", "actions"],
   ["network.get", "actions"],
-  ["permission.list", "permissions"],
-  ["permission.request", "permissions"],
-  ["permission.revoke", "permissions"],
-  ["policy.get", "permissions"],
-  ["policy.allow.add", "permissions"],
-  ["policy.allow.remove", "permissions"],
-  ["policy.block.add", "permissions"],
-  ["policy.block.remove", "permissions"],
-  ["policy.retention.set", "permissions"]
+  ["policy.get", "policy"],
+  ["policy.allow.add", "policy"],
+  ["policy.allow.remove", "policy"],
+  ["policy.block.add", "policy"],
+  ["policy.block.remove", "policy"],
+  ["policy.retention.set", "policy"]
 ]);
 
 export interface BrokerBridgeClient {
@@ -1127,6 +1121,10 @@ export class BrokerCore {
     if (!context.bridgeClient || context.bridgeClient !== record.bridgeClient) {
       throw brokerError("BROKER_TOKEN_INVALID", "Only the connected Portus Bridge may publish browser events.", false);
     }
+    const origin = originFromBrowserEventPayload(payload.payload);
+    if (origin && !policyAllowsOrigin(origin, record.policyPreferences)) {
+      return { published: false };
+    }
 
     const event = this.events.publish({
       type: payload.type,
@@ -1422,9 +1420,9 @@ export class BrokerCore {
       return result;
     } catch (error) {
       const portusError = normalizeBrokerError(error);
-      if (portusError.code === "PERMISSION_REQUIRED") {
+      if (portusError.code === "BROWSER_ACCESS_DENIED") {
         this.events.publish({
-          type: "permission.required",
+          type: "browser.access.denied",
           browserId: record.session.browserId,
           tabId: command.targetTabId,
           requestId: request.requestId,
@@ -1630,17 +1628,6 @@ export class BrokerCore {
         }
       });
     }
-    if (request.type === "permission.request" || request.type === "permission.revoke") {
-      this.events.publish({
-        type: "permission.changed",
-        browserId: record.session.browserId,
-        requestId: request.requestId,
-        payload: {
-          browserId: record.session.browserId,
-          commandType: request.type
-        }
-      });
-    }
   }
 
   private publishOriginBlocked(request: RequestEnvelope, record: BrowserSessionRecord, error: PortusError): void {
@@ -1699,22 +1686,22 @@ export class BrokerCore {
   private defaultPolicyPreferences(): PolicyPreferences {
     const now = this.now().toISOString();
     return PolicyPreferencesSchema.parse({
-      policyMode: this.config.permissions.defaultPolicyMode,
-      allowedOrigins: this.config.permissions.defaultAllowlist.map((origin) => ({
+      policyMode: this.config.policy.defaultPolicyMode,
+      allowedOrigins: this.config.policy.defaultAllowlist.map((origin) => ({
         origin,
         source: "config",
         updatedAt: now
       })),
-      blockedOrigins: this.config.permissions.defaultBlocklist.map((origin) => ({
+      blockedOrigins: this.config.policy.defaultBlocklist.map((origin) => ({
         origin,
         source: "config",
         updatedAt: now
       })),
       commandPolicy: {
         ...DEFAULT_COMMAND_POLICY,
-        ...this.config.permissions.defaultCommandPolicy
+        ...this.config.policy.defaultCommandPolicy
       },
-      sessionStepRetentionLimit: this.config.permissions.sessionStepRetentionLimit
+      sessionStepRetentionLimit: this.config.policy.sessionStepRetentionLimit
     });
   }
 
@@ -2139,23 +2126,22 @@ function isNodeListenAddressInUseError(error: unknown): boolean {
     && error.code === "EADDRINUSE";
 }
 
-function enforcePolicyForOrigin(origin: string, policy: PolicyPreferences): void {
-  if (policy.originPolicyEnabled === false) return;
+function policyAllowsOrigin(origin: string, policy: PolicyPreferences): boolean {
+  if (policy.originPolicyEnabled === false) return true;
   if (policy.policyMode === "blocklist") {
-    if (policy.blockedOrigins.some((entry) => policyOriginMatches(entry.origin, origin))) {
-      throw createPortusError({
-        code: "ORIGIN_BLOCKED",
-        message: `Portus policy blocks browser control for ${origin}.`,
-        retryable: false,
-        details: { origin }
-      });
-    }
-    return;
+    return !policy.blockedOrigins.some((entry) => policyOriginMatches(entry.origin, origin));
   }
-  if (policy.allowedOrigins.some((entry) => policyOriginMatches(entry.origin, origin))) return;
+  return policy.allowedOrigins.some((entry) => policyOriginMatches(entry.origin, origin));
+}
+
+function enforcePolicyForOrigin(origin: string, policy: PolicyPreferences): void {
+  if (policyAllowsOrigin(origin, policy)) return;
+  const message = policy.policyMode === "blocklist"
+    ? `Portus policy blocks browser control for ${origin}.`
+    : `Portus policy does not allow browser control for ${origin}.`;
   throw createPortusError({
     code: "ORIGIN_BLOCKED",
-    message: `Portus policy does not allow browser control for ${origin}.`,
+    message,
     retryable: false,
     details: { origin }
   });
@@ -2199,6 +2185,14 @@ function redactTabLike(record: Record<string, unknown>, redactUrls: boolean, red
 function originFromPayload(payload: Record<string, unknown>): string | undefined {
   const url = typeof payload.url === "string" ? payload.url : undefined;
   return url === undefined ? undefined : originFromUrl(url) ?? undefined;
+}
+
+function originFromBrowserEventPayload(payload: Record<string, unknown>): string | undefined {
+  const directOrigin = originFromPayload(payload);
+  if (directOrigin) return directOrigin;
+  if (!isRecord(payload.tab)) return undefined;
+  const tabUrl = typeof payload.tab.url === "string" ? payload.tab.url : undefined;
+  return tabUrl === undefined ? undefined : originFromUrl(tabUrl) ?? undefined;
 }
 
 function redactUrlFromPayload(payload: Record<string, unknown>, redactUrls: boolean): string | undefined {

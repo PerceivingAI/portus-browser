@@ -26,7 +26,7 @@ export const ErrorCodeSchema = z.enum([
   "BRIDGE_DISCONNECTED",
   "TARGET_NOT_FOUND",
   "TAB_NOT_FOUND",
-  "PERMISSION_REQUIRED",
+  "BROWSER_ACCESS_DENIED",
   "ORIGIN_BLOCKED",
   "COMMAND_DISABLED_BY_POLICY",
   "COMMAND_TIMEOUT",
@@ -95,7 +95,7 @@ export const CapabilitySchema = z.enum([
   "snapshots",
   "actions",
   "advanced-debugger",
-  "permissions",
+  "policy",
   "events",
   "terminal"
 ]);
@@ -164,9 +164,6 @@ export const CommandTypeSchema = z.enum([
   "recipe.get",
   "recipe.search",
   "recipe.resolve",
-  "permission.list",
-  "permission.request",
-  "permission.revoke",
   "policy.get",
   "policy.allow.add",
   "policy.allow.remove",
@@ -211,9 +208,6 @@ export const DEFAULT_COMMAND_POLICY = {
   "recipe.get": true,
   "recipe.search": true,
   "recipe.resolve": true,
-  "permission.list": true,
-  "permission.request": false,
-  "permission.revoke": false,
   "policy.get": true,
   "policy.allow.add": false,
   "policy.allow.remove": false,
@@ -358,18 +352,6 @@ export const TabSchema = z.object({
   status: z.string().optional()
 }).strict();
 
-export const PermissionSourceSchema = z.enum(["extension", "cli", "config", "activeTab"]);
-export const PermissionScopeSchema = z.enum(["origin", "session", "temporary"]);
-
-export const PermissionRecordSchema = z.object({
-  origin: HttpOriginSchema,
-  granted: z.boolean(),
-  source: PermissionSourceSchema,
-  scope: PermissionScopeSchema,
-  requestedAt: IsoDateTimeSchema.optional(),
-  grantedAt: IsoDateTimeSchema.optional(),
-  reason: z.string().min(1).optional()
-}).strict();
 
 export const CommandEnvelopeSchema = z.object({
   commandId: CommandIdSchema,
@@ -378,7 +360,6 @@ export const CommandEnvelopeSchema = z.object({
   targetBrowserId: BrowserIdSchema.optional(),
   targetTabId: TabIdSchema.optional(),
   timeoutMs: z.number().int().positive().optional(),
-  requiredPermission: z.string().min(1).optional(),
   capabilityLayer: z.number().int().min(1).max(3).optional()
 }).strict();
 
@@ -407,8 +388,7 @@ export const BrokerEventTypeSchema = z.enum([
   "tab.activated",
   "tab.closed",
   "snapshot.invalidated",
-  "permission.required",
-  "permission.changed",
+  "browser.access.denied",
   "policy.changed",
   "origin.blocked",
   "action.started",
@@ -663,7 +643,6 @@ export type ErrorCode = z.infer<typeof ErrorCodeSchema>;
 export type BrowserName = z.infer<typeof BrowserNameSchema>;
 export type BrowserSession = z.infer<typeof BrowserSessionSchema>;
 export type Tab = z.infer<typeof TabSchema>;
-export type PermissionRecord = z.infer<typeof PermissionRecordSchema>;
 export type PolicyOriginEntry = z.infer<typeof PolicyOriginEntrySchema>;
 export type PolicyMode = z.infer<typeof PolicyModeSchema>;
 export type CommandType = z.infer<typeof CommandTypeSchema>;

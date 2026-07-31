@@ -34,8 +34,7 @@
     "heartbeatEnabled": true,
     "showSidePanelStatus": true,
     "enableTerminalPanel": true,
-    "browserLabel": null,
-    "permissionsMode": "minimal"
+    "browserLabel": null
   },
   "sessions": {
     "idFormat": "prefix-counter",
@@ -69,18 +68,16 @@
     "allowDebuggerApi": false,
     "allowDebuggerApiRequiresConfirmation": true
   },
-  "permissions": {
-    "hostPermissionMode": "optional-per-site",
+  "policy": {
+    "defaultPolicyMode": "blocklist",
     "defaultAllowlist": [],
-    "allowlistStorage": "user-config",
-    "activeTabFallback": true,
-    "requireConfirmationForNewOrigins": true
+    "defaultBlocklist": [],
+    "sessionStepRetentionLimit": 10
   },
   "events": {
     "enabled": true,
     "retentionLimit": 1000,
-    "includeSnapshotInvalidation": true,
-    "includePermissionEvents": true
+    "includeSnapshotInvalidation": true
   },
   "logging": {
     "level": "info",

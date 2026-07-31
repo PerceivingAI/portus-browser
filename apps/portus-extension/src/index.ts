@@ -67,7 +67,6 @@ import {
   type TerminalServerMessage,
   type TerminalSettings
 } from "@portus/terminal";
-import { PermissionRecordSchema, type PermissionRecord } from "@portus/permissions";
 import { createDomActionResult, markSnapshotsStaleForTab, resolveActionElement, type SnapshotStoreEntry } from "@portus/actions";
 import { buildSnapshot, createSnapshotId, filterSnapshot, type SnapshotElementCandidate } from "@portus/snapshots";
 
@@ -75,7 +74,6 @@ export type BridgeState = "disconnected" | "connecting" | "connected" | "disconn
 export type NativeHostState = "disconnected" | "connecting" | "connected" | "error";
 export type TerminalNativeHostState = NativeHostState;
 export type BrokerState = "unknown" | "connected" | "unavailable" | "error";
-export type PermissionState = "unknown" | "granted" | "missing" | "requested" | "denied" | "error";
 
 export interface PortusNativePort {
   postMessage(message: unknown): void;
@@ -173,11 +171,6 @@ export interface PortusChromeApi {
     getAll(getInfo?: Record<string, unknown>): Promise<ChromeWindow[]> | void;
     update(windowId: number, updateInfo: Record<string, unknown>): Promise<ChromeWindow> | void;
   };
-  permissions?: {
-    contains(permissions: { origins?: string[] }): Promise<boolean> | void;
-    request(permissions: { origins?: string[] }): Promise<boolean> | void;
-    remove(permissions: { origins?: string[] }): Promise<boolean> | void;
-  };
   storage?: {
     local?: {
       get(keys: string | string[] | Record<string, unknown> | null): Promise<Record<string, unknown>> | void;
@@ -248,14 +241,12 @@ export interface PortusExtensionStatus {
   nativeHostState: NativeHostState;
   brokerState: BrokerState;
   sidePanelOpen: boolean;
-  permissionState: PermissionState;
   activeTabOrigin: string | null;
   activeTabUrl: string | null;
   browserId: string | null;
   nativeHostName: string;
   terminalNativeHostName: string;
   terminalNativeHostState: TerminalNativeHostState;
-  allowlist: PermissionRecord[];
   policyPreferences: PolicyPreferences;
   uxPreferences: ExtensionUxPreferences;
   terminalPreferences: TerminalSettings;
@@ -273,7 +264,6 @@ interface PendingTerminalRequest {
   reject: (error: Error) => void;
 }
 
-const ALLOWLIST_STORAGE_KEY = "portus.permissionAllowlist";
 const POLICY_STORAGE_KEY = "portus.policyPreferences";
 const UX_STORAGE_KEY = "portus.uxPreferences";
 const BRIDGE_PREFERENCE_STORAGE_KEY = "portus.bridgePreference";
@@ -440,7 +430,7 @@ export class PortusExtensionBridge {
   private readonly terminalPending = new Map<string, PendingTerminalRequest>();
   private readonly terminalRuntimePorts = new Set<PortusRuntimePort>();
   private readonly statusRuntimePorts = new Set<PortusRuntimePort>();
-  private readonly allowlist = new Map<string, PermissionRecord>();
+  private readonly policyVisibleTabIds = new Set<number>();
   private policyPreferences: PolicyPreferences = DEFAULT_POLICY_PREFERENCES;
   private uxPreferences: ExtensionUxPreferences = DEFAULT_UX_PREFERENCES;
   private terminalPreferences: TerminalSettings = DEFAULT_TERMINAL_PREFERENCES;
@@ -466,7 +456,6 @@ export class PortusExtensionBridge {
   terminalNativeHostState: TerminalNativeHostState = "disconnected";
   brokerState: BrokerState = "unknown";
   sidePanelOpen = false;
-  permissionState: PermissionState = "unknown";
   browserId: string | null = null;
 
   constructor(private readonly chromeApi: PortusChromeApi, options: PortusExtensionBridgeOptions = {}) {
@@ -619,23 +608,18 @@ export class PortusExtensionBridge {
     const activeTab = await this.getActiveTab().catch(() => null);
     const activeTabUrl = activeTab?.url ?? null;
     const activeTabOrigin = activeTabUrl ? originFromUrl(activeTabUrl) : null;
-    const permissionState = activeTabOrigin === null
-      ? "unknown"
-      : await this.getOriginPermissionState(activeTabOrigin);
 
     return {
       bridgeState: this.bridgeState,
       nativeHostState: this.nativeHostState,
       brokerState: this.brokerState,
       sidePanelOpen: this.sidePanelOpen,
-      permissionState,
       activeTabOrigin,
       activeTabUrl,
       browserId: this.browserId,
       nativeHostName: this.nativeHostName,
       terminalNativeHostName: this.terminalNativeHostName,
       terminalNativeHostState: this.terminalNativeHostState,
-      allowlist: [...this.allowlist.values()],
       policyPreferences: this.policyPreferences,
       uxPreferences: this.uxPreferences,
       terminalPreferences: this.terminalPreferences,
@@ -669,19 +653,17 @@ export class PortusExtensionBridge {
           void this.broadcastStatus();
         })
         .catch(() => {
-          this.publishBrowserEvent("tab.activated", {
-            tabId: activeInfo.tabId,
-            windowId: activeInfo.windowId
-          }, activeInfo.tabId);
           void this.broadcastStatus();
         });
     });
     this.chromeApi.tabs.onRemoved?.addListener((tabId, removeInfo) => {
-      this.publishBrowserEvent("tab.closed", {
-        tabId,
-        windowId: removeInfo.windowId,
-        isWindowClosing: removeInfo.isWindowClosing
-      }, tabId);
+      if (this.policyVisibleTabIds.delete(tabId)) {
+        this.publishBrowserEvent("tab.closed", {
+          tabId,
+          windowId: removeInfo.windowId,
+          isWindowClosing: removeInfo.isWindowClosing
+        }, tabId);
+      }
       void this.broadcastStatus();
     });
   }
@@ -727,7 +709,16 @@ export class PortusExtensionBridge {
       const result = this.chromeApi.tabs.query({});
       done(result as Promise<ChromeTab[]> | ChromeTab[] | undefined);
     });
-    return tabs.map((tab) => this.toPortusTab(tab));
+    const visibleTabs: Tab[] = [];
+    for (const tab of tabs) {
+      if (!this.isTabVisibleToAgent(tab)) {
+        if (tab.id !== undefined) this.policyVisibleTabIds.delete(tab.id);
+        continue;
+      }
+      if (tab.id !== undefined) this.policyVisibleTabIds.add(tab.id);
+      visibleTabs.push(this.toPortusTab(tab));
+    }
+    return visibleTabs;
   }
 
   async getTab(tabId: number): Promise<Tab> {
@@ -736,6 +727,7 @@ export class PortusExtensionBridge {
       const result = this.chromeApi.tabs.get(tabId);
       done(result as Promise<ChromeTab> | ChromeTab | undefined);
     }));
+    this.ensureTabMetadataPolicyAllowed(tab);
     return this.toPortusTab(tab);
   }
 
@@ -767,14 +759,13 @@ export class PortusExtensionBridge {
     await this.ready;
     const targetTab = await this.getChromeTab(tabId);
     this.ensureTabPolicyAllowed(targetTab);
-    await this.ensureTabPermission(targetTab);
     if (!this.chromeApi.scripting) {
       throw createPortusError({
         code: "CAPABILITY_UNAVAILABLE",
         message: "Chrome scripting API is unavailable."
       });
     }
-    await mapChromePermissionOperation("navigate tab history", promisifyChromeCall<Array<{ result?: unknown }>>((done) => {
+    await mapChromeAccessOperation("navigate tab history", promisifyChromeCall<Array<{ result?: unknown }>>((done) => {
       const result = this.chromeApi.scripting?.executeScript({
         target: { tabId },
         func: performPortusHistoryNavigation,
@@ -787,6 +778,8 @@ export class PortusExtensionBridge {
 
   async activateTab(tabId: number): Promise<Tab> {
     await this.ready;
+    const targetTab = await this.getChromeTab(tabId);
+    this.ensureTabMetadataPolicyAllowed(targetTab);
     const tab = await mapChromeTabOperation(tabId, promisifyChromeCall<ChromeTab>((done) => {
       const result = this.chromeApi.tabs.update(tabId, { active: true });
       done(result as Promise<ChromeTab> | ChromeTab | undefined);
@@ -802,10 +795,13 @@ export class PortusExtensionBridge {
 
   async closeTab(tabId: number): Promise<Record<string, unknown>> {
     await this.ready;
+    const targetTab = await this.getChromeTab(tabId);
+    this.ensureTabMetadataPolicyAllowed(targetTab);
     await mapChromeTabOperation(tabId, promisifyChromeCall<void>((done) => {
       const result = this.chromeApi.tabs.remove(tabId);
       done(result as Promise<void> | void);
     }));
+    this.policyVisibleTabIds.delete(tabId);
     return { closed: true, tabId };
   }
 
@@ -824,7 +820,7 @@ export class PortusExtensionBridge {
     if (useDebugger) {
       data = await this.captureDebuggerScreenshotData(targetTabId);
     } else {
-      const capturePromise = mapChromePermissionOperation("capture visible tab", promisifyChromeCall<string>((done) => {
+      const capturePromise = mapChromeAccessOperation("capture visible tab", promisifyChromeCall<string>((done) => {
         const result = this.chromeApi.tabs.captureVisibleTab(targetTab.windowId, { format: "png" });
         done(result as Promise<string> | string | undefined);
       }));
@@ -862,7 +858,6 @@ export class PortusExtensionBridge {
     const targetTab = tabId === undefined ? await this.getActiveTab() : await this.getChromeTab(tabId);
     const targetTabId = requireTabId(targetTab);
     this.ensureTabPolicyAllowed(targetTab);
-    await this.ensureTabPermission(targetTab);
     let screenshot: ScreenshotResult;
     try {
       screenshot = await this.captureScreenshot(targetTabId, useDebugger);
@@ -902,7 +897,6 @@ export class PortusExtensionBridge {
     const tabId = readNumber(payload, "tabId");
     const targetTab = await this.getChromeTab(tabId);
     this.ensureTabPolicyAllowed(targetTab);
-    await this.ensureTabPermission(targetTab);
     const browserId = this.requireBrowserId();
     const requestInput: Record<string, unknown> = {
       action,
@@ -956,7 +950,6 @@ export class PortusExtensionBridge {
     const tabId = readNumber(payload, "tabId");
     const targetTab = await this.getChromeTab(tabId);
     this.ensureTabPolicyAllowed(targetTab);
-    await this.ensureTabPermission(targetTab);
     const browserId = this.requireBrowserId();
     const request = FillFormRequestSchema.parse({
       action: "fillForm",
@@ -1046,7 +1039,6 @@ export class PortusExtensionBridge {
     const tabId = readNumber(payload, "tabId");
     const targetTab = await this.getChromeTab(tabId);
     this.ensureTabPolicyAllowed(targetTab);
-    await this.ensureTabPermission(targetTab);
 
     const condition: Record<string, unknown> = {};
     copyOptional(payload, condition, "text");
@@ -1099,7 +1091,6 @@ export class PortusExtensionBridge {
     const tabId = readNumber(payload, "tabId");
     const targetTab = await this.getChromeTab(tabId);
     this.ensureTabPolicyAllowed(targetTab);
-    await this.ensureTabPermission(targetTab);
     this.ensureAdvancedBackendAvailable();
     const text = readOptionalString(payload, "text");
     await this.withDebuggerSession(tabId, async (target) => {
@@ -1125,7 +1116,6 @@ export class PortusExtensionBridge {
     const tabId = readNumber(payload, "tabId");
     const targetTab = await this.getChromeTab(tabId);
     this.ensureTabPolicyAllowed(targetTab);
-    await this.ensureTabPermission(targetTab);
     if (!this.consoleCaptureStartedAt) this.consoleCaptureStartedAt = this.now().toISOString();
     const messages = await this.executeConsoleListScript(tabId);
     const limit = readOptionalNumber(payload, "limit") ?? 50;
@@ -1140,7 +1130,6 @@ export class PortusExtensionBridge {
     const tabId = readNumber(payload, "tabId");
     const targetTab = await this.getChromeTab(tabId);
     this.ensureTabPolicyAllowed(targetTab);
-    await this.ensureTabPermission(targetTab);
     await this.executeConsoleClearScript(tabId);
     return { cleared: true, tabId };
   }
@@ -1193,67 +1182,6 @@ export class PortusExtensionBridge {
     }));
   }
 
-  async requestOriginPermission(origin: string, reason?: string): Promise<PermissionRecord> {
-    await this.ready;
-    const normalizedOrigin = normalizeOrigin(origin);
-    if (!normalizedOrigin) {
-      throw createPortusError({
-        code: "PERMISSION_REQUIRED",
-        message: `Portus cannot request host permission for ${origin}.`,
-        details: { origin }
-      });
-    }
-    const pattern = toHostPermissionPattern(normalizedOrigin);
-    this.permissionState = "requested";
-    try {
-      const granted = await this.requestChromeOriginPermission(pattern);
-      if (!granted) {
-        this.permissionState = "denied";
-        throw createPortusError({
-          code: "PERMISSION_REQUIRED",
-          message: `Portus does not have permission for ${normalizedOrigin}.`,
-          details: { origin: normalizedOrigin }
-        });
-      }
-
-      const timestamp = this.now().toISOString();
-      const input: Record<string, unknown> = {
-        origin: normalizedOrigin,
-        granted: true,
-        source: "extension",
-        scope: "origin",
-        requestedAt: timestamp,
-        grantedAt: timestamp
-      };
-      if (reason) input.reason = reason;
-      const record = PermissionRecordSchema.parse(input);
-      this.allowlist.set(normalizedOrigin, record);
-      this.permissionState = "granted";
-      await this.persistAllowlist();
-      return record;
-    } catch (error) {
-      if (this.permissionState !== "denied") this.permissionState = "error";
-      throw normalizeExtensionError(error);
-    }
-  }
-
-  async revokeOriginPermission(origin: string): Promise<Record<string, unknown>> {
-    await this.ready;
-    const normalizedOrigin = normalizeOrigin(origin);
-    if (!normalizedOrigin) {
-      throw createPortusError({
-        code: "PERMISSION_REQUIRED",
-        message: `Portus cannot revoke host permission for ${origin}.`,
-        details: { origin }
-      });
-    }
-    const pattern = toHostPermissionPattern(normalizedOrigin);
-    const revoked = await this.removeChromeOriginPermission(pattern);
-    if (revoked) this.allowlist.delete(normalizedOrigin);
-    this.permissionState = revoked ? "missing" : "error";
-    await this.persistAllowlist();
-    return { revoked, origin: normalizedOrigin };
-  }
 
   getPolicyPreferences(): PolicyPreferences {
     return this.policyPreferences;
@@ -1848,14 +1776,6 @@ export class PortusExtensionBridge {
         return { screenshot: await this.captureScreenshot(readOptionalNumber(message, "tabId")) };
       case "portus.snapshot.capture":
         return { snapshot: await this.captureSnapshot(readOptionalNumber(message, "tabId"), readOptionalSnapshotFilter(message)) };
-      case "portus.permission.request": {
-        const permission = await this.requestOriginPermission(readString(message, "origin"), readOptionalString(message, "reason"));
-        return { permission, status: await this.getStatus() };
-      }
-      case "portus.permission.revoke": {
-        const revoked = await this.revokeOriginPermission(readString(message, "origin"));
-        return { ...revoked, status: await this.getStatus() };
-      }
       case "portus.policy.get":
         return { policy: this.getPolicyPreferences() };
       case "portus.policy.mode.set": {
@@ -2215,12 +2135,6 @@ export class PortusExtensionBridge {
         return { network: await this.listNetworkRecords(request.payload) };
       case "network.get":
         return { network: await this.getNetworkRecord(request.payload) };
-      case "permission.list":
-        return { permissions: [...this.allowlist.values()] };
-      case "permission.request":
-        return { permission: await this.requestOriginPermission(readString(request.payload, "origin"), readOptionalString(request.payload, "reason")) };
-      case "permission.revoke":
-        return await this.revokeOriginPermission(readString(request.payload, "origin"));
       case "policy.get":
         return { policy: this.getPolicyPreferences() };
       case "policy.allow.add":
@@ -2332,14 +2246,12 @@ export class PortusExtensionBridge {
       nativeHostState: this.nativeHostState,
       brokerState: this.brokerState,
       sidePanelOpen: this.sidePanelOpen,
-      permissionState: this.permissionState,
       activeTabOrigin: null,
       activeTabUrl: null,
       browserId: this.browserId,
       nativeHostName: this.nativeHostName,
       terminalNativeHostName: this.terminalNativeHostName,
       terminalNativeHostState: this.terminalNativeHostState,
-      allowlist: [...this.allowlist.values()],
       policyPreferences: this.policyPreferences,
       uxPreferences: this.uxPreferences,
       terminalPreferences: this.terminalPreferences,
@@ -2558,8 +2470,8 @@ export class PortusExtensionBridge {
       extensionId: this.chromeApi.runtime.id ?? "portus-extension-development",
       bridgeStatus: "connected",
       capabilities: this.chromeApi.debugger
-        ? ["tabs", "windows", "screenshots", "snapshots", "actions", "advanced-debugger", "permissions", "events"]
-        : ["tabs", "windows", "screenshots", "snapshots", "actions", "permissions", "events"],
+        ? ["tabs", "windows", "screenshots", "snapshots", "actions", "advanced-debugger", "policy", "events"]
+        : ["tabs", "windows", "screenshots", "snapshots", "actions", "policy", "events"],
       policyPreferences: this.policyPreferences,
       settingsProfileContent: this.createCurrentSettingsProfileContent()
     };
@@ -2574,6 +2486,11 @@ export class PortusExtensionBridge {
     details: Record<string, unknown> = {}
   ): void {
     if (tab.id === undefined) return;
+    if (!this.isTabVisibleToAgent(tab)) {
+      this.policyVisibleTabIds.delete(tab.id);
+      return;
+    }
+    this.policyVisibleTabIds.add(tab.id);
     const portusTab = this.toPortusTab(tab);
     this.publishBrowserEvent(type, {
       ...details,
@@ -2671,47 +2588,41 @@ export class PortusExtensionBridge {
     return this.browserId;
   }
 
-  private async ensureTabPermission(tab: ChromeTab): Promise<void> {
-    const origin = getTabOrigin(tab);
-    const record = this.allowlist.get(origin);
-    if (record?.granted) return;
-    if (this.chromeApi.permissions?.contains) {
-      const granted = await promisifyChromeCall<boolean>((done) => {
-        const result = this.chromeApi.permissions?.contains({ origins: [toHostPermissionPattern(origin)] });
-        done(result as Promise<boolean> | boolean | undefined);
-      });
-      if (granted) return;
-    }
-    throw createPortusError({
-      code: "PERMISSION_REQUIRED",
-      message: `Host permission is required for ${origin}. Use the Portus Browser extension popup to request permission.`,
-      details: { origin }
-    });
-  }
 
   private ensureTabPolicyAllowed(tab: ChromeTab): void {
     const origin = getTabOrigin(tab);
     this.ensureOriginPolicyAllowed(origin);
+    if (tab.id !== undefined) this.policyVisibleTabIds.add(tab.id);
+  }
+
+  private ensureTabMetadataPolicyAllowed(tab: ChromeTab): void {
+    const origin = tab.url ? originFromUrl(tab.url) : null;
+    if (origin) this.ensureOriginPolicyAllowed(origin);
+    if (tab.id !== undefined) this.policyVisibleTabIds.add(tab.id);
+  }
+
+  private isTabVisibleToAgent(tab: ChromeTab): boolean {
+    const origin = tab.url ? originFromUrl(tab.url) : null;
+    if (!origin) return true;
+    return this.isOriginPolicyAllowed(origin);
+  }
+
+  private isOriginPolicyAllowed(origin: string): boolean {
+    if (this.policyPreferences.originPolicyEnabled === false) return true;
+    if (this.policyPreferences.policyMode === "blocklist") {
+      return !this.policyPreferences.blockedOrigins.some((entry) => policyOriginMatches(entry.origin, origin));
+    }
+    return this.policyPreferences.allowedOrigins.some((entry) => policyOriginMatches(entry.origin, origin));
   }
 
   private ensureOriginPolicyAllowed(origin: string): void {
-    if (this.policyPreferences.originPolicyEnabled === false) return;
-    if (this.policyPreferences.policyMode === "blocklist") {
-      if (this.policyPreferences.blockedOrigins.some((entry) => policyOriginMatches(entry.origin, origin))) {
-        throw createPortusError({
-          code: "ORIGIN_BLOCKED",
-          message: `Portus policy blocks browser control for ${origin}.`,
-          details: { origin }
-        });
-      }
-      return;
-    }
-
-    if (this.policyPreferences.allowedOrigins.some((entry) => policyOriginMatches(entry.origin, origin))) return;
-
+    if (this.isOriginPolicyAllowed(origin)) return;
+    const message = this.policyPreferences.policyMode === "blocklist"
+      ? `Portus policy blocks browser control for ${origin}.`
+      : `Portus policy does not allow browser control for ${origin}.`;
     throw createPortusError({
       code: "ORIGIN_BLOCKED",
-      message: `Portus policy does not allow browser control for ${origin}.`,
+      message,
       details: { origin }
     });
   }
@@ -2732,7 +2643,7 @@ export class PortusExtensionBridge {
         message: "Chrome scripting API is unavailable."
       });
     }
-    const results = await mapChromePermissionOperation("execute snapshot script", promisifyChromeCall<Array<{ result?: unknown }>>((done) => {
+    const results = await mapChromeAccessOperation("execute snapshot script", promisifyChromeCall<Array<{ result?: unknown }>>((done) => {
       const result = this.chromeApi.scripting?.executeScript({
         target: { tabId },
         func: capturePortusSnapshotPayload
@@ -2756,7 +2667,7 @@ export class PortusExtensionBridge {
         message: "Chrome scripting API is unavailable."
       });
     }
-    const results = await mapChromePermissionOperation("execute page wait script", promisifyChromeCall<Array<{ result?: unknown }>>((done) => {
+    const results = await mapChromeAccessOperation("execute page wait script", promisifyChromeCall<Array<{ result?: unknown }>>((done) => {
       const result = this.chromeApi.scripting?.executeScript({
         target: { tabId },
         func: evaluatePortusPageWait,
@@ -2781,7 +2692,7 @@ export class PortusExtensionBridge {
         message: "Chrome scripting API is unavailable."
       });
     }
-    const results = await mapChromePermissionOperation("execute console capture script", promisifyChromeCall<Array<{ result?: unknown }>>((done) => {
+    const results = await mapChromeAccessOperation("execute console capture script", promisifyChromeCall<Array<{ result?: unknown }>>((done) => {
       const result = this.chromeApi.scripting?.executeScript({
         target: { tabId },
         func: capturePortusConsoleMessages,
@@ -2800,7 +2711,7 @@ export class PortusExtensionBridge {
         message: "Chrome scripting API is unavailable."
       });
     }
-    await mapChromePermissionOperation("execute console clear script", promisifyChromeCall<Array<{ result?: unknown }>>((done) => {
+    await mapChromeAccessOperation("execute console clear script", promisifyChromeCall<Array<{ result?: unknown }>>((done) => {
       const result = this.chromeApi.scripting?.executeScript({
         target: { tabId },
         func: clearPortusConsoleMessages,
@@ -2823,7 +2734,7 @@ export class PortusExtensionBridge {
         message: "Chrome scripting API is unavailable."
       });
     }
-    const results = await mapChromePermissionOperation("execute action script", promisifyChromeCall<Array<{ result?: unknown }>>((done) => {
+    const results = await mapChromeAccessOperation("execute action script", promisifyChromeCall<Array<{ result?: unknown }>>((done) => {
       const result = this.chromeApi.scripting?.executeScript({
         target: { tabId },
         func: performPortusDomAction,
@@ -3000,35 +2911,6 @@ export class PortusExtensionBridge {
     return `req_${suffix}`;
   }
 
-  private async requestChromeOriginPermission(pattern: string): Promise<boolean> {
-    if (!this.chromeApi.permissions) return false;
-    return promisifyChromeCall<boolean>((done) => {
-      const result = this.chromeApi.permissions?.request({ origins: [pattern] });
-      done(result as Promise<boolean> | boolean | undefined);
-    });
-  }
-
-  private async getOriginPermissionState(origin: string): Promise<PermissionState> {
-    if (this.allowlist.has(origin)) return "granted";
-    if (!this.chromeApi.permissions) return "missing";
-    try {
-      const granted = await promisifyChromeCall<boolean>((done) => {
-        const result = this.chromeApi.permissions?.contains({ origins: [toHostPermissionPattern(origin)] });
-        done(result as Promise<boolean> | boolean | undefined);
-      });
-      return granted ? "granted" : "missing";
-    } catch {
-      return "error";
-    }
-  }
-
-  private async removeChromeOriginPermission(pattern: string): Promise<boolean> {
-    if (!this.chromeApi.permissions) return false;
-    return promisifyChromeCall<boolean>((done) => {
-      const result = this.chromeApi.permissions?.remove({ origins: [pattern] });
-      done(result as Promise<boolean> | boolean | undefined);
-    });
-  }
 
   private createPolicyEntry(
     origin: string,
@@ -3047,7 +2929,6 @@ export class PortusExtensionBridge {
   }
 
   private async restoreExtensionState(): Promise<void> {
-    await this.restoreAllowlist();
     await this.restorePolicyPreferences();
     await this.restoreUxPreferences();
     await this.restoreTerminalPreferences();
@@ -3055,29 +2936,6 @@ export class PortusExtensionBridge {
     await this.updateActionState();
   }
 
-  private async restoreAllowlist(): Promise<void> {
-    const storage = this.chromeApi.storage?.local;
-    if (!storage) return;
-    const stored = await promisifyChromeCall<Record<string, unknown>>((done) => {
-      const result = storage.get(ALLOWLIST_STORAGE_KEY);
-      done(result as Promise<Record<string, unknown>> | Record<string, unknown> | undefined);
-    });
-    const records = stored[ALLOWLIST_STORAGE_KEY];
-    if (!Array.isArray(records)) return;
-    for (const record of records) {
-      const parsed = PermissionRecordSchema.safeParse(record);
-      if (parsed.success) this.allowlist.set(parsed.data.origin, parsed.data);
-    }
-  }
-
-  private async persistAllowlist(): Promise<void> {
-    const storage = this.chromeApi.storage?.local;
-    if (!storage) return;
-    await promisifyChromeCall<void>((done) => {
-      const result = storage.set({ [ALLOWLIST_STORAGE_KEY]: [...this.allowlist.values()] });
-      done(result as Promise<void> | void);
-    });
-  }
 
   private async restorePolicyPreferences(): Promise<void> {
     const storage = this.chromeApi.storage?.local;
@@ -3275,14 +3133,14 @@ async function mapChromeTabOperation<T>(tabId: number, operation: Promise<T>): P
   }
 }
 
-async function mapChromePermissionOperation<T>(operation: string, operationPromise: Promise<T>): Promise<T> {
+async function mapChromeAccessOperation<T>(operation: string, operationPromise: Promise<T>): Promise<T> {
   try {
     return await operationPromise;
   } catch (error) {
     if (isPortusError(error)) throw error;
     throw createPortusError({
-      code: "PERMISSION_REQUIRED",
-      message: `Chrome blocked ${operation}. Use the Portus Browser extension popup to request permission for the active origin.`,
+      code: "BROWSER_ACCESS_DENIED",
+      message: `Chrome denied access while attempting to ${operation}.`,
       details: {
         operation,
         reason: error instanceof Error ? error.message : "Chrome operation failed."
@@ -3336,11 +3194,6 @@ function readGlobalChromeApi(): PortusChromeApi {
   return maybeChrome as PortusChromeApi;
 }
 
-function toHostPermissionPattern(origin: string): string {
-  if (origin.endsWith("/*")) return origin;
-  const parsed = new URL(origin);
-  return `${parsed.origin}/*`;
-}
 
 function normalizeOrigin(value: string): string | null {
   const pattern = normalizePolicyOriginPattern(value);
@@ -3574,16 +3427,16 @@ function inferImageMimeType(data: string): string {
 function getTabOrigin(tab: ChromeTab): string {
   if (!tab.url) {
     throw createPortusError({
-      code: "PERMISSION_REQUIRED",
-      message: "Tab URL is unavailable for permission validation."
+      code: "BROWSER_ACCESS_DENIED",
+      message: "Tab URL is unavailable for browser access validation."
     });
   }
   try {
     const url = new URL(tab.url);
     if (url.protocol !== "http:" && url.protocol !== "https:") {
       throw createPortusError({
-        code: "PERMISSION_REQUIRED",
-        message: `Host permission is unavailable for ${url.protocol} pages.`,
+        code: "BROWSER_ACCESS_DENIED",
+        message: `Browser access is unavailable for ${url.protocol} pages.`,
         details: { url: tab.url }
       });
     }
@@ -3591,8 +3444,8 @@ function getTabOrigin(tab: ChromeTab): string {
   } catch (error) {
     if (isPortusError(error)) throw error;
     throw createPortusError({
-      code: "PERMISSION_REQUIRED",
-      message: "Tab URL is invalid for permission validation.",
+      code: "BROWSER_ACCESS_DENIED",
+      message: "Tab URL is invalid for browser access validation.",
       details: { url: tab.url }
     });
   }

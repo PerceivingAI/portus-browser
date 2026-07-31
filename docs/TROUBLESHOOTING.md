@@ -69,6 +69,20 @@ Remember:
 - unsaved local changes do not propagate
 - `Default_Profile` is read-only
 
+## A Command Is Blocked By Policy
+
+`ORIGIN_BLOCKED` means the active browser profile's origin policy denied the destination or current page. Check the Allowed and Blocked lists and the selected blocklist/allowlist mode in Settings.
+
+`COMMAND_DISABLED_BY_POLICY` means that command is disabled under **CLI Commands** in Settings.
+
+Portus does not use a separate Chrome site-permission request workflow. Do not look for a permission prompt or retry a removed `permissions` CLI command.
+
+## Browser Access Is Denied
+
+`BROWSER_ACCESS_DENIED` means the target is not controllable through the Extension. Protected browser pages, non-HTTP(S) URLs, missing tab URLs, and Chrome API access failures can produce this error.
+
+Select a normal HTTP(S) tab and retry only when doing so still matches the intended task.
+
 ## Startup Command Runs When It Should Not
 
 The default startup command is empty.

@@ -82,8 +82,7 @@ export const ExtensionConfigSchema = z.object({
   enableTerminalPanel: z.boolean().default(true),
   defaultPanelView: SidePanelDefaultViewSchema.default("terminal"),
   iconClickBehavior: IconClickBehaviorSchema.default("popup"),
-  browserLabel: z.string().min(1).nullable().default(null),
-  permissionsMode: z.literal("minimal").default("minimal")
+  browserLabel: z.string().min(1).nullable().default(null)
 }).strict();
 
 export const SessionConfigSchema = z.object({
@@ -120,8 +119,7 @@ export const SecurityConfigSchema = z.object({
   allowDebuggerApiRequiresConfirmation: z.literal(true).default(true)
 }).strict();
 
-export const PermissionsConfigSchema = z.object({
-  hostPermissionMode: z.literal("optional-per-site").default("optional-per-site"),
+export const PolicyConfigSchema = z.object({
   defaultPolicyMode: z.enum(["blocklist", "allowlist"]).default("blocklist"),
   defaultAllowlist: z.array(OriginSchema).default([]),
   defaultBlocklist: z.array(OriginSchema).default([]),
@@ -129,18 +127,13 @@ export const PermissionsConfigSchema = z.object({
     ...DEFAULT_COMMAND_POLICY,
     ...policy
   })),
-  allowlistStorage: z.literal("user-config").default("user-config"),
-  blocklistStorage: z.literal("user-config").default("user-config"),
-  activeTabFallback: z.boolean().default(true),
-  requireConfirmationForNewOrigins: z.boolean().default(true),
   sessionStepRetentionLimit: z.number().int().min(0).max(1000).default(10)
 }).strict();
 
 export const EventsConfigSchema = z.object({
   enabled: z.boolean().default(true),
   retentionLimit: z.number().int().nonnegative().default(1000),
-  includeSnapshotInvalidation: z.boolean().default(true),
-  includePermissionEvents: z.boolean().default(true)
+  includeSnapshotInvalidation: z.boolean().default(true)
 }).strict();
 
 export const LoggingConfigSchema = z.object({
@@ -176,7 +169,7 @@ const DEFAULT_SESSION_CONFIG = SessionConfigSchema.parse({});
 const DEFAULT_TAB_CONFIG = TabConfigSchema.parse({});
 const DEFAULT_COMMAND_CONFIG = CommandConfigSchema.parse({});
 const DEFAULT_SECURITY_CONFIG = SecurityConfigSchema.parse({});
-const DEFAULT_PERMISSIONS_CONFIG = PermissionsConfigSchema.parse({});
+const DEFAULT_POLICY_CONFIG = PolicyConfigSchema.parse({});
 const DEFAULT_EVENTS_CONFIG = EventsConfigSchema.parse({});
 const DEFAULT_LOGGING_CONFIG = LoggingConfigSchema.parse({});
 const DEFAULT_TERMINAL_CONFIG = TerminalConfigSchema.parse({});
@@ -190,7 +183,7 @@ export const PortusConfigSchema = z.object({
   tabs: TabConfigSchema.optional().default(DEFAULT_TAB_CONFIG),
   commands: CommandConfigSchema.optional().default(DEFAULT_COMMAND_CONFIG),
   security: SecurityConfigSchema.optional().default(DEFAULT_SECURITY_CONFIG),
-  permissions: PermissionsConfigSchema.optional().default(DEFAULT_PERMISSIONS_CONFIG),
+  policy: PolicyConfigSchema.optional().default(DEFAULT_POLICY_CONFIG),
   events: EventsConfigSchema.optional().default(DEFAULT_EVENTS_CONFIG),
   logging: LoggingConfigSchema.optional().default(DEFAULT_LOGGING_CONFIG),
   terminal: TerminalConfigSchema.optional().default(DEFAULT_TERMINAL_CONFIG)
@@ -212,7 +205,7 @@ export type SessionConfig = z.infer<typeof SessionConfigSchema>;
 export type TabConfig = z.infer<typeof TabConfigSchema>;
 export type CommandConfig = z.infer<typeof CommandConfigSchema>;
 export type SecurityConfig = z.infer<typeof SecurityConfigSchema>;
-export type PermissionsConfig = z.infer<typeof PermissionsConfigSchema>;
+export type PolicyConfig = z.infer<typeof PolicyConfigSchema>;
 export type EventsConfig = z.infer<typeof EventsConfigSchema>;
 export type LoggingConfig = z.infer<typeof LoggingConfigSchema>;
 export type TerminalConfig = z.infer<typeof TerminalConfigSchema>;

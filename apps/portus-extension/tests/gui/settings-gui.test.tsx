@@ -750,7 +750,6 @@ function createStatus({
     browserId: bridgeState === "connected" ? "br_test" : null,
     nativeHostName: "com.portus.browser",
     nativeHostState: bridgeState === "connected" ? "connected" : "disconnected",
-    permissionState: "granted",
     policyPreferences: policy,
     settingsProfiles: {
       activeProfileId: activeMetadata.profileId,

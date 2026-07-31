@@ -17,8 +17,6 @@ interface RuntimeSuccess {
     ux?: unknown;
     settings?: unknown;
     terminal?: unknown;
-    permission?: unknown;
-    revoked?: unknown;
   };
 }
 

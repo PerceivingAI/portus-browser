@@ -187,8 +187,7 @@ export function PopupApp(): React.JSX.Element {
           >
             <StatusGrid
               rows={[
-                { label: "Permission", value: status?.permissionState ?? "unknown" },
-                { label: "Portus Policy", value: status ? describeOriginPolicy(status) : "neutral" }
+                { label: "Agent Access", value: status ? describeOriginPolicy(status) : "unknown" }
               ]}
             />
           </Section>
