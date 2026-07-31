@@ -86,6 +86,7 @@ describe("Settings view rendered GUI", () => {
     expect(screen.getByRole("heading", { name: "Terminal" })).toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "Enable Terminal" })).toBeChecked();
     expect(screen.getAllByRole("button", { name: "Defaults" }).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByRole("checkbox", { name: "Prefer Debugger/CDP Backend" })).not.toBeChecked();
   });
 
   test("selects existing profiles and creates the next profile from the dropdown", async () => {

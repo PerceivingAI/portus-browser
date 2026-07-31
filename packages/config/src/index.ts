@@ -107,9 +107,7 @@ export const SecurityConfigSchema = z.object({
   requireLocalhost: z.literal(true).default(true),
   requireBrokerToken: z.boolean().default(true),
   tokenStorage: z.literal("user-config").default("user-config"),
-  allowPageScriptExecution: z.literal(false).default(false),
-  allowDebuggerApi: z.literal(false).default(false),
-  allowDebuggerApiRequiresConfirmation: z.literal(true).default(true)
+  allowPageScriptExecution: z.literal(false).default(false)
 }).strict();
 
 export const PolicyConfigSchema = z.object({

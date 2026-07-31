@@ -1098,7 +1098,7 @@ export class PortusExtensionBridge {
     const tabId = readNumber(payload, "tabId");
     const targetTab = await this.getChromeTab(tabId);
     this.ensureTabPolicyAllowed(targetTab);
-    this.ensureAdvancedBackendAvailable();
+    this.ensureDebuggerApiAvailable();
     const text = readOptionalString(payload, "text");
     await this.withDebuggerSession(tabId, async (target) => {
       await this.sendDebuggerCommand(target, "Page.enable");
@@ -2795,13 +2795,7 @@ export class PortusExtensionBridge {
     return this.policyPreferences.advancedBackendEnabled === true;
   }
 
-  private ensureAdvancedBackendAvailable(): void {
-    if (this.policyPreferences.advancedBackendEnabled !== true) {
-      throw createPortusError({
-        code: "CAPABILITY_UNAVAILABLE",
-        message: "Advanced debugger backend is disabled. Enable it in the Portus Browser side panel."
-      });
-    }
+  private ensureDebuggerApiAvailable(): void {
     if (!this.chromeApi.debugger) {
       throw createPortusError({
         code: "CAPABILITY_UNAVAILABLE",
@@ -2815,7 +2809,7 @@ export class PortusExtensionBridge {
     sourceElement: SnapshotElement | null,
     targetElement: SnapshotElement | null
   ): Promise<ActionResult> {
-    this.ensureAdvancedBackendAvailable();
+    this.ensureDebuggerApiAvailable();
     if (!sourceElement || !targetElement) {
       throw createPortusError({
         code: "SNAPSHOT_STALE",
@@ -2876,7 +2870,7 @@ export class PortusExtensionBridge {
     operation: (target: ChromeDebuggerTarget) => Promise<T>,
     reason: string
   ): Promise<T> {
-    this.ensureAdvancedBackendAvailable();
+    this.ensureDebuggerApiAvailable();
     const target = { tabId };
     let attached = false;
     try {

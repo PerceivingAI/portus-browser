@@ -224,7 +224,7 @@ portus-browser dialog dismiss --browser 1 --tab-id <tabId> --json
 portus-browser dialog accept --browser 1 --tab-id <tabId> --text "value" --json
 ```
 
-Dialog commands require the user to enable the advanced debugger backend and command policy.
+Dialog commands require Chrome debugger API availability and command policy. The advanced debugger preference controls automatic backend selection; explicit debugger commands do not depend on it.
 
 ## Console And Network Diagnostics
 

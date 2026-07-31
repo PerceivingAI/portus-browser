@@ -949,6 +949,24 @@ test("captures screenshots and reports activation side effects", async () => {
   assert.deepEqual(fixture.capturedWindows, [11]);
 });
 
+test("honors explicit debugger screenshots without the automatic backend preference", async () => {
+  const fixture = createChromeFixture({
+    sendDebuggerCommand(_target, method) {
+      if (method === "Page.captureScreenshot") return Promise.resolve({ data: "debugger-image" });
+      return Promise.resolve({});
+    }
+  });
+  const bridge = createConnectedBridge(fixture);
+
+  const screenshot = await bridge.captureScreenshot(1, true);
+
+  assert.equal(screenshot.data, "data:image/png;base64,debugger-image");
+  assert.deepEqual(fixture.capturedWindows, []);
+  assert.deepEqual(fixture.debuggerCommands.map((command) => command.method), ["Page.captureScreenshot"]);
+  assert.deepEqual(fixture.debuggerAttaches, [{ target: { tabId: 1 }, version: "1.3" }]);
+  assert.deepEqual(fixture.debuggerDetaches, [{ target: { tabId: 1 } }]);
+});
+
 test("captures snapshots with actionable elements", async () => {
   const fixture = createChromeFixture();
   const bridge = createConnectedBridge(fixture);
@@ -1168,10 +1186,9 @@ test("surfaces unsupported DOM action failures", async () => {
   }), { code: "ACTION_UNSUPPORTED" });
 });
 
-test("keeps advanced debugger backend disabled until GUI preference enables it", async () => {
-  const fixture = createChromeFixture();
+test("rejects debugger commands only when the Chrome debugger API is unavailable", async () => {
+  const fixture = createChromeFixture({ debugger: false });
   const bridge = createConnectedBridge(fixture);
-  await bridge.setCommandPolicyEnabled("dialog.dismiss", true, false);
 
   await assert.rejects(() => bridge.handleDialog("dismiss", { tabId: 1 }), {
     code: "CAPABILITY_UNAVAILABLE"
@@ -1179,11 +1196,10 @@ test("keeps advanced debugger backend disabled until GUI preference enables it",
   assert.equal(fixture.debuggerAttaches.length, 0);
 });
 
-test("handles browser dialogs through temporary debugger sessions when enabled", async () => {
+test("handles browser dialogs independently of the automatic backend preference", async () => {
   const fixture = createChromeFixture();
   const bridge = createConnectedBridge(fixture);
   await bridge.setCommandPolicyEnabled("dialog.accept", true, false);
-  await bridge.setAdvancedBackendEnabled(true, false);
 
   const result = await bridge.handleDialog("accept", { tabId: 1, text: "yes" });
 
@@ -1258,7 +1274,7 @@ test("uses debugger input for drag when advanced backend is enabled", async () =
   assert.deepEqual(fixture.debuggerDetaches, [{ target: { tabId: 1 } }]);
 });
 
-test("detaches debugger sessions when an advanced command fails after attach", async () => {
+test("detaches debugger sessions when a debugger command fails after attach", async () => {
   const fixture = createChromeFixture({
     sendDebuggerCommand(_target, method) {
       if (method === "Page.handleJavaScriptDialog") {
@@ -1269,7 +1285,6 @@ test("detaches debugger sessions when an advanced command fails after attach", a
   });
   const bridge = createConnectedBridge(fixture);
   await bridge.setCommandPolicyEnabled("dialog.dismiss", true, false);
-  await bridge.setAdvancedBackendEnabled(true, false);
 
   await assert.rejects(() => bridge.handleDialog("dismiss", { tabId: 1 }), {
     code: "CAPABILITY_UNAVAILABLE"

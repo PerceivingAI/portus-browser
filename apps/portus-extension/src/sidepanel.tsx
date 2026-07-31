@@ -820,13 +820,13 @@ function SettingsPanel({
             <Checkbox
               checked={policy?.advancedBackendEnabled === true}
               disabled={busy || !policy}
-              onCheckedChange={(value) => void mutatePolicy({ type: "portus.advanced-backend.set", enabled: value === true }, `Advanced debugger backend ${value === true ? "enabled" : "disabled"}.`)}
+              onCheckedChange={(value) => void mutatePolicy({ type: "portus.advanced-backend.set", enabled: value === true }, `Advanced debugger preference ${value === true ? "enabled" : "disabled"}.`)}
             />
-            <span>Enable Debugger/CDP Backend</span>
+            <span>Prefer Debugger/CDP Backend</span>
           </label>
           <FieldDescription className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-[var(--portus-subsection-gap)] mb-[var(--portus-section-gap-large)]">
             <InfoIcon aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
-            <span className="leading-none">Required for native browser dialogs and CDP-backed input. Chrome may show debugger-style warnings while it is used.</span>
+            <span className="leading-none">Uses CDP-backed input automatically when available. Explicit debugger commands do not depend on this preference. Chrome may show debugger-style warnings while CDP is used.</span>
           </FieldDescription>
         </div>
       </Section>

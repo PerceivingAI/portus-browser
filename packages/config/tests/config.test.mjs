@@ -15,10 +15,9 @@ import {
   validateConfig
 } from "../dist/index.js";
 
-test("default config is valid and keeps v1 security constraints", () => {
+test("default config is valid and keeps fixed security constraints", () => {
   assert.equal(DEFAULT_PORTUS_CONFIG.broker.transport, "local");
   assert.equal(DEFAULT_PORTUS_CONFIG.broker.allowRemoteConnections, false);
-  assert.equal(DEFAULT_PORTUS_CONFIG.security.allowDebuggerApi, false);
   assert.equal(DEFAULT_PORTUS_CONFIG.extension.bridgeAutoConnect, true);
   assert.equal(DEFAULT_PORTUS_CONFIG.extension.enableTerminalPanel, true);
   assert.equal(DEFAULT_PORTUS_CONFIG.terminal.enabled, true);
@@ -61,19 +60,19 @@ test("arrays replace instead of concatenate", () => {
   assert.equal(parsed.policy.sessionStepRetentionLimit, 25);
 });
 
-test("unknown keys and disabled v1 security features fail validation", () => {
+test("unknown keys and fixed security constraints fail validation", () => {
   assert.equal(PortusConfigSchema.safeParse({ unknown: true }).success, false);
-  assert.equal(PortusConfigSchema.safeParse({ security: { allowDebuggerApi: true } }).success, false);
+  assert.equal(PortusConfigSchema.safeParse({ security: { allowPageScriptExecution: true } }).success, false);
   assert.equal(PortusConfigSchema.safeParse({ broker: { allowRemoteConnections: true } }).success, false);
   assert.equal(PortusConfigSchema.safeParse({ permissions: {} }).success, false);
   assert.equal(PortusConfigSchema.safeParse({ extension: { permissionsMode: "minimal" } }).success, false);
 });
 
 test("invalid config maps to typed Portus error", () => {
-  const result = validateConfig({ security: { allowDebuggerApi: true } });
+  const result = validateConfig({ security: { allowPageScriptExecution: true } });
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "CONFIG_INVALID");
-  assert.equal(result.error.details.issues[0].configPath, "security.allowDebuggerApi");
+  assert.equal(result.error.details.issues[0].configPath, "security.allowPageScriptExecution");
 });
 
 test("environment overrides are parsed and validated", () => {

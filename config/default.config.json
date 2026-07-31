@@ -64,9 +64,7 @@
     "requireLocalhost": true,
     "requireBrokerToken": true,
     "tokenStorage": "user-config",
-    "allowPageScriptExecution": false,
-    "allowDebuggerApi": false,
-    "allowDebuggerApiRequiresConfirmation": true
+    "allowPageScriptExecution": false
   },
   "policy": {
     "defaultPolicyMode": "blocklist",
