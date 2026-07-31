@@ -71,7 +71,7 @@ Remember:
 
 ## A Command Is Blocked By Policy
 
-`ORIGIN_BLOCKED` means the active browser profile's origin policy denied the destination or current page. Check the Allowed and Blocked lists and the selected blocklist/allowlist mode in Settings.
+`NAVIGATION_BLOCKED` means the active browser profile's navigation policy denied the destination or current URL. Check the Allowed and Blocked rules, each rule's match type, and the selected blocklist/allowlist mode in Settings.
 
 `COMMAND_DISABLED_BY_POLICY` means that command is disabled under **CLI Commands** in Settings.
 
@@ -79,9 +79,9 @@ Portus does not use a separate Chrome site-permission request workflow. Do not l
 
 ## Browser Access Is Denied
 
-`BROWSER_ACCESS_DENIED` means the target is not controllable through the Extension. Protected browser pages, non-HTTP(S) URLs, missing tab URLs, and Chrome API access failures can produce this error.
+`BROWSER_ACCESS_DENIED` means the browser or Extension cannot control the target. Protected browser pages, missing tab URLs, unavailable host access, and Chrome API access failures can produce this error.
 
-Select a normal HTTP(S) tab and retry only when doing so still matches the intended task.
+Select another tab or URL only when doing so still matches the user's intended task. Do not replace a requested non-HTTP(S) URL merely because of its scheme; Portus navigation policy supports user-controlled rules for any browser-supported scheme.
 
 ## Startup Command Runs When It Should Not
 

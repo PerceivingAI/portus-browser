@@ -13,9 +13,9 @@ A settings profile's content contains the user-modifiable values in the Settings
 - selected terminal
 - manual terminal path
 - optional startup command
-- origin policy enable setting
-- allowlist URLs
-- blocklist URLs
+- navigation policy enable setting
+- allowed navigation rules
+- blocked navigation rules
 - command policy settings
 - retention settings
 - panel and extension-icon preferences
@@ -83,25 +83,36 @@ If Chrome has unsaved local changes, those unsaved changes are not part of the s
 
 The Broker does not use profile management as a separate runtime policy system. Runtime commands use the current effective settings of the target browser session.
 
-## Origin Policy
+## Navigation Policy
 
-Origin Policy is the agent-authorization boundary for URL access.
+Navigation Policy is the user-controlled agent-authorization boundary for browser URLs.
 
-The Extension permanently has Chrome host access for normal web pages through `"<all_urls>"`. Portus does not maintain a second site-by-site Chrome permission model and does not request or revoke host access when policy lists change.
+The Extension permanently has Chrome host access for normal web pages through `"<all_urls>"`. Portus does not maintain a second site-by-site Chrome permission model and does not request or revoke host access when policy rules change.
 
 The Settings view includes:
 
-- `Enable Policies`
-- `Clear URLs`
+- `Enable Policy`
+- `Clear Rules`
 - `Blocklist` and `Allowlist` modes
-- Allowed and Blocked origin lists
+- a `Match` selector and `Value` field
+- Allowed and Blocked rule lists
 - per-command controls under `CLI Commands`
 
-`Enable Policies` is on by default. In blocklist mode, an origin is allowed unless it matches the Blocked list. In allowlist mode, an origin is blocked unless it matches the Allowed list. Turning policy off bypasses both URL lists without deleting them or disabling command policy.
+Rule match types are:
 
-The popup and Settings view report the current origin as `Agent Access`: `allowed`, `blocked`, `disabled`, or `unsupported`.
+- `Scheme`: every URL with the selected scheme, such as `file:`
+- `Authority`: every URL with the selected scheme, host, and port, such as `https://example.com`
+- `Host Wildcard`: an apex host and its subdomains, optionally constrained to a scheme, such as `*.example.com` or `https://*.example.com`
+- `Exact URL`: one complete normalized URL, such as `chrome://settings/`
+- `URL Prefix`: every normalized URL beginning with a value, such as `file:///C:/Projects/`
 
-`Clear URLs` clears all URLs from the currently selected allow or block list after confirmation. These settings are part of the active settings profile.
+Portus does not impose a built-in HTTP(S)-only or scheme allowlist. The user controls the rules, and the browser remains the final authority on URLs it supports or protects.
+
+`Enable Policy` is on by default. In blocklist mode, a URL is allowed unless it matches a Blocked rule. In allowlist mode, a URL is blocked unless it matches an Allowed rule. Turning navigation policy off bypasses both rule lists without deleting them or disabling command policy.
+
+The popup and Settings view report `Agent Access` for the current URL as `allowed`, `blocked`, `disabled`, or `unsupported`.
+
+`Clear Rules` clears the currently selected allow or block rule list after confirmation. These settings are part of the active settings profile.
 
 ## Rename And Delete
 
@@ -121,5 +132,5 @@ Settings import and export work with profiles.
 
 Export includes the profile catalog and profile names.
 
-Import accepts the profile catalog shape used by the current app.
+Import accepts the version 2 profile catalog shape used by the current app. Portus migrates persisted version 1 origin lists to version 2 authority and wildcard-host navigation rules when loading existing local state.
 

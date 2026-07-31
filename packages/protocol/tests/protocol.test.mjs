@@ -9,6 +9,10 @@ import {
   RegistrationResultSchema,
   SessionStepSchema,
   PolicyPreferencesSchema,
+  migrateLegacyPolicyPreferences,
+  migrateLegacySettingsProfileCatalog,
+  navigationPolicyAllowsUrl,
+  normalizeNavigationRulePattern,
   RequestEnvelopeSchema,
   safeParseProtocolMessage,
   ResponseEnvelopeSchema,
@@ -20,7 +24,7 @@ const now = "2026-04-28T00:00:00.000Z";
 
 test("validates request envelopes", () => {
   const request = RequestEnvelopeSchema.parse({
-    protocolVersion: "1",
+    protocolVersion: "2",
     requestId: "req_001",
     kind: "request",
     type: "browser.list",
@@ -28,9 +32,9 @@ test("validates request envelopes", () => {
     auth: { brokerToken: "test-token" }
   });
 
-  assert.equal(request.protocolVersion, "1");
+  assert.equal(request.protocolVersion, "2");
   assert.equal(request.auth.brokerToken, "test-token");
-  assert.throws(() => RequestEnvelopeSchema.parse({ ...request, protocolVersion: "2" }));
+  assert.throws(() => RequestEnvelopeSchema.parse({ ...request, protocolVersion: "1" }));
   assert.throws(() => RequestEnvelopeSchema.parse({ ...request, auth: { brokerToken: "test-token", extra: true } }));
 });
 
@@ -110,7 +114,7 @@ test("maps invalid protocol messages to typed Portus errors", () => {
   assert.equal(missingVersion.error.code, "INVALID_MESSAGE");
 
   const unsupported = safeParseProtocolMessage(RequestEnvelopeSchema, {
-    protocolVersion: "2",
+    protocolVersion: "1",
     requestId: "req_001",
     kind: "request",
     type: "browser.list",
@@ -122,7 +126,7 @@ test("maps invalid protocol messages to typed Portus errors", () => {
 
 test("validates success and error response envelopes", () => {
   assert.equal(ResponseEnvelopeSchema.parse({
-    protocolVersion: "1",
+    protocolVersion: "2",
     requestId: "req_001",
     kind: "response",
     ok: true,
@@ -130,7 +134,7 @@ test("validates success and error response envelopes", () => {
   }).ok, true);
 
   assert.equal(ResponseEnvelopeSchema.parse({
-    protocolVersion: "1",
+    protocolVersion: "2",
     requestId: "req_001",
     kind: "response",
     ok: false,
@@ -145,32 +149,46 @@ test("validates success and error response envelopes", () => {
 test("exports all documented error codes", () => {
   assert.equal(ErrorCodeSchema.options.length, 23);
   assert.ok(ErrorCodeSchema.options.includes("BROWSER_ACCESS_DENIED"));
-  assert.ok(ErrorCodeSchema.options.includes("ORIGIN_BLOCKED"));
+  assert.ok(ErrorCodeSchema.options.includes("NAVIGATION_BLOCKED"));
   assert.ok(ErrorCodeSchema.options.includes("COMMAND_DISABLED_BY_POLICY"));
   assert.ok(ErrorCodeSchema.options.includes("DISMISS_TARGET_NOT_FOUND"));
   assert.ok(ErrorCodeSchema.options.includes("TERMINAL_UNAVAILABLE"));
 });
 
-test("validates Portus policy preferences", () => {
+test("validates and evaluates navigation policy preferences", () => {
   const policy = PolicyPreferencesSchema.parse({
-    allowedOrigins: [{
-      origin: "https://example.com",
+    allowedNavigationRules: [{
+      match: "authority",
+      value: "https://example.com",
       source: "extension",
       updatedAt: now
     }],
-    blockedOrigins: [{
-      origin: "*.blocked.example",
+    blockedNavigationRules: [{
+      match: "scheme",
+      value: "file:",
       source: "cli",
       updatedAt: now,
       reason: "manual block"
+    }, {
+      match: "host-wildcard",
+      value: "*.blocked.example",
+      source: "cli"
+    }, {
+      match: "url-exact",
+      value: "chrome://settings/",
+      source: "extension"
+    }, {
+      match: "url-prefix",
+      value: "file:///C:/Projects/",
+      source: "extension"
     }],
     sessionStepRetentionLimit: 25
   });
 
-  assert.equal(policy.allowedOrigins[0].origin, "https://example.com");
-  assert.equal(policy.blockedOrigins[0].origin, "*.blocked.example");
-  assert.equal(policy.blockedOrigins[0].source, "cli");
-  assert.equal(policy.originPolicyEnabled, true);
+  assert.equal(policy.allowedNavigationRules[0].value, "https://example.com");
+  assert.equal(policy.blockedNavigationRules[0].value, "file:");
+  assert.equal(policy.blockedNavigationRules[0].source, "cli");
+  assert.equal(policy.navigationPolicyEnabled, true);
   assert.equal(policy.policyMode, "blocklist");
   assert.equal(policy.commandPolicy["policy.allow.add"], false);
   assert.equal(policy.commandPolicy["event.subscribe"], true);
@@ -179,16 +197,50 @@ test("validates Portus policy preferences", () => {
   assert.equal(policy.commandPolicy["bridge.disconnect"], false);
   assert.equal(policy.advancedBackendEnabled, false);
   assert.equal(policy.sessionStepRetentionLimit, 25);
+  assert.equal(navigationPolicyAllowsUrl("file:///C:/private.txt", policy), false);
+  assert.equal(navigationPolicyAllowsUrl("https://sub.blocked.example/a", policy), false);
+  assert.equal(navigationPolicyAllowsUrl("chrome://settings/", policy), false);
+  assert.equal(navigationPolicyAllowsUrl("https://example.com/a", policy), true);
+  assert.deepEqual(normalizeNavigationRulePattern("authority", "HTTPS://Example.COM/path"), {
+    match: "authority",
+    value: "https://example.com"
+  });
   assert.throws(() => PolicyPreferencesSchema.parse({
-    allowedOrigins: [{ origin: "chrome://newtab", source: "extension" }],
-    blockedOrigins: [],
-    sessionStepRetentionLimit: 10
+    blockedNavigationRules: [{ match: "scheme", value: "FILE:", source: "extension" }]
   }));
-  assert.throws(() => PolicyPreferencesSchema.parse({
-    allowedOrigins: [{ origin: "*", source: "extension" }],
-    blockedOrigins: [],
-    sessionStepRetentionLimit: 10
+});
+
+test("migrates persisted origin policies and settings catalogs", () => {
+  const migratedPolicy = PolicyPreferencesSchema.parse(migrateLegacyPolicyPreferences({
+    originPolicyEnabled: false,
+    policyMode: "allowlist",
+    allowedOrigins: [{ origin: "https://example.com", source: "extension" }],
+    blockedOrigins: [{ origin: "*.blocked.example", source: "cli" }]
   }));
+  assert.equal(migratedPolicy.navigationPolicyEnabled, false);
+  assert.deepEqual(migratedPolicy.allowedNavigationRules[0], {
+    match: "authority",
+    value: "https://example.com",
+    source: "extension"
+  });
+  assert.deepEqual(migratedPolicy.blockedNavigationRules[0], {
+    match: "host-wildcard",
+    value: "*.blocked.example",
+    source: "cli"
+  });
+
+  const migratedCatalog = migrateLegacySettingsProfileCatalog({
+    version: 1,
+    profiles: [{
+      content: {
+        policyPreferences: {
+          blockedOrigins: [{ origin: "https://blocked.example", source: "config" }]
+        }
+      }
+    }]
+  });
+  assert.equal(migratedCatalog.version, 2);
+  assert.equal(migratedCatalog.profiles[0].content.policyPreferences.blockedNavigationRules[0].value, "https://blocked.example");
 });
 
 test("validates session steps and Phase 14 command policy defaults", () => {

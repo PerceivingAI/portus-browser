@@ -38,7 +38,7 @@ test("packages an action popup for bridge visibility controls", async () => {
   assert.match(popupSource, /Connect/);
   assert.match(popupSource, /Open Panel/);
   assert.match(popupSource, /Close Panel/);
-  assert.match(popupSource, /Current Origin/);
+  assert.match(popupSource, /Current URL/);
   assert.match(sidepanelSource, /NativeRadioGroupField/);
   assert.match(sidepanelSource, /TooltipProvider/);
   assert.match(sidepanelSource, /TooltipTrigger/);
@@ -48,8 +48,8 @@ test("packages an action popup for bridge visibility controls", async () => {
   assert.match(sidepanelSource, /Delete/);
   assert.doesNotMatch(popupSource, /Rename/);
   assert.doesNotMatch(popupSource, /Delete Profile/);
-  assert.match(sidepanelSource, /Enable Policies/);
-  assert.match(sidepanelSource, /Clear URLs/);
+  assert.match(sidepanelSource, /Enable Policy/);
+  assert.match(sidepanelSource, /Clear Rules/);
   assert.match(sidepanelSource, /TabsList/);
   assert.doesNotMatch(sidepanelSource, /<h1[^>]*>Portus Browser<\/h1>/);
   assert.match(sidepanelSource, /Default View/);
@@ -59,9 +59,9 @@ test("packages an action popup for bridge visibility controls", async () => {
   assert.match(sidepanelSource, /Terminal/);
   assert.match(sidepanelSource, /Enable Terminal/);
   assert.match(sidepanelSource, /Default Terminal/);
-  assert.match(sidepanelSource, /parseOriginInput/);
-  assert.match(sidepanelSource, /<FieldLabel htmlFor="origin-input">Origins<\/FieldLabel>/);
-  assert.match(sidepanelSource, /rows=\{4\}/);
+  assert.match(sidepanelSource, /navigationRuleKey/);
+  assert.match(sidepanelSource, /<FieldLabel htmlFor="navigation-rule-match">Match<\/FieldLabel>/);
+  assert.match(sidepanelSource, /<FieldLabel htmlFor="navigation-rule-value">Value<\/FieldLabel>/);
   assert.doesNotMatch(sidepanelSource, /command\.label\} \(\{command\.type\}\)/);
 });
 
@@ -97,10 +97,10 @@ test("connects bridge through native messaging only when requested", async () =>
   assert.equal(port.messages[0].payload.browserName, "Chrome");
   assert.deepEqual(port.messages[0].payload.capabilities, ["tabs", "windows", "screenshots", "snapshots", "actions", "advanced-debugger", "policy", "events"]);
   assert.deepEqual(port.messages[0].payload.policyPreferences, {
-    originPolicyEnabled: true,
+    navigationPolicyEnabled: true,
     policyMode: "blocklist",
-    allowedOrigins: [],
-    blockedOrigins: [],
+    allowedNavigationRules: [],
+    blockedNavigationRules: [],
     commandPolicy: DEFAULT_COMMAND_POLICY,
     advancedBackendEnabled: false,
     sessionStepRetentionLimit: 10
@@ -289,7 +289,7 @@ test("broker heartbeat failure keeps terminal native host connected for reconnec
   timers.callbacks[0]();
   const heartbeatRequest = bridgePort.messages.find((message) => message.type === "bridge.heartbeat");
   bridgePort.emitMessage({
-    protocolVersion: "1",
+    protocolVersion: "2",
     requestId: heartbeatRequest.requestId,
     kind: "response",
     ok: false,
@@ -389,11 +389,11 @@ test("handles routed tab commands from broker", async () => {
 
   port.emitMessage(request("req_102", "tab.open", { url: "https://example.com", active: true }));
   await waitFor(() => port.messages.at(-1)?.requestId === "req_102");
-  assert.equal(port.messages.at(-1).result.tab.url, "https://example.com");
+  assert.equal(port.messages.at(-1).result.tab.url, "https://example.com/");
 
   port.emitMessage(request("req_103", "tab.navigate", { tabId: 2, url: "https://docs.example.com" }));
   await waitFor(() => port.messages.at(-1)?.requestId === "req_103");
-  assert.equal(port.messages.at(-1).result.tab.url, "https://docs.example.com");
+  assert.equal(port.messages.at(-1).result.tab.url, "https://docs.example.com/");
 
   port.emitMessage(request("req_104", "tab.history.back", { tabId: 2 }));
   await waitFor(() => port.messages.at(-1)?.requestId === "req_104");
@@ -421,7 +421,7 @@ test("status exposes policy without a separate Chrome permission state", async (
   const status = await bridge.getStatus();
 
   assert.equal(status.bridgeState, "connected");
-  assert.equal(status.activeTabOrigin, "https://example.com");
+  assert.equal(status.activeTabUrl, "https://example.com/a");
   assert.equal(status.policyPreferences.policyMode, "blocklist");
   assert.equal("permissionState" in status, false);
   assert.equal("allowlist" in status, false);
@@ -441,7 +441,7 @@ test("rejects removed permission runtime messages", async () => {
   }), { code: "INVALID_MESSAGE" });
 });
 
-test("runtime policy origin mutations include refreshed status for side panel controls", async () => {
+test("runtime navigation rule mutations include refreshed status for side panel controls", async () => {
   const fixture = createChromeFixture({
     queryTabs() {
       return Promise.resolve([chromeTab(1, "https://www.google.com/search?q=portus", true)]);
@@ -451,13 +451,14 @@ test("runtime policy origin mutations include refreshed status for side panel co
 
   const result = await bridge.handleRuntimeMessage({
     type: "portus.policy.allow.add",
-    origin: "https://www.google.com",
+    match: "authority",
+    value: "https://www.google.com",
     reason: "manual test"
   });
 
-  assert.equal(result.policy.allowedOrigins[0].origin, "https://www.google.com");
-  assert.equal(result.status.activeTabOrigin, "https://www.google.com");
-  assert.equal(result.status.policyPreferences.allowedOrigins[0].origin, "https://www.google.com");
+  assert.equal(result.policy.allowedNavigationRules[0].value, "https://www.google.com");
+  assert.equal(result.status.activeTabUrl, "https://www.google.com/search?q=portus");
+  assert.equal(result.status.policyPreferences.allowedNavigationRules[0].value, "https://www.google.com");
 });
 
 
@@ -467,12 +468,13 @@ test("persists policy preferences and routes policy commands", async () => {
   await bridge.setCommandPolicyEnabled("policy.block.add", true, false);
 
   const blocked = await bridge.dispatchNativeRequest(request("req_policy_block", "policy.block.add", {
-    origin: "https://blocked.example",
+    match: "scheme",
+    value: "file:",
     reason: "manual test"
   }));
-  assert.equal(blocked.policy.blockedOrigins[0].origin, "https://blocked.example");
-  assert.equal(blocked.policy.blockedOrigins[0].source, "cli");
-  assert.equal(fixture.storage["portus.policyPreferences"].blockedOrigins.length, 1);
+  assert.equal(blocked.policy.blockedNavigationRules[0].value, "file:");
+  assert.equal(blocked.policy.blockedNavigationRules[0].source, "cli");
+  assert.equal(fixture.storage["portus.policyPreferences"].blockedNavigationRules.length, 1);
 
   const retention = await bridge.handleRuntimeMessage({
     type: "portus.policy.retention.set",
@@ -481,7 +483,7 @@ test("persists policy preferences and routes policy commands", async () => {
   assert.equal(retention.policy.sessionStepRetentionLimit, 25);
 
   const listed = await bridge.dispatchNativeRequest(request("req_policy_get", "policy.get"));
-  assert.equal(listed.policy.blockedOrigins[0].origin, "https://blocked.example");
+  assert.equal(listed.policy.blockedNavigationRules[0].value, "file:");
   assert.equal(listed.policy.sessionStepRetentionLimit, 25);
 });
 
@@ -521,14 +523,15 @@ test("syncs popup policy changes to broker while bridge is connected", async () 
 
   await bridge.handleRuntimeMessage({
     type: "portus.policy.block.add",
-    origin: "https://example.com",
+    match: "authority",
+    value: "https://example.com",
     reason: "manual block"
   });
 
   await waitFor(() => port.messages.some((message) => message.type === "policy.sync"));
   const sync = port.messages.find((message) => message.type === "policy.sync");
   assert.equal(sync.payload.browserId, "br_000001");
-  assert.equal(sync.payload.policyPreferences.blockedOrigins[0].origin, "https://example.com");
+  assert.equal(sync.payload.policyPreferences.blockedNavigationRules[0].value, "https://example.com");
   port.emitMessage(response(sync.requestId, { policy: sync.payload.policyPreferences }));
 });
 
@@ -593,7 +596,8 @@ test("keeps auto-save-off profile edits local until Save", async () => {
 
   await bridge.handleRuntimeMessage({
     type: "portus.policy.block.add",
-    origin: "https://local.example",
+    match: "authority",
+    value: "https://local.example",
     reason: "manual block"
   });
 
@@ -601,7 +605,7 @@ test("keeps auto-save-off profile edits local until Save", async () => {
   assert.equal(port.messages.some((message) => message.type === "settings.profile.save"), false);
   const status = await bridge.getStatus();
   assert.equal(status.settingsProfiles.dirty, true);
-  assert.equal(status.settingsProfiles.content.policyPreferences.blockedOrigins[0].origin, "https://local.example");
+  assert.equal(status.settingsProfiles.content.policyPreferences.blockedNavigationRules[0].value, "https://local.example");
 });
 
 test("profile metadata updates preserve local unsaved settings", async () => {
@@ -643,23 +647,23 @@ test("profile metadata updates preserve local unsaved settings", async () => {
 test("blocks screenshot, snapshot, and actions on blocked origins", async () => {
   const fixture = createChromeFixture();
   const bridge = createConnectedBridge(fixture);
-  await bridge.addPolicyOrigin("block", "https://example.com", "extension");
+  await bridge.addNavigationRule("block", "authority", "https://example.com", "extension");
 
   await assert.rejects(() => bridge.captureScreenshot(1), {
-    code: "ORIGIN_BLOCKED"
+    code: "NAVIGATION_BLOCKED"
   });
   await assert.rejects(() => bridge.captureSnapshot(1), {
-    code: "ORIGIN_BLOCKED"
+    code: "NAVIGATION_BLOCKED"
   });
   await assert.rejects(() => bridge.performAction("click", {
     tabId: 1,
     elementId: "el_000001"
   }), {
-    code: "ORIGIN_BLOCKED"
+    code: "NAVIGATION_BLOCKED"
   });
 });
 
-test("matches wildcard policy origins across apex and subdomain pages", async () => {
+test("matches wildcard navigation rules across apex and subdomain pages", async () => {
   const fixture = createChromeFixture({
     getTab(tabId) {
       if (tabId === 1) return Promise.resolve(chromeTab(1, "https://tripadvisor.com/Hotels", true));
@@ -667,73 +671,83 @@ test("matches wildcard policy origins across apex and subdomain pages", async ()
     }
   });
   const bridge = createConnectedBridge(fixture);
-  await bridge.addPolicyOrigin("block", "*.tripadvisor.com", "extension");
+  await bridge.addNavigationRule("block", "host-wildcard", "*.tripadvisor.com", "extension");
 
   await assert.rejects(() => bridge.captureScreenshot(1), {
-    code: "ORIGIN_BLOCKED"
+    code: "NAVIGATION_BLOCKED"
   });
   await assert.rejects(() => bridge.captureScreenshot(2), {
-    code: "ORIGIN_BLOCKED"
+    code: "NAVIGATION_BLOCKED"
   });
 
   const status = await bridge.getStatus();
-  assert.equal(status.policyPreferences.blockedOrigins[0].origin, "*.tripadvisor.com");
+  assert.equal(status.policyPreferences.blockedNavigationRules[0].value, "*.tripadvisor.com");
 });
 
-test("matches wildcard policy origins in allowlist mode", async () => {
+test("matches wildcard navigation rules in allowlist mode", async () => {
   const fixture = createChromeFixture();
   const bridge = createConnectedBridge(fixture);
-  await bridge.addPolicyOrigin("allow", "https://*.tripadvisor.com", "extension");
+  await bridge.addNavigationRule("allow", "host-wildcard", "https://*.tripadvisor.com", "extension");
   await bridge.setPolicyMode("allowlist");
 
   const allowed = await bridge.openTab("https://www.tripadvisor.com/Hotels");
   assert.equal(allowed.url, "https://www.tripadvisor.com/Hotels");
   await assert.rejects(() => bridge.openTab("https://www.example.com/"), {
-    code: "ORIGIN_BLOCKED"
+    code: "NAVIGATION_BLOCKED"
   });
 });
 
-test("enforces only the active origin policy list without deleting inactive lists", async () => {
+test("allows a browser-supported non-web URL when a user scheme rule permits it", async () => {
   const fixture = createChromeFixture();
   const bridge = createConnectedBridge(fixture);
-  await bridge.addPolicyOrigin("block", "https://blocked.example", "extension");
-  await bridge.addPolicyOrigin("allow", "https://allowed.example", "extension");
+  await bridge.addNavigationRule("allow", "scheme", "file:", "extension");
+  await bridge.setPolicyMode("allowlist");
+
+  const allowed = await bridge.openTab("file:///C:/Projects/example.txt");
+  assert.equal(allowed.url, "file:///C:/Projects/example.txt");
+});
+
+test("enforces only the active navigation policy list without deleting inactive rules", async () => {
+  const fixture = createChromeFixture();
+  const bridge = createConnectedBridge(fixture);
+  await bridge.addNavigationRule("block", "authority", "https://blocked.example", "extension");
+  await bridge.addNavigationRule("allow", "authority", "https://allowed.example", "extension");
   await bridge.setPolicyMode("allowlist");
 
   await assert.rejects(() => bridge.openTab("https://example.com/a"), {
-    code: "ORIGIN_BLOCKED"
+    code: "NAVIGATION_BLOCKED"
   });
 
   const status = await bridge.getStatus();
   assert.equal(status.policyPreferences.policyMode, "allowlist");
-  assert.equal(status.policyPreferences.allowedOrigins[0].origin, "https://allowed.example");
-  assert.equal(status.policyPreferences.blockedOrigins[0].origin, "https://blocked.example");
+  assert.equal(status.policyPreferences.allowedNavigationRules[0].value, "https://allowed.example");
+  assert.equal(status.policyPreferences.blockedNavigationRules[0].value, "https://blocked.example");
 
   const allowedDespiteInactiveBlock = await bridge.openTab("https://allowed.example/a");
   assert.equal(allowedDespiteInactiveBlock.url, "https://allowed.example/a");
 
-  await bridge.addPolicyOrigin("allow", "https://blocked.example", "extension");
+  await bridge.addNavigationRule("allow", "authority", "https://blocked.example", "extension");
   const inactiveBlockIgnored = await bridge.openTab("https://blocked.example/a");
   assert.equal(inactiveBlockIgnored.url, "https://blocked.example/a");
 
   await bridge.setPolicyMode("blocklist");
   await assert.rejects(() => bridge.openTab("https://blocked.example/a"), {
-    code: "ORIGIN_BLOCKED"
+    code: "NAVIGATION_BLOCKED"
   });
 });
 
-test("can disable origin policies without deleting URLs or disabling command policy", async () => {
+test("can disable navigation policy without deleting rules or disabling command policy", async () => {
   const fixture = createChromeFixture();
   const bridge = createConnectedBridge(fixture);
-  await bridge.addPolicyOrigin("block", "https://blocked.example", "extension");
+  await bridge.addNavigationRule("block", "authority", "https://blocked.example", "extension");
 
   await assert.rejects(() => bridge.openTab("https://blocked.example/a"), {
-    code: "ORIGIN_BLOCKED"
+    code: "NAVIGATION_BLOCKED"
   });
 
   const disabled = await bridge.handleRuntimeMessage({ type: "portus.policy.enabled.set", enabled: false });
-  assert.equal(disabled.policy.originPolicyEnabled, false);
-  assert.equal(disabled.policy.blockedOrigins[0].origin, "https://blocked.example");
+  assert.equal(disabled.policy.navigationPolicyEnabled, false);
+  assert.equal(disabled.policy.blockedNavigationRules[0].value, "https://blocked.example");
 
   const opened = await bridge.openTab("https://blocked.example/a");
   assert.equal(opened.url, "https://blocked.example/a");
@@ -746,26 +760,26 @@ test("can disable origin policies without deleting URLs or disabling command pol
   });
 });
 
-test("clears only the requested origin policy URL list", async () => {
+test("clears only the requested navigation policy rule list", async () => {
   const fixture = createChromeFixture();
   const bridge = createConnectedBridge(fixture);
-  await bridge.addPolicyOrigin("allow", "https://allowed.example", "extension");
-  await bridge.addPolicyOrigin("block", "https://blocked.example", "extension");
+  await bridge.addNavigationRule("allow", "authority", "https://allowed.example", "extension");
+  await bridge.addNavigationRule("block", "authority", "https://blocked.example", "extension");
   await bridge.setPolicyMode("allowlist");
 
   const clearedAllow = await bridge.handleRuntimeMessage({ type: "portus.policy.allow.clear" });
   assert.equal(clearedAllow.policy.policyMode, "allowlist");
-  assert.equal(clearedAllow.policy.allowedOrigins.length, 0);
-  assert.equal(clearedAllow.policy.blockedOrigins[0].origin, "https://blocked.example");
+  assert.equal(clearedAllow.policy.allowedNavigationRules.length, 0);
+  assert.equal(clearedAllow.policy.blockedNavigationRules[0].value, "https://blocked.example");
 
   await bridge.setPolicyMode("blocklist");
   const clearedBlock = await bridge.handleRuntimeMessage({ type: "portus.policy.block.clear" });
   assert.equal(clearedBlock.policy.policyMode, "blocklist");
-  assert.equal(clearedBlock.policy.allowedOrigins.length, 0);
-  assert.equal(clearedBlock.policy.blockedOrigins.length, 0);
+  assert.equal(clearedBlock.policy.allowedNavigationRules.length, 0);
+  assert.equal(clearedBlock.policy.blockedNavigationRules.length, 0);
 });
 
-test("restores policy preferences from extension local storage", async () => {
+test("migrates legacy origin preferences from extension local storage", async () => {
   const fixture = createChromeFixture({
     storage: {
       "portus.policyPreferences": {
@@ -783,8 +797,11 @@ test("restores policy preferences from extension local storage", async () => {
 
   const status = await bridge.getStatus();
 
-  assert.equal(status.policyPreferences.allowedOrigins[0].origin, "https://example.com");
+  assert.equal(status.policyPreferences.allowedNavigationRules[0].value, "https://example.com");
   assert.equal(status.policyPreferences.sessionStepRetentionLimit, 15);
+  assert.equal(fixture.storage["portus.policyPreferences"].allowedNavigationRules[0].match, "authority");
+  assert.equal(fixture.storage["portus.policyPreferences"].allowedNavigationRules[0].value, "https://example.com");
+  assert.equal("allowedOrigins" in fixture.storage["portus.policyPreferences"], false);
 });
 
 test("uses popup action behavior by default and stores side panel preference in active profile state", async () => {
@@ -1431,7 +1448,7 @@ test("integrates extension bridge with native host and broker visibility", async
 
 function request(requestId, type, payload = {}) {
   return {
-    protocolVersion: "1",
+    protocolVersion: "2",
     requestId,
     kind: "request",
     type,
@@ -1442,7 +1459,7 @@ function request(requestId, type, payload = {}) {
 
 function response(requestId, result) {
   return {
-    protocolVersion: "1",
+    protocolVersion: "2",
     requestId,
     kind: "response",
     ok: true,
@@ -1470,10 +1487,10 @@ function settingsProfileState(overrides = {}) {
   const autoSave = overrides.autoSave ?? true;
   const content = {
     policyPreferences: {
-      originPolicyEnabled: true,
+      navigationPolicyEnabled: true,
       policyMode: "blocklist",
-      allowedOrigins: [],
-      blockedOrigins: [],
+      allowedNavigationRules: [],
+      blockedNavigationRules: [],
       commandPolicy: DEFAULT_COMMAND_POLICY,
       advancedBackendEnabled: false,
       sessionStepRetentionLimit: 10,

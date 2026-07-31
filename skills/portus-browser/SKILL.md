@@ -250,13 +250,18 @@ portus-browser policy block list --browser 1 --json
 portus-browser policy retention get --browser 1 --json
 ```
 
-Policy write commands exist but may be disabled by command policy:
+Policy write commands require exactly one navigation rule flag and may be disabled by command policy:
 
 ```powershell
-portus-browser policy allow add https://example.com --browser 1 --reason "User approved" --json
-portus-browser policy block add https://example.com --browser 1 --reason "User requested block" --json
+portus-browser policy allow add --authority https://example.com --browser 1 --reason "User approved" --json
+portus-browser policy allow add --scheme file: --browser 1 --reason "User approved" --json
+portus-browser policy block add --host-wildcard *.example.com --browser 1 --reason "User requested block" --json
+portus-browser policy block add --url-exact chrome://settings/ --browser 1 --json
+portus-browser policy block add --url-prefix file:///C:/Private/ --browser 1 --json
 portus-browser policy retention set 25 --browser 1 --json
 ```
+
+The rule flags are `--scheme`, `--authority`, `--host-wildcard`, `--url-exact`, and `--url-prefix`. Use the same match flag and value to remove a rule. Portus has no built-in scheme restriction; do not substitute an HTTP(S) URL when the user requested another browser-supported scheme.
 
 Do not try to manage Settings profiles through the CLI. Profile management is GUI-only.
 
@@ -331,8 +336,8 @@ Common next steps:
 - `BROWSER_SESSION_UNAVAILABLE`: ask the user to connect a browser Bridge.
 - `BRIDGE_DISCONNECTED`: ask the user to connect the extension Bridge.
 - `COMMAND_DISABLED_BY_POLICY`: tell the user the command is disabled in Settings.
-- `ORIGIN_BLOCKED`: tell the user the active policy blocked the origin.
-- `BROWSER_ACCESS_DENIED`: tell the user the target page cannot be controlled and select a regular HTTP(S) tab if appropriate.
+- `NAVIGATION_BLOCKED`: tell the user the active navigation policy blocked the URL.
+- `BROWSER_ACCESS_DENIED`: tell the user the browser or Extension cannot control the target; do not assume a non-HTTP(S) scheme is the cause.
 - `TAB_NOT_FOUND`: refresh `tabs` and target a current tab id.
 - `TARGET_NOT_FOUND`: refresh `browsers` or `tabs`, then retry with current ids.
 - `COMMAND_TIMEOUT`: verify page state, then retry only if the action is safe.

@@ -28,7 +28,7 @@ test("default config is valid and keeps v1 security constraints", () => {
   assert.equal(DEFAULT_PORTUS_CONFIG.terminal.defaultWorkingDirectory, "Downloads/portus-session");
   assert.equal(DEFAULT_PORTUS_CONFIG.terminal.fontSize, 16);
   assert.equal(DEFAULT_PORTUS_CONFIG.policy.defaultPolicyMode, "blocklist");
-  assert.deepEqual(DEFAULT_PORTUS_CONFIG.policy.defaultBlocklist, []);
+  assert.deepEqual(DEFAULT_PORTUS_CONFIG.policy.defaultBlockedNavigationRules, []);
   assert.equal(DEFAULT_PORTUS_CONFIG.policy.defaultCommandPolicy["screenshot.capture"], true);
   assert.equal(DEFAULT_PORTUS_CONFIG.policy.defaultCommandPolicy["snapshot.capture"], true);
   assert.equal(DEFAULT_PORTUS_CONFIG.policy.defaultCommandPolicy["action.click"], true);
@@ -50,14 +50,14 @@ test("partial config merges over defaults", () => {
 test("arrays replace instead of concatenate", () => {
   const merged = mergeConfig(DEFAULT_PORTUS_CONFIG, {
     policy: {
-      defaultAllowlist: ["https://example.com"],
-      defaultBlocklist: ["https://blocked.example"],
+      defaultAllowedNavigationRules: [{ match: "scheme", value: "file:" }],
+      defaultBlockedNavigationRules: [{ match: "authority", value: "https://blocked.example" }],
       sessionStepRetentionLimit: 25
     }
   });
   const parsed = parseConfig(merged);
-  assert.deepEqual(parsed.policy.defaultAllowlist, ["https://example.com"]);
-  assert.deepEqual(parsed.policy.defaultBlocklist, ["https://blocked.example"]);
+  assert.deepEqual(parsed.policy.defaultAllowedNavigationRules, [{ match: "scheme", value: "file:" }]);
+  assert.deepEqual(parsed.policy.defaultBlockedNavigationRules, [{ match: "authority", value: "https://blocked.example" }]);
   assert.equal(parsed.policy.sessionStepRetentionLimit, 25);
 });
 

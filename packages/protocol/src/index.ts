@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const PROTOCOL_VERSION = "1" as const;
+export const PROTOCOL_VERSION = "2" as const;
 
 export const JsonObjectSchema = z.record(z.string(), z.unknown());
 
@@ -27,7 +27,7 @@ export const ErrorCodeSchema = z.enum([
   "TARGET_NOT_FOUND",
   "TAB_NOT_FOUND",
   "BROWSER_ACCESS_DENIED",
-  "ORIGIN_BLOCKED",
+  "NAVIGATION_BLOCKED",
   "COMMAND_DISABLED_BY_POLICY",
   "COMMAND_TIMEOUT",
   "CAPABILITY_UNAVAILABLE",
@@ -124,11 +124,32 @@ export const HttpOriginSchema = z.string().refine((value) => {
   }
 }, "must be an http(s) origin");
 
-export const PolicyOriginPatternSchema = z.string().refine((value) => {
-  if (HttpOriginSchema.safeParse(value).success) return true;
-  const normalized = value.toLowerCase();
-  return /^(?:(https?):\/\/)?\*\.([a-z0-9-]+(?:\.[a-z0-9-]+)+)$/.test(normalized);
-}, "must be an http(s) origin or wildcard host pattern like *.example.com");
+export const NavigationUrlSchema = z.string().min(1).refine((value) => {
+  try {
+    new URL(value);
+    return true;
+  } catch {
+    return false;
+  }
+}, "must be an absolute URL");
+
+export const NavigationRuleMatchSchema = z.enum([
+  "scheme",
+  "authority",
+  "host-wildcard",
+  "url-exact",
+  "url-prefix"
+]);
+
+const NavigationRuleShape = {
+  match: NavigationRuleMatchSchema,
+  value: z.string().min(1)
+};
+
+export const NavigationRulePatternSchema = z.object(NavigationRuleShape).strict().refine(
+  isNormalizedNavigationRulePattern,
+  "must contain a canonical navigation rule value"
+);
 
 export const PolicySourceSchema = z.enum(["extension", "cli", "config"]);
 
@@ -231,18 +252,21 @@ export const DEFAULT_MAX_CUSTOM_SETTINGS_PROFILES = 10 as const;
 export const SettingsProfileIdSchema = z.string().regex(/^profile_[A-Za-z0-9_-]+$/);
 export const SettingsProfileNameSchema = z.string().min(1).max(80);
 
-export const PolicyOriginEntrySchema = z.object({
-  origin: PolicyOriginPatternSchema,
+export const NavigationRuleSchema = z.object({
+  ...NavigationRuleShape,
   source: PolicySourceSchema,
   updatedAt: IsoDateTimeSchema.optional(),
   reason: z.string().min(1).optional()
-}).strict();
+}).strict().refine(
+  isNormalizedNavigationRulePattern,
+  "must contain a canonical navigation rule value"
+);
 
 export const PolicyPreferencesSchema = z.object({
-  originPolicyEnabled: z.boolean().default(true),
+  navigationPolicyEnabled: z.boolean().default(true),
   policyMode: PolicyModeSchema.default("blocklist"),
-  allowedOrigins: z.array(PolicyOriginEntrySchema).default([]),
-  blockedOrigins: z.array(PolicyOriginEntrySchema).default([]),
+  allowedNavigationRules: z.array(NavigationRuleSchema).default([]),
+  blockedNavigationRules: z.array(NavigationRuleSchema).default([]),
   commandPolicy: CommandPolicySchema.default(DEFAULT_COMMAND_POLICY).transform((policy) => ({
     ...DEFAULT_COMMAND_POLICY,
     ...policy
@@ -250,6 +274,160 @@ export const PolicyPreferencesSchema = z.object({
   advancedBackendEnabled: z.boolean().default(false),
   sessionStepRetentionLimit: z.number().int().min(0).max(1000).default(10)
 }).strict();
+
+export function normalizeNavigationUrl(value: string): string {
+  return new URL(value).toString();
+}
+
+export function normalizeNavigationRulePattern(
+  match: NavigationRuleMatch,
+  input: string
+): NavigationRulePattern {
+  const value = input.trim();
+  if (match === "scheme") {
+    const normalized = value.toLowerCase();
+    if (!/^[a-z][a-z0-9+.-]*:$/.test(normalized)) {
+      throw new Error(`Invalid navigation scheme: ${input}.`);
+    }
+    return { match, value: normalized };
+  }
+
+  if (match === "host-wildcard") {
+    const wildcard = parseNavigationHostWildcard(value);
+    if (!wildcard) throw new Error(`Invalid navigation host wildcard: ${input}.`);
+    const scheme = wildcard.scheme === undefined ? "" : `${wildcard.scheme}//`;
+    return { match, value: `${scheme}*.${wildcard.host}` };
+  }
+
+  const parsed = new URL(value);
+  if (match === "authority") {
+    if (!parsed.host) throw new Error(`Navigation authority requires a host: ${input}.`);
+    return { match, value: `${parsed.protocol}//${parsed.host}` };
+  }
+  return { match, value: parsed.toString() };
+}
+
+export function navigationRuleKey(rule: NavigationRulePattern): string {
+  return `${rule.match}\u0000${rule.value}`;
+}
+
+export function navigationRuleMatches(rule: NavigationRulePattern, target: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(target);
+  } catch {
+    return false;
+  }
+
+  if (rule.match === "scheme") return url.protocol === rule.value;
+  if (rule.match === "authority") return `${url.protocol}//${url.host}` === rule.value;
+  if (rule.match === "url-exact") return url.toString() === rule.value;
+  if (rule.match === "url-prefix") return url.toString().startsWith(rule.value);
+
+  const wildcard = parseNavigationHostWildcard(rule.value);
+  if (!wildcard) return false;
+  if (wildcard.scheme !== undefined && url.protocol !== wildcard.scheme) return false;
+  const host = url.hostname.toLowerCase();
+  return host === wildcard.host || host.endsWith(`.${wildcard.host}`);
+}
+
+export function navigationPolicyAllowsUrl(target: string, policy: PolicyPreferences): boolean {
+  if (policy.navigationPolicyEnabled === false) return true;
+  const rules = policy.policyMode === "blocklist"
+    ? policy.blockedNavigationRules
+    : policy.allowedNavigationRules;
+  const matches = rules.some((rule) => navigationRuleMatches(rule, target));
+  return policy.policyMode === "blocklist" ? !matches : matches;
+}
+
+function isNormalizedNavigationRulePattern(rule: {
+  match: NavigationRuleMatch;
+  value: string;
+}): boolean {
+  try {
+    const normalized = normalizeNavigationRulePattern(rule.match, rule.value);
+    return normalized.value === rule.value;
+  } catch {
+    return false;
+  }
+}
+
+function parseNavigationHostWildcard(value: string): {
+  scheme?: string;
+  host: string;
+} | null {
+  const match = value.toLowerCase().match(/^(?:([a-z][a-z0-9+.-]*:)\/\/)?\*\.([a-z0-9-]+(?:\.[a-z0-9-]+)+)$/);
+  if (!match) return null;
+  return {
+    ...(match[1] === undefined ? {} : { scheme: match[1] }),
+    host: match[2] as string
+  };
+}
+
+export function migrateLegacyPolicyPreferences(input: unknown): unknown {
+  if (!isUnknownRecord(input)) return input;
+  const hasLegacyFields = Object.prototype.hasOwnProperty.call(input, "originPolicyEnabled")
+    || Object.prototype.hasOwnProperty.call(input, "allowedOrigins")
+    || Object.prototype.hasOwnProperty.call(input, "blockedOrigins");
+  if (!hasLegacyFields) return input;
+
+  const {
+    originPolicyEnabled,
+    allowedOrigins,
+    blockedOrigins,
+    ...current
+  } = input;
+  return {
+    ...current,
+    ...(originPolicyEnabled === undefined ? {} : { navigationPolicyEnabled: originPolicyEnabled }),
+    ...(allowedOrigins === undefined ? {} : { allowedNavigationRules: migrateLegacyOriginEntries(allowedOrigins) }),
+    ...(blockedOrigins === undefined ? {} : { blockedNavigationRules: migrateLegacyOriginEntries(blockedOrigins) })
+  };
+}
+
+export function migrateLegacySettingsProfileCatalog(input: unknown): unknown {
+  if (!isUnknownRecord(input) || input.version !== 1 || !Array.isArray(input.profiles)) return input;
+  return {
+    ...input,
+    version: 2,
+    profiles: input.profiles.map((profile) => {
+      if (!isUnknownRecord(profile) || !isUnknownRecord(profile.content)) return profile;
+      const policyPreferences = profile.content.policyPreferences;
+      return {
+        ...profile,
+        content: {
+          ...profile.content,
+          ...(policyPreferences === undefined ? {} : {
+            policyPreferences: migrateLegacyPolicyPreferences(policyPreferences)
+          })
+        }
+      };
+    })
+  };
+}
+
+function migrateLegacyOriginEntries(input: unknown): unknown {
+  if (!Array.isArray(input)) return input;
+  return input.map((entry) => {
+    if (!isUnknownRecord(entry) || typeof entry.origin !== "string") return entry;
+    const { origin, ...metadata } = entry;
+    const match: NavigationRuleMatch = /^(?:[a-z][a-z0-9+.-]*:\/\/)?\*\./i.test(origin)
+      ? "host-wildcard"
+      : "authority";
+    try {
+      return {
+        ...normalizeNavigationRulePattern(match, origin),
+        ...metadata
+      };
+    } catch {
+      return entry;
+    }
+  });
+}
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 export const ExtensionUxPreferencesSchema = z.object({
   defaultPanelView: SidePanelDefaultViewSchema.default("terminal"),
@@ -283,7 +461,7 @@ export const SettingsProfileSummarySchema = SettingsProfileSchema.pick({
 export const SettingsProfileBrowserSelectionSchema = z.partialRecord(BrowserNameSchema, SettingsProfileIdSchema);
 
 export const SettingsProfileCatalogSchema = z.object({
-  version: z.literal(1).default(1),
+  version: z.literal(2).default(2),
   maxCustomProfiles: z.number().int().positive().default(DEFAULT_MAX_CUSTOM_SETTINGS_PROFILES),
   profiles: z.array(SettingsProfileSchema).min(1),
   activeProfileByBrowserType: SettingsProfileBrowserSelectionSchema.default({})
@@ -390,7 +568,7 @@ export const BrokerEventTypeSchema = z.enum([
   "snapshot.invalidated",
   "browser.access.denied",
   "policy.changed",
-  "origin.blocked",
+  "navigation.blocked",
   "action.started",
   "action.completed",
   "action.failed",
@@ -643,7 +821,9 @@ export type ErrorCode = z.infer<typeof ErrorCodeSchema>;
 export type BrowserName = z.infer<typeof BrowserNameSchema>;
 export type BrowserSession = z.infer<typeof BrowserSessionSchema>;
 export type Tab = z.infer<typeof TabSchema>;
-export type PolicyOriginEntry = z.infer<typeof PolicyOriginEntrySchema>;
+export type NavigationRuleMatch = z.infer<typeof NavigationRuleMatchSchema>;
+export type NavigationRulePattern = z.infer<typeof NavigationRulePatternSchema>;
+export type NavigationRule = z.infer<typeof NavigationRuleSchema>;
 export type PolicyMode = z.infer<typeof PolicyModeSchema>;
 export type CommandType = z.infer<typeof CommandTypeSchema>;
 export type CommandPolicy = z.infer<typeof CommandPolicySchema>;

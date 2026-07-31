@@ -6,7 +6,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./comp
 import { cn } from "./lib/utils.js";
 import { Section, Diagnostics, SelectField, StatusBadge, StatusGrid } from "./gui/components.js";
 import { closeSidePanelFromPopupGesture, closeWindow, connectRuntimePort, openSidePanelFromPopupGesture, readStatus, readStatusMessage, sendRuntimeMessage } from "./gui/chromeApi.js";
-import { describeOriginPolicy, labelForBridgeState } from "./gui/status.js";
+import { describeNavigationPolicy, labelForBridgeState } from "./gui/status.js";
 import type { PortusExtensionStatus } from "./index.js";
 
 export function PopupApp(): React.JSX.Element {
@@ -181,13 +181,13 @@ export function PopupApp(): React.JSX.Element {
 
           <Section
             className="pt-[var(--portus-section-gap)]"
-            action={<p className={cn("max-w-44 break-words text-right text-xs leading-5", status?.activeTabOrigin ? "text-brand" : "text-muted-foreground")}>{status?.activeTabOrigin ?? "none"}</p>}
+            action={<p className={cn("max-w-44 break-words text-right text-xs leading-5", status?.activeTabUrl ? "text-brand" : "text-muted-foreground")}>{status?.activeTabUrl ?? "none"}</p>}
             showDivider={false}
-            title="Current Origin"
+            title="Current URL"
           >
             <StatusGrid
               rows={[
-                { label: "Agent Access", value: status ? describeOriginPolicy(status) : "unknown" }
+                { label: "Agent Access", value: status ? describeNavigationPolicy(status) : "unknown" }
               ]}
             />
           </Section>

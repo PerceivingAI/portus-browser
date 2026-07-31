@@ -7,6 +7,7 @@ import {
   CommandPolicySchema,
   DEFAULT_COMMAND_POLICY,
   IconClickBehaviorSchema,
+  NavigationRulePatternSchema,
   PortusErrorSchema,
   SidePanelDefaultViewSchema,
   type PortusError
@@ -25,14 +26,6 @@ const ExtensionOriginSchema = z.string().refine((value) => {
   return /^chrome-extension:\/\/[a-z]{32}$/.test(value) && !value.includes("*");
 }, "must be an explicit chrome-extension origin");
 
-const OriginSchema = z.string().refine((value) => {
-  try {
-    const url = new URL(value);
-    return url.origin === value && (url.protocol === "http:" || url.protocol === "https:");
-  } catch {
-    return false;
-  }
-}, "must be an http(s) origin");
 
 export const BrokerConfigSchema = z.object({
   host: LocalHostSchema.default("127.0.0.1"),
@@ -121,8 +114,8 @@ export const SecurityConfigSchema = z.object({
 
 export const PolicyConfigSchema = z.object({
   defaultPolicyMode: z.enum(["blocklist", "allowlist"]).default("blocklist"),
-  defaultAllowlist: z.array(OriginSchema).default([]),
-  defaultBlocklist: z.array(OriginSchema).default([]),
+  defaultAllowedNavigationRules: z.array(NavigationRulePatternSchema).default([]),
+  defaultBlockedNavigationRules: z.array(NavigationRulePatternSchema).default([]),
   defaultCommandPolicy: CommandPolicySchema.default(DEFAULT_COMMAND_POLICY).transform((policy) => ({
     ...DEFAULT_COMMAND_POLICY,
     ...policy

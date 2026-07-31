@@ -12,7 +12,7 @@ const TEST_BROKER_TOKEN = "test-broker-token";
 
 function request(requestId, type, payload = {}) {
   return {
-    protocolVersion: "1",
+    protocolVersion: "2",
     requestId,
     kind: "request",
     type,
@@ -29,7 +29,7 @@ function extensionRequest(requestId, type, payload = {}) {
 
 function response(requestId, result) {
   return {
-    protocolVersion: "1",
+    protocolVersion: "2",
     requestId,
     kind: "response",
     ok: true,

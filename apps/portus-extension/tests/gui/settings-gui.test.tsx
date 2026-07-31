@@ -252,32 +252,49 @@ describe("Settings view rendered GUI", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Work_Profile reset to default values.");
   });
 
-  test("Origin Policy enable and Clear URLs controls are wired through confirmation", async () => {
+  test("Navigation Policy enable and Clear Rules controls are wired through confirmation", async () => {
     const user = userEvent.setup();
     runtime().setStatus(createStatus({
       policyPreferences: {
         policyMode: "blocklist",
-        blockedOrigins: [{ origin: "https://blocked.example", reason: "test", createdAt: "2026-05-21T00:00:00.000Z" }],
-        allowedOrigins: [{ origin: "https://allowed.example", reason: "test", createdAt: "2026-05-21T00:00:00.000Z" }]
+        blockedNavigationRules: [{ match: "authority", value: "https://blocked.example", source: "extension", reason: "test", updatedAt: "2026-05-21T00:00:00.000Z" }],
+        allowedNavigationRules: [{ match: "authority", value: "https://allowed.example", source: "extension", reason: "test", updatedAt: "2026-05-21T00:00:00.000Z" }]
       }
     }));
     render(<SidePanelApp />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "Enable Policies" }));
+    await user.click(await screen.findByRole("checkbox", { name: "Enable Policy" }));
     expect(runtime().messages).toContainEqual({ type: "portus.policy.enabled.set", enabled: false });
-    expect(screen.getByText("https://blocked.example")).toBeInTheDocument();
-    expect(screen.getByText("https://allowed.example")).toBeInTheDocument();
+    expect(screen.getByText(/https:\/\/blocked\.example/)).toBeInTheDocument();
+    expect(screen.getByText(/https:\/\/allowed\.example/)).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Clear URLs" }));
-    expect(screen.getByRole("dialog", { name: "Clear 1 blocklist URL?" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Clear URLs" }));
+    await user.click(screen.getByRole("button", { name: "Clear Rules" }));
+    expect(screen.getByRole("dialog", { name: "Clear 1 blocklist rule?" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Clear Rules" }));
 
     expect(runtime().messages).toContainEqual({ type: "portus.policy.block.clear" });
-    expect(screen.queryByText("https://blocked.example")).not.toBeInTheDocument();
-    expect(screen.getByText("https://allowed.example")).toBeInTheDocument();
+    expect(screen.queryByText(/https:\/\/blocked\.example/)).not.toBeInTheDocument();
+    expect(screen.getByText(/https:\/\/allowed\.example/)).toBeInTheDocument();
   });
 
-  test("command policy controls remain independent from Enable Policies", async () => {
+  test("navigation rule controls send the selected match type and value", async () => {
+    const user = userEvent.setup();
+    render(<SidePanelApp />);
+
+    await user.click(await screen.findByRole("combobox", { name: "Match" }));
+    await user.click(await screen.findByRole("option", { name: "Scheme" }));
+    await user.type(screen.getByRole("textbox", { name: "Value" }), "file:");
+    await user.click(screen.getByRole("button", { name: "Add Allow" }));
+
+    expect(runtime().messages).toContainEqual({
+      type: "portus.policy.allow.add",
+      match: "scheme",
+      value: "file:",
+      reason: "Portus Browser user policy",
+    });
+  });
+
+  test("command policy controls remain independent from navigation policy", async () => {
     const user = userEvent.setup();
     render(<SidePanelApp />);
 
@@ -285,7 +302,7 @@ describe("Settings view rendered GUI", () => {
     const openUrl = screen.getByRole("checkbox", { name: "Open URL" });
     expect(openUrl).toBeEnabled();
 
-    await user.click(screen.getByRole("checkbox", { name: "Enable Policies" }));
+    await user.click(screen.getByRole("checkbox", { name: "Enable Policy" }));
     expect(runtime().messages).toContainEqual({ type: "portus.policy.enabled.set", enabled: false });
     expect(openUrl).toBeEnabled();
 
@@ -452,16 +469,16 @@ class GuiRuntimeController {
         this.resetActiveSettingsProfile();
         return this.response();
       case "portus.policy.enabled.set":
-        this.updatePolicy({ originPolicyEnabled: message.enabled === true });
+        this.updatePolicy({ navigationPolicyEnabled: message.enabled === true });
         return this.response();
       case "portus.policy.mode.set":
         this.updatePolicy({ policyMode: message.mode === "allowlist" ? "allowlist" : "blocklist" });
         return this.response();
       case "portus.policy.allow.clear":
-        this.updatePolicy({ allowedOrigins: [] });
+        this.updatePolicy({ allowedNavigationRules: [] });
         return this.response();
       case "portus.policy.block.clear":
-        this.updatePolicy({ blockedOrigins: [] });
+        this.updatePolicy({ blockedNavigationRules: [] });
         return this.response();
       case "portus.policy.retention.set":
         this.updatePolicy({ sessionStepRetentionLimit: Number(message.limit) });
@@ -742,9 +759,7 @@ function createStatus({
   const customCount = profileList.filter((item) => !item.readOnly).length;
 
   return {
-    activeTabOrigin: "https://example.com",
     activeTabUrl: "https://example.com/page",
-    allowlist: [],
     bridgeState,
     brokerState: bridgeState === "connected" ? "connected" : "disconnected",
     browserId: bridgeState === "connected" ? "br_test" : null,
@@ -791,10 +806,10 @@ function defaultSettingsContent(): SettingsProfileContent {
 function defaultPolicyPreferences(): PortusExtensionStatus["policyPreferences"] {
   return {
     advancedBackendEnabled: false,
-    allowedOrigins: [],
-    blockedOrigins: [],
+    allowedNavigationRules: [],
+    blockedNavigationRules: [],
     commandPolicy: { ...DEFAULT_COMMAND_POLICY },
-    originPolicyEnabled: true,
+    navigationPolicyEnabled: true,
     policyMode: "blocklist",
     sessionStepRetentionLimit: 10
   };

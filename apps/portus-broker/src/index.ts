@@ -20,6 +20,7 @@ import {
   DEFAULT_SETTINGS_PROFILE_NAME,
   INITIAL_CUSTOM_SETTINGS_PROFILE_NAME,
   PROTOCOL_VERSION,
+  NavigationUrlSchema,
   PolicyPreferencesSchema,
   RegistrationRequestSchema,
   RequestEnvelopeSchema,
@@ -35,6 +36,8 @@ import {
   createInvalidMessageError,
   createPortusError,
   safeParseProtocolMessage,
+  navigationPolicyAllowsUrl,
+  migrateLegacySettingsProfileCatalog,
   type BrowserName,
   type BrowserSession,
   type CommandEnvelope,
@@ -619,8 +622,8 @@ export class BrokerCore {
         browserId: payload.browserId,
         source: "extension",
         policyMode: payload.policyPreferences.policyMode,
-        allowedOrigins: payload.policyPreferences.allowedOrigins.length,
-        blockedOrigins: payload.policyPreferences.blockedOrigins.length,
+        allowedNavigationRules: payload.policyPreferences.allowedNavigationRules.length,
+        blockedNavigationRules: payload.policyPreferences.blockedNavigationRules.length,
         sessionStepRetentionLimit: payload.policyPreferences.sessionStepRetentionLimit
       }
     });
@@ -971,8 +974,13 @@ export class BrokerCore {
 
     try {
       const raw = readFileSync(this.settingsProfilesPath, "utf8");
-      const parsed = this.normalizeSettingsProfileCatalog(SettingsProfileCatalogSchema.parse(JSON.parse(raw)));
+      const input = JSON.parse(raw);
+      const migrated = migrateLegacySettingsProfileCatalog(input);
+      const parsed = this.normalizeSettingsProfileCatalog(SettingsProfileCatalogSchema.parse(migrated));
       this.validateSettingsProfileCatalog(parsed);
+      if (migrated !== input) {
+        writeFileSync(this.settingsProfilesPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+      }
       this.settingsProfileCatalogLoadedFromDisk = true;
       return parsed;
     } catch {
@@ -990,7 +998,7 @@ export class BrokerCore {
     const now = this.now().toISOString();
     const defaultContent = this.defaultSettingsProfileContent();
     return SettingsProfileCatalogSchema.parse({
-      version: 1,
+      version: 2,
       maxCustomProfiles: DEFAULT_MAX_CUSTOM_SETTINGS_PROFILES,
       profiles: [
         {
@@ -1121,8 +1129,8 @@ export class BrokerCore {
     if (!context.bridgeClient || context.bridgeClient !== record.bridgeClient) {
       throw brokerError("BROKER_TOKEN_INVALID", "Only the connected Portus Bridge may publish browser events.", false);
     }
-    const origin = originFromBrowserEventPayload(payload.payload);
-    if (origin && !policyAllowsOrigin(origin, record.policyPreferences)) {
+    const url = urlFromBrowserEventPayload(payload.payload);
+    if (url && !navigationPolicyAllowsUrl(url, record.policyPreferences)) {
       return { published: false };
     }
 
@@ -1367,8 +1375,8 @@ export class BrokerCore {
       this.enforcePolicyBeforeRoute(request.type, request.payload, record);
     } catch (error) {
       const portusError = normalizeBrokerError(error);
-      if (portusError.code === "ORIGIN_BLOCKED") {
-        this.publishOriginBlocked(request, record, portusError);
+      if (portusError.code === "NAVIGATION_BLOCKED") {
+        this.publishNavigationBlocked(request, record, portusError);
         this.recordSessionStep(record, request, "blocked", portusError);
       }
       throw portusError;
@@ -1435,8 +1443,8 @@ export class BrokerCore {
           }
         });
       }
-      if (portusError.code === "ORIGIN_BLOCKED") this.publishOriginBlocked(request, record, portusError);
-      this.recordSessionStep(record, request, portusError.code === "ORIGIN_BLOCKED" ? "blocked" : "failed", portusError);
+      if (portusError.code === "NAVIGATION_BLOCKED") this.publishNavigationBlocked(request, record, portusError);
+      this.recordSessionStep(record, request, portusError.code === "NAVIGATION_BLOCKED" ? "blocked" : "failed", portusError);
       if (request.type.startsWith("action.")) {
         this.events.publish({
           type: "action.failed",
@@ -1521,9 +1529,7 @@ export class BrokerCore {
     if (type !== "tab.open" && type !== "tab.navigate") return;
     const url = payload.url;
     if (typeof url !== "string") return;
-    const origin = originFromUrl(url);
-    if (!origin) return;
-    enforcePolicyForOrigin(origin, record.policyPreferences);
+    enforceNavigationPolicyForUrl(NavigationUrlSchema.parse(url), record.policyPreferences);
   }
 
   private enforceCommandPolicy(type: CommandType, record: BrowserSessionRecord): void {
@@ -1630,15 +1636,15 @@ export class BrokerCore {
     }
   }
 
-  private publishOriginBlocked(request: RequestEnvelope, record: BrowserSessionRecord, error: PortusError): void {
+  private publishNavigationBlocked(request: RequestEnvelope, record: BrowserSessionRecord, error: PortusError): void {
     this.events.publish({
-      type: "origin.blocked",
+      type: "navigation.blocked",
       browserId: record.session.browserId,
       requestId: request.requestId,
       payload: {
         browserId: record.session.browserId,
         commandType: request.type,
-        origin: readErrorOrigin(error)
+        url: readErrorUrl(error)
       }
     });
   }
@@ -1687,13 +1693,13 @@ export class BrokerCore {
     const now = this.now().toISOString();
     return PolicyPreferencesSchema.parse({
       policyMode: this.config.policy.defaultPolicyMode,
-      allowedOrigins: this.config.policy.defaultAllowlist.map((origin) => ({
-        origin,
+      allowedNavigationRules: this.config.policy.defaultAllowedNavigationRules.map((rule) => ({
+        ...rule,
         source: "config",
         updatedAt: now
       })),
-      blockedOrigins: this.config.policy.defaultBlocklist.map((origin) => ({
-        origin,
+      blockedNavigationRules: this.config.policy.defaultBlockedNavigationRules.map((rule) => ({
+        ...rule,
         source: "config",
         updatedAt: now
       })),
@@ -2126,47 +2132,26 @@ function isNodeListenAddressInUseError(error: unknown): boolean {
     && error.code === "EADDRINUSE";
 }
 
-function policyAllowsOrigin(origin: string, policy: PolicyPreferences): boolean {
-  if (policy.originPolicyEnabled === false) return true;
-  if (policy.policyMode === "blocklist") {
-    return !policy.blockedOrigins.some((entry) => policyOriginMatches(entry.origin, origin));
-  }
-  return policy.allowedOrigins.some((entry) => policyOriginMatches(entry.origin, origin));
-}
-
-function enforcePolicyForOrigin(origin: string, policy: PolicyPreferences): void {
-  if (policyAllowsOrigin(origin, policy)) return;
+function enforceNavigationPolicyForUrl(url: string, policy: PolicyPreferences): void {
+  if (navigationPolicyAllowsUrl(url, policy)) return;
   const message = policy.policyMode === "blocklist"
-    ? `Portus policy blocks browser control for ${origin}.`
-    : `Portus policy does not allow browser control for ${origin}.`;
+    ? `Portus navigation policy blocks ${url}.`
+    : `Portus navigation policy does not allow ${url}.`;
   throw createPortusError({
-    code: "ORIGIN_BLOCKED",
+    code: "NAVIGATION_BLOCKED",
     message,
     retryable: false,
-    details: { origin }
+    details: { url }
   });
-}
-
-function policyOriginMatches(pattern: string, origin: string): boolean {
-  if (pattern === origin) return true;
-  const wildcard = pattern.toLowerCase().match(/^(?:(https?):\/\/)?\*\.([a-z0-9-]+(?:\.[a-z0-9-]+)+)$/);
-  if (!wildcard) return false;
-
-  let parsed: URL;
-  try {
-    parsed = new URL(origin);
-  } catch {
-    return false;
-  }
-
-  if (wildcard[1] && parsed.protocol !== `${wildcard[1]}:`) return false;
-  const suffix = wildcard[2];
-  const host = parsed.hostname.toLowerCase();
-  return host === suffix || host.endsWith(`.${suffix}`);
 }
 
 function readErrorOrigin(error: PortusError): string | undefined {
   if (isRecord(error.details) && typeof error.details.origin === "string") return error.details.origin;
+  return undefined;
+}
+
+function readErrorUrl(error: PortusError): string | undefined {
+  if (isRecord(error.details) && typeof error.details.url === "string") return error.details.url;
   return undefined;
 }
 
@@ -2187,12 +2172,10 @@ function originFromPayload(payload: Record<string, unknown>): string | undefined
   return url === undefined ? undefined : originFromUrl(url) ?? undefined;
 }
 
-function originFromBrowserEventPayload(payload: Record<string, unknown>): string | undefined {
-  const directOrigin = originFromPayload(payload);
-  if (directOrigin) return directOrigin;
+function urlFromBrowserEventPayload(payload: Record<string, unknown>): string | undefined {
+  if (typeof payload.url === "string") return payload.url;
   if (!isRecord(payload.tab)) return undefined;
-  const tabUrl = typeof payload.tab.url === "string" ? payload.tab.url : undefined;
-  return tabUrl === undefined ? undefined : originFromUrl(tabUrl) ?? undefined;
+  return typeof payload.tab.url === "string" ? payload.tab.url : undefined;
 }
 
 function redactUrlFromPayload(payload: Record<string, unknown>, redactUrls: boolean): string | undefined {

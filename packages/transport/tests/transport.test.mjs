@@ -10,7 +10,7 @@ import {
 } from "../dist/index.js";
 
 const request = {
-  protocolVersion: "1",
+  protocolVersion: "2",
   requestId: "req_001",
   kind: "request",
   type: "browser.list",

@@ -17,7 +17,9 @@ import {
   NetworkGetResultSchema,
   NetworkListResultSchema,
   PROTOCOL_VERSION,
-  PolicyOriginEntrySchema,
+  NavigationRuleMatchSchema,
+  NavigationRuleSchema,
+  NavigationUrlSchema,
   PolicyModeSchema,
   PolicyPreferencesSchema,
   PortusErrorSchema,
@@ -34,6 +36,12 @@ import {
   TabSchema,
   WaitResultSchema,
   createPortusError,
+  navigationPolicyAllowsUrl,
+  navigationRuleKey,
+  migrateLegacyPolicyPreferences,
+  migrateLegacySettingsProfileCatalog,
+  normalizeNavigationRulePattern,
+  normalizeNavigationUrl,
   type ActionResult,
   type BrowserName,
   type BrowserSession,
@@ -44,7 +52,9 @@ import {
   type ExtensionUxPreferences,
   type IconClickBehavior,
   type PortusError,
-  type PolicyOriginEntry,
+  type NavigationRule,
+  type NavigationRuleMatch,
+  type NavigationRulePattern,
   type PolicyMode,
   type PolicyPreferences,
   type RequestEnvelope,
@@ -241,7 +251,6 @@ export interface PortusExtensionStatus {
   nativeHostState: NativeHostState;
   brokerState: BrokerState;
   sidePanelOpen: boolean;
-  activeTabOrigin: string | null;
   activeTabUrl: string | null;
   browserId: string | null;
   nativeHostName: string;
@@ -607,14 +616,12 @@ export class PortusExtensionBridge {
     await this.ready;
     const activeTab = await this.getActiveTab().catch(() => null);
     const activeTabUrl = activeTab?.url ?? null;
-    const activeTabOrigin = activeTabUrl ? originFromUrl(activeTabUrl) : null;
 
     return {
       bridgeState: this.bridgeState,
       nativeHostState: this.nativeHostState,
       brokerState: this.brokerState,
       sidePanelOpen: this.sidePanelOpen,
-      activeTabOrigin,
       activeTabUrl,
       browserId: this.browserId,
       nativeHostName: this.nativeHostName,
@@ -733,9 +740,9 @@ export class PortusExtensionBridge {
 
   async openTab(url: string, active = true, windowId?: number): Promise<Tab> {
     await this.ready;
-    const origin = originFromUrl(url);
-    if (origin) this.ensureOriginPolicyAllowed(origin);
-    const createProperties: Record<string, unknown> = { url, active };
+    const normalizedUrl = readNavigationUrl(url);
+    this.ensureNavigationPolicyAllowed(normalizedUrl);
+    const createProperties: Record<string, unknown> = { url: normalizedUrl, active };
     if (windowId !== undefined) createProperties.windowId = windowId;
     const tab = await promisifyChromeCall<ChromeTab>((done) => {
       const result = this.chromeApi.tabs.create(createProperties);
@@ -746,10 +753,10 @@ export class PortusExtensionBridge {
 
   async navigateTab(tabId: number, url: string): Promise<Tab> {
     await this.ready;
-    const origin = originFromUrl(url);
-    if (origin) this.ensureOriginPolicyAllowed(origin);
+    const normalizedUrl = readNavigationUrl(url);
+    this.ensureNavigationPolicyAllowed(normalizedUrl);
     const tab = await mapChromeTabOperation(tabId, promisifyChromeCall<ChromeTab>((done) => {
-      const result = this.chromeApi.tabs.update(tabId, { url });
+      const result = this.chromeApi.tabs.update(tabId, { url: normalizedUrl });
       done(result as Promise<ChromeTab> | ChromeTab | undefined);
     }));
     return this.toPortusTab(tab);
@@ -1417,7 +1424,7 @@ export class PortusExtensionBridge {
       ? SettingsProfileCatalogSchema.parse((await this.sendNativeRequest("settings.profiles.export", {})).catalog)
       : this.createLocalSettingsProfileCatalog();
     return {
-      version: 1,
+      version: 2,
       kind: "portus.settingsProfiles",
       catalog
     };
@@ -1427,7 +1434,7 @@ export class PortusExtensionBridge {
     const now = this.now().toISOString();
     const currentContent = this.createCurrentSettingsProfileContent();
     return SettingsProfileCatalogSchema.parse({
-      version: 1,
+      version: 2,
       maxCustomProfiles: this.settingsProfiles.maxCustomProfiles,
       profiles: this.settingsProfiles.profiles.map((profile) => ({
         ...profile,
@@ -1479,9 +1486,10 @@ export class PortusExtensionBridge {
     return this.setTerminalPreferences(DEFAULT_TERMINAL_PREFERENCES, applyToHost, syncProfile);
   }
 
-  async addPolicyOrigin(
+  async addNavigationRule(
     kind: "allow" | "block",
-    origin: string,
+    match: NavigationRuleMatch,
+    value: string,
     source: "extension" | "cli" | "config" = "extension",
     reason?: string,
     syncBroker = source === "extension",
@@ -1489,20 +1497,20 @@ export class PortusExtensionBridge {
   ): Promise<PolicyPreferences> {
     await this.ready;
     if (syncProfile) await this.prepareSettingsProfileEdit();
-    const entry = this.createPolicyEntry(origin, source, reason);
-    const allowed = new Map(this.policyPreferences.allowedOrigins.map((item) => [item.origin, item]));
-    const blocked = new Map(this.policyPreferences.blockedOrigins.map((item) => [item.origin, item]));
+    const entry = this.createNavigationRule(match, value, source, reason);
+    const allowed = new Map(this.policyPreferences.allowedNavigationRules.map((item) => [navigationRuleKey(item), item]));
+    const blocked = new Map(this.policyPreferences.blockedNavigationRules.map((item) => [navigationRuleKey(item), item]));
 
     if (kind === "allow") {
-      allowed.set(entry.origin, entry);
+      allowed.set(navigationRuleKey(entry), entry);
     } else {
-      blocked.set(entry.origin, entry);
+      blocked.set(navigationRuleKey(entry), entry);
     }
 
     this.policyPreferences = PolicyPreferencesSchema.parse({
       ...this.policyPreferences,
-      allowedOrigins: [...allowed.values()],
-      blockedOrigins: [...blocked.values()]
+      allowedNavigationRules: [...allowed.values()],
+      blockedNavigationRules: [...blocked.values()]
     });
     if (!syncProfile) await this.persistPolicyPreferences();
     if (syncBroker) void this.syncPolicyPreferences();
@@ -1510,21 +1518,31 @@ export class PortusExtensionBridge {
     return this.policyPreferences;
   }
 
-  async removePolicyOrigin(kind: "allow" | "block", origin: string, syncBroker = true, syncProfile = syncBroker): Promise<PolicyPreferences> {
+  async removeNavigationRule(
+    kind: "allow" | "block",
+    match: NavigationRuleMatch,
+    value: string,
+    syncBroker = true,
+    syncProfile = syncBroker
+  ): Promise<PolicyPreferences> {
     await this.ready;
     if (syncProfile) await this.prepareSettingsProfileEdit();
-    const normalizedOrigin = normalizeOrigin(origin);
-    if (!normalizedOrigin) throw invalidOriginError(origin);
+    let rule: NavigationRulePattern;
+    try {
+      rule = normalizeNavigationRulePattern(match, value);
+    } catch {
+      throw invalidNavigationRuleError(match, value);
+    }
 
-    const allowed = new Map(this.policyPreferences.allowedOrigins.map((item) => [item.origin, item]));
-    const blocked = new Map(this.policyPreferences.blockedOrigins.map((item) => [item.origin, item]));
-    if (kind === "allow") allowed.delete(normalizedOrigin);
-    else blocked.delete(normalizedOrigin);
+    const allowed = new Map(this.policyPreferences.allowedNavigationRules.map((item) => [navigationRuleKey(item), item]));
+    const blocked = new Map(this.policyPreferences.blockedNavigationRules.map((item) => [navigationRuleKey(item), item]));
+    if (kind === "allow") allowed.delete(navigationRuleKey(rule));
+    else blocked.delete(navigationRuleKey(rule));
 
     this.policyPreferences = PolicyPreferencesSchema.parse({
       ...this.policyPreferences,
-      allowedOrigins: [...allowed.values()],
-      blockedOrigins: [...blocked.values()]
+      allowedNavigationRules: [...allowed.values()],
+      blockedNavigationRules: [...blocked.values()]
     });
     if (!syncProfile) await this.persistPolicyPreferences();
     if (syncBroker) void this.syncPolicyPreferences();
@@ -1532,12 +1550,12 @@ export class PortusExtensionBridge {
     return this.policyPreferences;
   }
 
-  async clearPolicyOrigins(kind: "allow" | "block", syncBroker = true, syncProfile = syncBroker): Promise<PolicyPreferences> {
+  async clearNavigationRules(kind: "allow" | "block", syncBroker = true, syncProfile = syncBroker): Promise<PolicyPreferences> {
     await this.ready;
     if (syncProfile) await this.prepareSettingsProfileEdit();
     this.policyPreferences = PolicyPreferencesSchema.parse({
       ...this.policyPreferences,
-      ...(kind === "allow" ? { allowedOrigins: [] } : { blockedOrigins: [] })
+      ...(kind === "allow" ? { allowedNavigationRules: [] } : { blockedNavigationRules: [] })
     });
     if (!syncProfile) await this.persistPolicyPreferences();
     if (syncBroker) void this.syncPolicyPreferences();
@@ -1558,12 +1576,12 @@ export class PortusExtensionBridge {
     return this.policyPreferences;
   }
 
-  async setOriginPolicyEnabled(enabled: boolean, syncBroker = true, syncProfile = syncBroker): Promise<PolicyPreferences> {
+  async setNavigationPolicyEnabled(enabled: boolean, syncBroker = true, syncProfile = syncBroker): Promise<PolicyPreferences> {
     await this.ready;
     if (syncProfile) await this.prepareSettingsProfileEdit();
     this.policyPreferences = PolicyPreferencesSchema.parse({
       ...this.policyPreferences,
-      originPolicyEnabled: enabled
+      navigationPolicyEnabled: enabled
     });
     if (!syncProfile) await this.persistPolicyPreferences();
     if (syncBroker) void this.syncPolicyPreferences();
@@ -1783,27 +1801,39 @@ export class PortusExtensionBridge {
         return { policy, status: await this.getStatus() };
       }
       case "portus.policy.allow.add": {
-        const policy = await this.addPolicyOrigin("allow", readString(message, "origin"), "extension", readOptionalString(message, "reason"));
+        const policy = await this.addNavigationRule(
+          "allow",
+          readNavigationRuleMatch(message),
+          readString(message, "value"),
+          "extension",
+          readOptionalString(message, "reason")
+        );
         return { policy, status: await this.getStatus() };
       }
       case "portus.policy.allow.remove": {
-        const policy = await this.removePolicyOrigin("allow", readString(message, "origin"));
+        const policy = await this.removeNavigationRule("allow", readNavigationRuleMatch(message), readString(message, "value"));
         return { policy, status: await this.getStatus() };
       }
       case "portus.policy.allow.clear": {
-        const policy = await this.clearPolicyOrigins("allow");
+        const policy = await this.clearNavigationRules("allow");
         return { policy, status: await this.getStatus() };
       }
       case "portus.policy.block.add": {
-        const policy = await this.addPolicyOrigin("block", readString(message, "origin"), "extension", readOptionalString(message, "reason"));
+        const policy = await this.addNavigationRule(
+          "block",
+          readNavigationRuleMatch(message),
+          readString(message, "value"),
+          "extension",
+          readOptionalString(message, "reason")
+        );
         return { policy, status: await this.getStatus() };
       }
       case "portus.policy.block.remove": {
-        const policy = await this.removePolicyOrigin("block", readString(message, "origin"));
+        const policy = await this.removeNavigationRule("block", readNavigationRuleMatch(message), readString(message, "value"));
         return { policy, status: await this.getStatus() };
       }
       case "portus.policy.block.clear": {
-        const policy = await this.clearPolicyOrigins("block");
+        const policy = await this.clearNavigationRules("block");
         return { policy, status: await this.getStatus() };
       }
       case "portus.policy.retention.set": {
@@ -1811,7 +1841,7 @@ export class PortusExtensionBridge {
         return { policy, status: await this.getStatus() };
       }
       case "portus.policy.enabled.set": {
-        const policy = await this.setOriginPolicyEnabled(readBoolean(message, "enabled"));
+        const policy = await this.setNavigationPolicyEnabled(readBoolean(message, "enabled"));
         return { policy, status: await this.getStatus() };
       }
       case "portus.command-policy.set": {
@@ -2138,13 +2168,13 @@ export class PortusExtensionBridge {
       case "policy.get":
         return { policy: this.getPolicyPreferences() };
       case "policy.allow.add":
-        return { policy: await this.addPolicyOrigin("allow", readString(request.payload, "origin"), "cli", readOptionalString(request.payload, "reason"), false) };
+        return { policy: await this.addNavigationRule("allow", readNavigationRuleMatch(request.payload), readString(request.payload, "value"), "cli", readOptionalString(request.payload, "reason"), false) };
       case "policy.allow.remove":
-        return { policy: await this.removePolicyOrigin("allow", readString(request.payload, "origin"), false) };
+        return { policy: await this.removeNavigationRule("allow", readNavigationRuleMatch(request.payload), readString(request.payload, "value"), false) };
       case "policy.block.add":
-        return { policy: await this.addPolicyOrigin("block", readString(request.payload, "origin"), "cli", readOptionalString(request.payload, "reason"), false) };
+        return { policy: await this.addNavigationRule("block", readNavigationRuleMatch(request.payload), readString(request.payload, "value"), "cli", readOptionalString(request.payload, "reason"), false) };
       case "policy.block.remove":
-        return { policy: await this.removePolicyOrigin("block", readString(request.payload, "origin"), false) };
+        return { policy: await this.removeNavigationRule("block", readNavigationRuleMatch(request.payload), readString(request.payload, "value"), false) };
       case "policy.retention.set":
         return { policy: await this.setSessionStepRetentionLimit(readNumber(request.payload, "limit"), false) };
       case "settings.profile.apply-selection":
@@ -2246,7 +2276,6 @@ export class PortusExtensionBridge {
       nativeHostState: this.nativeHostState,
       brokerState: this.brokerState,
       sidePanelOpen: this.sidePanelOpen,
-      activeTabOrigin: null,
       activeTabUrl: null,
       browserId: this.browserId,
       nativeHostName: this.nativeHostName,
@@ -2313,7 +2342,9 @@ export class PortusExtensionBridge {
       });
     }
 
-    const parsedPolicy = hasPolicy ? PolicyPreferencesSchema.parse(readRecord(message, "policyPreferences")) : undefined;
+    const parsedPolicy = hasPolicy
+      ? PolicyPreferencesSchema.parse(migrateLegacyPolicyPreferences(readRecord(message, "policyPreferences")))
+      : undefined;
     const parsedUx = hasUx ? ExtensionUxPreferencesSchema.parse(readRecord(message, "uxPreferences")) : undefined;
     const parsedTerminal = hasTerminal ? TerminalSettingsSchema.parse(readRecord(message, "terminalPreferences")) : undefined;
     const policy = parsedPolicy ? await this.importPolicyPreferences(parsedPolicy) : this.getPolicyPreferences();
@@ -2323,12 +2354,12 @@ export class PortusExtensionBridge {
   }
 
   private readImportedSettingsProfileCatalog(message: Record<string, unknown>): SettingsProfileCatalog | null {
-    const directCatalog = SettingsProfileCatalogSchema.safeParse(message.catalog);
+    const directCatalog = SettingsProfileCatalogSchema.safeParse(migrateLegacySettingsProfileCatalog(message.catalog));
     if (directCatalog.success) return directCatalog.data;
 
     const settings = isRecord(message.settings) ? message.settings : undefined;
     if (!settings) return null;
-    const settingsCatalog = SettingsProfileCatalogSchema.safeParse(settings.catalog);
+    const settingsCatalog = SettingsProfileCatalogSchema.safeParse(migrateLegacySettingsProfileCatalog(settings.catalog));
     if (settingsCatalog.success) return settingsCatalog.data;
     return null;
   }
@@ -2590,40 +2621,31 @@ export class PortusExtensionBridge {
 
 
   private ensureTabPolicyAllowed(tab: ChromeTab): void {
-    const origin = getTabOrigin(tab);
-    this.ensureOriginPolicyAllowed(origin);
+    const url = requireTabUrl(tab);
+    this.ensureNavigationPolicyAllowed(url);
+    ensureBrowserPageAccess(url);
     if (tab.id !== undefined) this.policyVisibleTabIds.add(tab.id);
   }
 
   private ensureTabMetadataPolicyAllowed(tab: ChromeTab): void {
-    const origin = tab.url ? originFromUrl(tab.url) : null;
-    if (origin) this.ensureOriginPolicyAllowed(origin);
+    if (tab.url) this.ensureNavigationPolicyAllowed(tab.url);
     if (tab.id !== undefined) this.policyVisibleTabIds.add(tab.id);
   }
 
   private isTabVisibleToAgent(tab: ChromeTab): boolean {
-    const origin = tab.url ? originFromUrl(tab.url) : null;
-    if (!origin) return true;
-    return this.isOriginPolicyAllowed(origin);
+    if (!tab.url) return true;
+    return navigationPolicyAllowsUrl(tab.url, this.policyPreferences);
   }
 
-  private isOriginPolicyAllowed(origin: string): boolean {
-    if (this.policyPreferences.originPolicyEnabled === false) return true;
-    if (this.policyPreferences.policyMode === "blocklist") {
-      return !this.policyPreferences.blockedOrigins.some((entry) => policyOriginMatches(entry.origin, origin));
-    }
-    return this.policyPreferences.allowedOrigins.some((entry) => policyOriginMatches(entry.origin, origin));
-  }
-
-  private ensureOriginPolicyAllowed(origin: string): void {
-    if (this.isOriginPolicyAllowed(origin)) return;
+  private ensureNavigationPolicyAllowed(url: string): void {
+    if (navigationPolicyAllowsUrl(url, this.policyPreferences)) return;
     const message = this.policyPreferences.policyMode === "blocklist"
-      ? `Portus policy blocks browser control for ${origin}.`
-      : `Portus policy does not allow browser control for ${origin}.`;
+      ? `Portus navigation policy blocks ${url}.`
+      : `Portus navigation policy does not allow ${url}.`;
     throw createPortusError({
-      code: "ORIGIN_BLOCKED",
+      code: "NAVIGATION_BLOCKED",
       message,
-      details: { origin }
+      details: { url }
     });
   }
 
@@ -2912,20 +2934,24 @@ export class PortusExtensionBridge {
   }
 
 
-  private createPolicyEntry(
-    origin: string,
+  private createNavigationRule(
+    match: NavigationRuleMatch,
+    value: string,
     source: "extension" | "cli" | "config",
     reason?: string
-  ): PolicyOriginEntry {
-    const normalizedOrigin = normalizeOrigin(origin);
-    if (!normalizedOrigin) throw invalidOriginError(origin);
-    const input: Record<string, unknown> = {
-      origin: normalizedOrigin,
+  ): NavigationRule {
+    let rule: NavigationRulePattern;
+    try {
+      rule = normalizeNavigationRulePattern(match, value);
+    } catch {
+      throw invalidNavigationRuleError(match, value);
+    }
+    return NavigationRuleSchema.parse({
+      ...rule,
       source,
-      updatedAt: this.now().toISOString()
-    };
-    if (reason) input.reason = reason;
-    return PolicyOriginEntrySchema.parse(input);
+      updatedAt: this.now().toISOString(),
+      ...(reason === undefined ? {} : { reason })
+    });
   }
 
   private async restoreExtensionState(): Promise<void> {
@@ -2944,8 +2970,13 @@ export class PortusExtensionBridge {
       const result = storage.get(POLICY_STORAGE_KEY);
       done(result as Promise<Record<string, unknown>> | Record<string, unknown> | undefined);
     });
-    const parsed = PolicyPreferencesSchema.safeParse(stored[POLICY_STORAGE_KEY]);
-    if (parsed.success) this.policyPreferences = parsed.data;
+    const input = stored[POLICY_STORAGE_KEY];
+    const migrated = migrateLegacyPolicyPreferences(input);
+    const parsed = PolicyPreferencesSchema.safeParse(migrated);
+    if (parsed.success) {
+      this.policyPreferences = parsed.data;
+      if (migrated !== input) await this.persistPolicyPreferences();
+    }
   }
 
   private async persistPolicyPreferences(): Promise<void> {
@@ -3195,57 +3226,34 @@ function readGlobalChromeApi(): PortusChromeApi {
 }
 
 
-function normalizeOrigin(value: string): string | null {
-  const pattern = normalizePolicyOriginPattern(value);
-  if (pattern) return pattern;
-  try {
-    return originFromUrl(value);
-  } catch {
-    return null;
+function readNavigationUrl(value: string): string {
+  const parsed = NavigationUrlSchema.safeParse(value);
+  if (!parsed.success) {
+    throw createPortusError({
+      code: "INVALID_MESSAGE",
+      message: `Expected an absolute navigation URL: ${value}.`,
+      details: { url: value }
+    });
   }
+  return normalizeNavigationUrl(parsed.data);
 }
 
-function invalidOriginError(origin: string): PortusError {
-  return createPortusError({
+function readNavigationRuleMatch(record: Record<string, unknown>): NavigationRuleMatch {
+  const parsed = NavigationRuleMatchSchema.safeParse(record.match);
+  if (parsed.success) return parsed.data;
+  throw createPortusError({
     code: "INVALID_MESSAGE",
-    message: `Expected http or https origin: ${origin}.`,
-    details: { origin }
+    message: "Expected navigation rule match type.",
+    details: { match: record.match }
   });
 }
 
-function originFromUrl(value: string): string | null {
-  try {
-    const parsed = new URL(value);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
-    return parsed.origin;
-  } catch {
-    return null;
-  }
-}
-
-function normalizePolicyOriginPattern(value: string): string | null {
-  const normalized = value.trim().toLowerCase();
-  const wildcard = normalized.match(/^(?:(https?):\/\/)?\*\.([a-z0-9-]+(?:\.[a-z0-9-]+)+)$/);
-  if (!wildcard) return null;
-  return wildcard[1] ? `${wildcard[1]}://*.${wildcard[2]}` : `*.${wildcard[2]}`;
-}
-
-function policyOriginMatches(pattern: string, origin: string): boolean {
-  if (pattern === origin) return true;
-  const wildcard = pattern.toLowerCase().match(/^(?:(https?):\/\/)?\*\.([a-z0-9-]+(?:\.[a-z0-9-]+)+)$/);
-  if (!wildcard) return false;
-
-  let parsed: URL;
-  try {
-    parsed = new URL(origin);
-  } catch {
-    return false;
-  }
-
-  if (wildcard[1] && parsed.protocol !== `${wildcard[1]}:`) return false;
-  const suffix = wildcard[2];
-  const host = parsed.hostname.toLowerCase();
-  return host === suffix || host.endsWith(`.${suffix}`);
+function invalidNavigationRuleError(match: NavigationRuleMatch, value: string): PortusError {
+  return createPortusError({
+    code: "INVALID_MESSAGE",
+    message: `Invalid ${match} navigation rule: ${value}.`,
+    details: { match, value }
+  });
 }
 
 function createTerminalRequestId(): string {
@@ -3424,31 +3432,32 @@ function inferImageMimeType(data: string): string {
   return match?.[1] ?? "image/png";
 }
 
-function getTabOrigin(tab: ChromeTab): string {
+function requireTabUrl(tab: ChromeTab): string {
   if (!tab.url) {
     throw createPortusError({
       code: "BROWSER_ACCESS_DENIED",
       message: "Tab URL is unavailable for browser access validation."
     });
   }
-  try {
-    const url = new URL(tab.url);
-    if (url.protocol !== "http:" && url.protocol !== "https:") {
-      throw createPortusError({
-        code: "BROWSER_ACCESS_DENIED",
-        message: `Browser access is unavailable for ${url.protocol} pages.`,
-        details: { url: tab.url }
-      });
-    }
-    return url.origin;
-  } catch (error) {
-    if (isPortusError(error)) throw error;
+  const parsed = NavigationUrlSchema.safeParse(tab.url);
+  if (!parsed.success) {
     throw createPortusError({
       code: "BROWSER_ACCESS_DENIED",
       message: "Tab URL is invalid for browser access validation.",
       details: { url: tab.url }
     });
   }
+  return normalizeNavigationUrl(parsed.data);
+}
+
+function ensureBrowserPageAccess(value: string): void {
+  const url = new URL(value);
+  if (url.protocol === "http:" || url.protocol === "https:") return;
+  throw createPortusError({
+    code: "BROWSER_ACCESS_DENIED",
+    message: `Browser access is unavailable for ${url.protocol} pages.`,
+    details: { url: value }
+  });
 }
 
 function readViewport(value: unknown): { width: number; height: number; deviceScaleFactor: number } {

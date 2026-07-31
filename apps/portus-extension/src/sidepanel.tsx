@@ -1,7 +1,7 @@
 import * as React from "react";
 import { createRoot } from "react-dom/client";
 import { ChevronDownIcon, InfoIcon, PencilIcon, PlusIcon, RefreshCwIcon, SettingsIcon, SquareTerminalIcon, Trash2Icon, XIcon } from "lucide-react";
-import { DEFAULT_COMMAND_POLICY, ExtensionUxPreferencesSchema, SETTINGS_PROFILE_CREATE_OPTION, type CommandType, type ExtensionUxPreferences, type PolicyPreferences } from "@portus/protocol";
+import { DEFAULT_COMMAND_POLICY, ExtensionUxPreferencesSchema, SETTINGS_PROFILE_CREATE_OPTION, navigationRuleKey, type CommandType, type ExtensionUxPreferences, type NavigationRule, type NavigationRuleMatch, type PolicyPreferences } from "@portus/protocol";
 import {
   TerminalSettingsSchema,
   type TerminalClientMessage,
@@ -31,14 +31,13 @@ import { commandGroups } from "./gui/commandGroups.js";
 import { Diagnostics, NativeRadioGroupField, Section, SelectField, StatusBadge, StatusGrid } from "./gui/components.js";
 import { connectRuntimePort, isRecord, readLocalStorageValue, readStatus, readStatusMessage, sendRuntimeMessage, type RuntimePort } from "./gui/chromeApi.js";
 import {
-  describeOriginPolicy,
-  labelForBridgeState,
-  policyInputForOrigin
+  describeNavigationPolicy,
+  labelForBridgeState
 } from "./gui/status.js";
 import type { PortusExtensionStatus } from "./index.js";
 
 type ViewName = ExtensionUxPreferences["defaultPanelView"];
-type PolicyUrlListKind = "allow" | "block";
+type PolicyRuleListKind = "allow" | "block";
 const TERMINAL_PREFERENCES_STORAGE_KEY = "portus.terminalPreferences";
 
 export function SidePanelApp(): React.JSX.Element {
@@ -47,8 +46,8 @@ export function SidePanelApp(): React.JSX.Element {
   const [diagnostic, setDiagnostic] = React.useState("Checking Bridge state.");
   const [isError, setIsError] = React.useState(false);
   const [view, setView] = React.useState<ViewName | null>(null);
-  const [originInput, setOriginInput] = React.useState("");
-  const [includeSubdomains, setIncludeSubdomains] = React.useState(true);
+  const [navigationRuleMatch, setNavigationRuleMatch] = React.useState<NavigationRuleMatch>("authority");
+  const [navigationRuleValue, setNavigationRuleValue] = React.useState("");
   const [retentionValue, setRetentionValue] = React.useState("10");
   const [terminalPreferencesOverride, setTerminalPreferencesOverride] = React.useState<TerminalSettings | null>(null);
 
@@ -160,28 +159,25 @@ export function SidePanelApp(): React.JSX.Element {
     await mutateStatus(message, successMessage);
   }
 
-  async function mutateManualOrigins(type: "portus.policy.allow.add" | "portus.policy.block.add", listName: "allowlist" | "blocklist"): Promise<void> {
-    const parsed = parseOriginInput(originInput, includeSubdomains);
-    if (parsed.origins.length === 0) {
-      applyError(new Error("Enter at least one origin first."));
+  async function mutateManualRule(type: "portus.policy.allow.add" | "portus.policy.block.add", listName: "allowlist" | "blocklist"): Promise<void> {
+    const value = navigationRuleValue.trim();
+    if (!value) {
+      applyError(new Error("Enter a navigation rule value first."));
       return;
     }
     setBusy(true);
-    setDiagnostic("Saving origins.");
+    setDiagnostic("Saving navigation rule.");
     setIsError(false);
     try {
-      let latest: PortusExtensionStatus | null = status;
-      for (const origin of parsed.origins) {
-        const response = await sendRuntimeMessage({ type, origin, reason: "Portus Browser user policy" });
-        latest = readStatus(response);
-      }
-      if (latest) applyStatus(latest);
-      if (parsed.invalid.length === 0) {
-        setOriginInput("");
-        setDiagnostic(`${parsed.origins.length} ${parsed.origins.length === 1 ? "origin" : "origins"} added to ${listName}.`);
-      } else {
-        setDiagnostic(`${parsed.origins.length} added to ${listName}. Invalid: ${parsed.invalid.join(", ")}.`);
-      }
+      const response = await sendRuntimeMessage({
+        type,
+        match: navigationRuleMatch,
+        value,
+        reason: "Portus Browser user policy"
+      });
+      applyStatus(readStatus(response));
+      setNavigationRuleValue("");
+      setDiagnostic(`${navigationRuleMatch} rule added to ${listName}.`);
     } catch (error) {
       applyError(error);
     } finally {
@@ -272,9 +268,10 @@ export function SidePanelApp(): React.JSX.Element {
           <ScrollArea className="h-full min-h-0">
           <SettingsPanel
               busy={busy}
-              includeSubdomains={includeSubdomains}
-              onIncludeSubdomainsChange={setIncludeSubdomains}
-              onOriginInputChange={setOriginInput}
+              navigationRuleMatch={navigationRuleMatch}
+              navigationRuleValue={navigationRuleValue}
+              onNavigationRuleMatchChange={setNavigationRuleMatch}
+              onNavigationRuleValueChange={setNavigationRuleValue}
               onRefresh={() => void refreshStatus()}
               onRestoreDefaultCommandPolicy={() => void restoreDefaultCommandPolicy()}
               onTerminalDiagnostic={(message) => {
@@ -287,11 +284,10 @@ export function SidePanelApp(): React.JSX.Element {
                 setStatus((current) => current ? { ...current, terminalPreferences } : current);
               }}
               onError={applyError}
-              originInput={originInput}
               retentionValue={retentionValue}
               setRetentionValue={setRetentionValue}
               status={status}
-              mutateManualOrigins={mutateManualOrigins}
+              mutateManualRule={mutateManualRule}
               mutateCommandPolicy={mutateCommandPolicy}
               mutatePolicy={mutatePolicy}
               mutateSettings={mutateSettings}
@@ -309,40 +305,40 @@ export function SidePanelApp(): React.JSX.Element {
 function SettingsPanel({
   active,
   busy,
-  includeSubdomains,
-  mutateManualOrigins,
+  navigationRuleMatch,
+  navigationRuleValue,
+  mutateManualRule,
   mutateCommandPolicy,
   mutatePolicy,
   mutateSettings,
   mutateUx,
   onError,
-  onIncludeSubdomainsChange,
-  onOriginInputChange,
+  onNavigationRuleMatchChange,
+  onNavigationRuleValueChange,
   onRefresh,
   onRestoreDefaultCommandPolicy,
   onTerminalDiagnostic,
   onTerminalPreferencesChange,
-  originInput,
   retentionValue,
   setRetentionValue,
   status
 }: {
   active: boolean;
   busy: boolean;
-  includeSubdomains: boolean;
-  mutateManualOrigins(type: "portus.policy.allow.add" | "portus.policy.block.add", listName: "allowlist" | "blocklist"): Promise<void>;
+  navigationRuleMatch: NavigationRuleMatch;
+  navigationRuleValue: string;
+  mutateManualRule(type: "portus.policy.allow.add" | "portus.policy.block.add", listName: "allowlist" | "blocklist"): Promise<void>;
   mutateCommandPolicy(commandType: CommandType, enabled: boolean): Promise<void>;
   mutatePolicy(message: Record<string, unknown>, successMessage: string): Promise<void>;
   mutateSettings(message: Record<string, unknown>, successMessage: string): Promise<void>;
   mutateUx(message: Record<string, unknown>): Promise<void>;
   onError(error: unknown): void;
-  onIncludeSubdomainsChange(value: boolean): void;
-  onOriginInputChange(value: string): void;
+  onNavigationRuleMatchChange(value: NavigationRuleMatch): void;
+  onNavigationRuleValueChange(value: string): void;
   onRefresh(): void;
   onRestoreDefaultCommandPolicy(): void;
   onTerminalDiagnostic(message: string): void;
   onTerminalPreferencesChange(terminalPreferences: TerminalSettings): void;
-  originInput: string;
   retentionValue: string;
   setRetentionValue(value: string): void;
   status: PortusExtensionStatus | null;
@@ -353,7 +349,7 @@ function SettingsPanel({
   const settingsProfiles = status?.settingsProfiles;
   const profileControlsDisabled = busy || !settingsProfiles || status?.bridgeState !== "connected";
   const importInputRef = React.useRef<HTMLInputElement | null>(null);
-  const [clearUrlsTarget, setClearUrlsTarget] = React.useState<PolicyUrlListKind | null>(null);
+  const [clearRulesTarget, setClearRulesTarget] = React.useState<PolicyRuleListKind | null>(null);
   const [renameDialogOpen, setRenameDialogOpen] = React.useState(false);
   const [renameProfileName, setRenameProfileName] = React.useState("");
   const [deleteProfileRequested, setDeleteProfileRequested] = React.useState(false);
@@ -369,16 +365,15 @@ function SettingsPanel({
     : customProfileCount <= 1
       ? "At least one custom profile is required."
       : "Delete active profile";
-  const selectedPolicyListKind: PolicyUrlListKind = policy?.policyMode === "allowlist" ? "allow" : "block";
-  const selectedPolicyListLabel = selectedPolicyListKind === "allow" ? "allowlist" : "blocklist";
+  const selectedPolicyListKind: PolicyRuleListKind = policy?.policyMode === "allowlist" ? "allow" : "block";
   const selectedPolicyListCount = selectedPolicyListKind === "allow"
-    ? policy?.allowedOrigins.length ?? 0
-    : policy?.blockedOrigins.length ?? 0;
-  const clearUrlsTargetLabel = clearUrlsTarget === "allow" ? "allowlist" : "blocklist";
-  const clearUrlsTargetCount = clearUrlsTarget === "allow"
-    ? policy?.allowedOrigins.length ?? 0
-    : clearUrlsTarget === "block"
-      ? policy?.blockedOrigins.length ?? 0
+    ? policy?.allowedNavigationRules.length ?? 0
+    : policy?.blockedNavigationRules.length ?? 0;
+  const clearRulesTargetLabel = clearRulesTarget === "allow" ? "allowlist" : "blocklist";
+  const clearRulesTargetCount = clearRulesTarget === "allow"
+    ? policy?.allowedNavigationRules.length ?? 0
+    : clearRulesTarget === "block"
+      ? policy?.blockedNavigationRules.length ?? 0
       : 0;
 
   function importSettingsFromJson(rawJson: string): void {
@@ -460,17 +455,17 @@ function SettingsPanel({
     await mutateSettings({ type: "portus.settings-profile.auto-save.set", enabled }, enabled ? "Auto-save enabled." : "Auto-save disabled.");
   }
 
-  async function toggleOriginPolicies(enabled: boolean): Promise<void> {
-    await mutatePolicy({ type: "portus.policy.enabled.set", enabled }, enabled ? "Origin policies enabled." : "Origin policies disabled.");
+  async function toggleNavigationPolicy(enabled: boolean): Promise<void> {
+    await mutatePolicy({ type: "portus.policy.enabled.set", enabled }, enabled ? "Navigation policy enabled." : "Navigation policy disabled.");
   }
 
-  async function confirmClearPolicyUrls(): Promise<void> {
-    if (!clearUrlsTarget) return;
-    const target = clearUrlsTarget;
-    setClearUrlsTarget(null);
+  async function confirmClearPolicyRules(): Promise<void> {
+    if (!clearRulesTarget) return;
+    const target = clearRulesTarget;
+    setClearRulesTarget(null);
     await mutatePolicy(
       { type: target === "allow" ? "portus.policy.allow.clear" : "portus.policy.block.clear" },
-      `${target === "allow" ? "Allowlist" : "Blocklist"} URLs cleared.`
+      `${target === "allow" ? "Allowlist" : "Blocklist"} rules cleared.`
     );
   }
 
@@ -655,24 +650,24 @@ function SettingsPanel({
           <div className="flex w-1/2 items-center justify-between gap-[var(--portus-subsection-gap)]">
             <label className="flex items-center gap-[var(--portus-subsection-gap)] text-sm">
               <Checkbox
-                checked={policy?.originPolicyEnabled ?? true}
+                checked={policy?.navigationPolicyEnabled ?? true}
                 disabled={busy || !policy}
-                onCheckedChange={(value) => void toggleOriginPolicies(value === true)}
+                onCheckedChange={(value) => void toggleNavigationPolicy(value === true)}
               />
-              <span>Enable Policies</span>
+              <span>Enable Policy</span>
             </label>
             <Button
               disabled={busy || !policy || selectedPolicyListCount === 0}
-              onClick={() => setClearUrlsTarget(selectedPolicyListKind)}
+              onClick={() => setClearRulesTarget(selectedPolicyListKind)}
               size="sm"
               type="button"
               variant="secondary"
             >
-              Clear URLs
+              Clear Rules
             </Button>
           </div>
         }
-        title="Origin Policy"
+        title="Navigation Policy"
       >
         <FieldGroup>
           <NativeRadioGroupField
@@ -688,41 +683,52 @@ function SettingsPanel({
             value={policy?.policyMode ?? "blocklist"}
           />
           <Field>
-            <FieldLabel htmlFor="origin-input">Origins</FieldLabel>
-            <Textarea
-              className="min-h-20 resize-y"
+            <FieldLabel htmlFor="navigation-rule-match">Match</FieldLabel>
+            <SelectField
               disabled={busy}
-              id="origin-input"
-              onChange={(event) => onOriginInputChange(event.currentTarget.value)}
-              placeholder="https://example.com, https://docs.example.com"
-              rows={4}
-              value={originInput}
+              id="navigation-rule-match"
+              onChange={(value) => onNavigationRuleMatchChange(value as NavigationRuleMatch)}
+              options={[
+                { value: "scheme", label: "Scheme" },
+                { value: "authority", label: "Authority" },
+                { value: "host-wildcard", label: "Host Wildcard" },
+                { value: "url-exact", label: "Exact URL" },
+                { value: "url-prefix", label: "URL Prefix" }
+              ]}
+              value={navigationRuleMatch}
             />
           </Field>
-          <label className="flex items-center gap-[var(--portus-subsection-gap)] text-sm">
-            <Checkbox checked={includeSubdomains} disabled={busy} onCheckedChange={(value) => onIncludeSubdomainsChange(value === true)} />
-            <span>Include Subdomains</span>
-          </label>
+          <Field>
+            <FieldLabel htmlFor="navigation-rule-value">Value</FieldLabel>
+            <Input
+              disabled={busy}
+              id="navigation-rule-value"
+              onChange={(event) => onNavigationRuleValueChange(event.currentTarget.value)}
+              placeholder="file:, chrome://settings/, or *.example.com"
+              value={navigationRuleValue}
+            />
+            <FieldDescription>The selected match type defines how this value is compared with navigation targets.</FieldDescription>
+          </Field>
         </FieldGroup>
         <div className="grid grid-cols-2 gap-[var(--portus-subsection-gap)]">
-          <Button disabled={busy} onClick={() => void mutateManualOrigins("portus.policy.allow.add", "allowlist")} type="button" variant="secondary">
+          <Button disabled={busy} onClick={() => void mutateManualRule("portus.policy.allow.add", "allowlist")} type="button" variant="secondary">
             Add Allow
           </Button>
-          <Button disabled={busy} onClick={() => void mutateManualOrigins("portus.policy.block.add", "blocklist")} type="button" variant="secondary">
+          <Button disabled={busy} onClick={() => void mutateManualRule("portus.policy.block.add", "blocklist")} type="button" variant="secondary">
             Add Block
           </Button>
         </div>
         <div className="grid grid-cols-2 gap-[var(--portus-section-gap)]">
-          <OriginChipList
+          <NavigationRuleChipList
             disabled={busy}
-            origins={policy?.allowedOrigins.map((entry) => entry.origin) ?? []}
-            onRemove={(origin) => void mutatePolicy({ type: "portus.policy.allow.remove", origin }, "Origin removed from allowlist.")}
+            onRemove={(rule) => void mutatePolicy({ type: "portus.policy.allow.remove", match: rule.match, value: rule.value }, "Rule removed from allowlist.")}
+            rules={policy?.allowedNavigationRules ?? []}
             title="Allowed"
           />
-          <OriginChipList
+          <NavigationRuleChipList
             disabled={busy}
-            origins={policy?.blockedOrigins.map((entry) => entry.origin) ?? []}
-            onRemove={(origin) => void mutatePolicy({ type: "portus.policy.block.remove", origin }, "Origin removed from blocklist.")}
+            onRemove={(rule) => void mutatePolicy({ type: "portus.policy.block.remove", match: rule.match, value: rule.value }, "Rule removed from blocklist.")}
+            rules={policy?.blockedNavigationRules ?? []}
             title="Blocked"
           />
         </div>
@@ -762,12 +768,12 @@ function SettingsPanel({
       <Section
         className="pt-[var(--portus-section-gap-large)]"
         showDivider={false}
-        action={<p className={cn("max-w-44 break-words text-right text-xs leading-5", status?.activeTabOrigin ? "text-brand" : "text-muted-foreground")}>{status?.activeTabOrigin ?? "none"}</p>}
-        title="Current Origin"
+        action={<p className={cn("max-w-44 break-words text-right text-xs leading-5", status?.activeTabUrl ? "text-brand" : "text-muted-foreground")}>{status?.activeTabUrl ?? "none"}</p>}
+        title="Current URL"
       >
         <StatusGrid
           rows={[
-            { label: "Agent Access", value: status ? describeOriginPolicy(status) : "unknown" }
+            { label: "Agent Access", value: status ? describeNavigationPolicy(status) : "unknown" }
           ]}
         />
       </Section>
@@ -861,14 +867,14 @@ function SettingsPanel({
           Restore Defaults
         </Button>
       </div>
-      {clearUrlsTarget ? (
+      {clearRulesTarget ? (
         <ConfirmDialog
           busy={busy}
-          confirmLabel="Clear URLs"
-          description={`This removes all URLs from the active ${clearUrlsTargetLabel}. The ${clearUrlsTarget === "allow" ? "blocklist" : "allowlist"} is not changed.`}
-          onCancel={() => setClearUrlsTarget(null)}
-          onConfirm={() => void confirmClearPolicyUrls()}
-          title={`Clear ${clearUrlsTargetCount} ${clearUrlsTargetLabel} ${clearUrlsTargetCount === 1 ? "URL" : "URLs"}?`}
+          confirmLabel="Clear Rules"
+          description={`This removes all rules from the active ${clearRulesTargetLabel}. The ${clearRulesTarget === "allow" ? "blocklist" : "allowlist"} is not changed.`}
+          onCancel={() => setClearRulesTarget(null)}
+          onConfirm={() => void confirmClearPolicyRules()}
+          title={`Clear ${clearRulesTargetCount} ${clearRulesTargetLabel} ${clearRulesTargetCount === 1 ? "rule" : "rules"}?`}
         />
       ) : null}
       {renameDialogOpen ? (
@@ -980,86 +986,57 @@ function ConfirmDialog({
   );
 }
 
-function OriginChipList({
+function NavigationRuleChipList({
   title,
-  origins,
+  rules,
   disabled,
   onRemove
 }: {
   title: string;
-  origins: string[];
+  rules: NavigationRule[];
   disabled: boolean;
-  onRemove(origin: string): void;
+  onRemove(rule: NavigationRule): void;
 }): React.JSX.Element {
-  const entries = origins.length === 0 ? ["none"] : origins.slice().sort((a, b) => a.localeCompare(b));
+  const entries = [...rules].sort((a, b) => a.match.localeCompare(b.match) || a.value.localeCompare(b.value));
   return (
     <div className="grid gap-[var(--portus-subsection-gap)]">
       <h3 className="text-xs font-bold text-muted-foreground">{title}</h3>
-      <ul className="flex flex-wrap gap-1.5">
-        {entries.map((origin) => (
-          <li className="min-w-0 max-w-full" key={origin}>
-            {origin === "none" ? (
-              <span className="inline-flex min-h-7 items-center rounded-[var(--portus-chip-radius)] bg-muted px-2.5 py-1 text-xs text-muted-foreground">none</span>
-            ) : (
-              <span className="inline-flex max-w-full items-center gap-1 rounded-[var(--portus-chip-radius)] bg-muted py-1 pl-2.5 pr-1 text-xs text-foreground">
-                <span className="min-w-0 truncate">{origin}</span>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      aria-label={`Remove ${origin} from ${title}`}
-                      className="size-5 shrink-0"
-                      disabled={disabled}
-                      onClick={() => onRemove(origin)}
-                      size="icon"
-                      type="button"
-                      variant="ghost"
-                    >
-                      <XIcon aria-hidden="true" className="size-3" />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>{`Remove ${origin} from ${title}`}</TooltipContent>
-                </Tooltip>
-              </span>
-            )}
-          </li>
-        ))}
-      </ul>
+      {entries.length === 0 ? (
+        <span className="inline-flex min-h-7 w-fit items-center rounded-[var(--portus-chip-radius)] bg-muted px-2.5 py-1 text-xs text-muted-foreground">none</span>
+      ) : (
+        <ul className="flex flex-wrap gap-1.5">
+          {entries.map((rule) => {
+            const label = `${rule.match}: ${rule.value}`;
+            return (
+              <li className="min-w-0 max-w-full" key={navigationRuleKey(rule)}>
+                <span className="inline-flex max-w-full items-center gap-1 rounded-[var(--portus-chip-radius)] bg-muted py-1 pl-2.5 pr-1 text-xs text-foreground">
+                  <span className="min-w-0 truncate">{label}</span>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        aria-label={`Remove ${label} from ${title}`}
+                        className="size-5 shrink-0"
+                        disabled={disabled}
+                        onClick={() => onRemove(rule)}
+                        size="icon"
+                        type="button"
+                        variant="ghost"
+                      >
+                        <XIcon aria-hidden="true" className="size-3" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>{`Remove ${label} from ${title}`}</TooltipContent>
+                  </Tooltip>
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 }
 
-function parseOriginInput(input: string, includeSubdomains: boolean): { origins: string[]; invalid: string[] } {
-  const origins: string[] = [];
-  const invalid: string[] = [];
-  const seen = new Set<string>();
-  for (const rawToken of input.split(/[,\s]+/)) {
-    const token = rawToken.trim();
-    if (!token) continue;
-    const normalized = normalizeOriginInputToken(token);
-    if (!normalized) {
-      invalid.push(token);
-      continue;
-    }
-    const policyOrigin = policyInputForOrigin(normalized, includeSubdomains);
-    if (seen.has(policyOrigin)) continue;
-    seen.add(policyOrigin);
-    origins.push(policyOrigin);
-  }
-  return { origins, invalid };
-}
-
-function normalizeOriginInputToken(input: string): string | null {
-  const token = input.trim();
-  if (!token) return null;
-  if (/^(?:(https?):\/\/)?\*\./i.test(token)) return token.toLowerCase();
-  try {
-    const parsed = new URL(token.includes("://") ? token : `https://${token}`);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
-    return parsed.origin;
-  } catch {
-    return null;
-  }
-}
 
 function TerminalSettingsSection({
   active,

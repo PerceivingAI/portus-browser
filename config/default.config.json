@@ -70,8 +70,8 @@
   },
   "policy": {
     "defaultPolicyMode": "blocklist",
-    "defaultAllowlist": [],
-    "defaultBlocklist": [],
+    "defaultAllowedNavigationRules": [],
+    "defaultBlockedNavigationRules": [],
     "sessionStepRetentionLimit": 10
   },
   "events": {

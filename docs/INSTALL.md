@@ -79,7 +79,7 @@ Do this separately for every browser type you want to use.
 
 The extension can only run after `pnpm build`, because the manifest points to built files under `apps/portus-extension/dist`.
 
-The manifest permanently requests `"<all_urls>"` host access for normal web pages. Portus does not ask for or revoke Chrome access one site at a time. Agent authorization is controlled by the active Portus origin policy and command policy while the Bridge is connected.
+The manifest permanently requests `"<all_urls>"` host access for normal web pages. Portus does not ask for or revoke Chrome access one site at a time. Agent authorization is controlled by the active Portus navigation policy and command policy while the Bridge is connected. Navigation policy has no built-in scheme restriction; the user can add scheme, authority, wildcard-host, exact-URL, or URL-prefix rules for any URL the browser supports.
 
 ## Run The Broker
 

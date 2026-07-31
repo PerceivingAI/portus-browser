@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,7 +24,7 @@ function request(requestId, type, payload = {}, extras = {}) {
     : { auth: { brokerToken: TEST_BROKER_TOKEN } };
   return {
     ...auth,
-    protocolVersion: "1",
+    protocolVersion: "2",
     requestId,
     kind: "request",
     type,
@@ -297,10 +297,10 @@ test("routes commands only to bridge-connected sessions with required capabiliti
       if (command.type === "policy.get") {
         return {
           policy: {
-            originPolicyEnabled: true,
+            navigationPolicyEnabled: true,
             policyMode: "blocklist",
-            allowedOrigins: [],
-            blockedOrigins: [],
+            allowedNavigationRules: [],
+            blockedNavigationRules: [],
             commandPolicy: DEFAULT_COMMAND_POLICY,
             advancedBackendEnabled: false,
             sessionStepRetentionLimit: 10
@@ -425,9 +425,10 @@ test("stores bridge policy preferences and syncs routed policy updates", async (
   const register = await broker.handleRequest(request("req_001", "bridge.register", {
     ...registration,
     policyPreferences: {
-      allowedOrigins: [],
-      blockedOrigins: [{
-        origin: "https://blocked.example",
+      allowedNavigationRules: [],
+      blockedNavigationRules: [{
+        match: "authority",
+        value: "https://blocked.example",
         source: "extension",
         updatedAt: "2026-04-28T00:00:00.000Z"
       }], 
@@ -443,12 +444,13 @@ test("stores bridge policy preferences and syncs routed policy updates", async (
         routed.push(command);
         return {
           policy: {
-            allowedOrigins: [{
-              origin: "https://example.com",
+            allowedNavigationRules: [{
+              match: "authority",
+              value: "https://example.com",
               source: "cli",
               updatedAt: "2026-04-28T00:00:00.000Z"
             }],
-            blockedOrigins: [],
+            blockedNavigationRules: [],
             sessionStepRetentionLimit: 20
           }
         };
@@ -461,12 +463,13 @@ test("stores bridge policy preferences and syncs routed policy updates", async (
     url: "https://blocked.example/a"
   }));
   assert.equal(blocked.ok, false);
-  assert.equal(blocked.error.code, "ORIGIN_BLOCKED");
+  assert.equal(blocked.error.code, "NAVIGATION_BLOCKED");
   assert.equal(routed.length, 0);
 
   const policy = await broker.handleRequest(request("req_003", "policy.allow.add", {
     browserId: register.result.browserId,
-    origin: "https://example.com"
+    match: "authority",
+    value: "https://example.com"
   }));
   assert.equal(policy.ok, true);
   assert.equal(policy.result.policy.sessionStepRetentionLimit, 20);
@@ -480,16 +483,17 @@ test("stores bridge policy preferences and syncs routed policy updates", async (
   assert.equal(routed[1].type, "tab.open");
 });
 
-test("origin policy disabled bypasses URL lists without disabling command policy", async () => {
+test("navigation policy disabled bypasses URL rules without disabling command policy", async () => {
   const routed = [];
   const broker = createBroker({ brokerToken: TEST_BROKER_TOKEN, now: fixedClock() });
   const register = await broker.handleRequest(request("req_001", "bridge.register", {
     ...registration,
     policyPreferences: {
-      originPolicyEnabled: false,
-      allowedOrigins: [],
-      blockedOrigins: [{
-        origin: "https://blocked.example",
+      navigationPolicyEnabled: false,
+      allowedNavigationRules: [],
+      blockedNavigationRules: [{
+        match: "authority",
+        value: "https://blocked.example",
         source: "extension",
         updatedAt: "2026-04-28T00:00:00.000Z"
       }],
@@ -527,10 +531,11 @@ test("origin policy disabled bypasses URL lists without disabling command policy
   await broker.handleRequest(request("req_003", "policy.sync", {
     browserId: register.result.browserId,
     policyPreferences: {
-      originPolicyEnabled: false,
-      allowedOrigins: [],
-      blockedOrigins: [{
-        origin: "https://blocked.example",
+      navigationPolicyEnabled: false,
+      allowedNavigationRules: [],
+      blockedNavigationRules: [{
+        match: "authority",
+        value: "https://blocked.example",
         source: "extension",
         updatedAt: "2026-04-28T00:00:00.000Z"
       }],
@@ -550,20 +555,27 @@ test("origin policy disabled bypasses URL lists without disabling command policy
   assert.equal(disabledCommand.error.code, "COMMAND_DISABLED_BY_POLICY");
 });
 
-test("routes existing-tab navigation through active origin policy and records session steps", async () => {
+test("routes existing-tab navigation through active navigation policy and records session steps", async () => {
   const routed = [];
   const broker = createBroker({ brokerToken: TEST_BROKER_TOKEN, now: fixedClock() });
   const register = await broker.handleRequest(request("req_001", "bridge.register", {
     ...registration,
     policyPreferences: {
       policyMode: "allowlist",
-      allowedOrigins: [{
-        origin: "https://example.com",
+      allowedNavigationRules: [{
+        match: "authority",
+        value: "https://example.com",
+        source: "extension",
+        updatedAt: "2026-04-28T00:00:00.000Z"
+      }, {
+        match: "scheme",
+        value: "file:",
         source: "extension",
         updatedAt: "2026-04-28T00:00:00.000Z"
       }],
-      blockedOrigins: [{
-        origin: "https://blocked.example",
+      blockedNavigationRules: [{
+        match: "authority",
+        value: "https://blocked.example",
         source: "extension",
         updatedAt: "2026-04-28T00:00:00.000Z"
       }],
@@ -597,7 +609,7 @@ test("routes existing-tab navigation through active origin policy and records se
     url: "https://blocked.example/path"
   }));
   assert.equal(blocked.ok, false);
-  assert.equal(blocked.error.code, "ORIGIN_BLOCKED");
+  assert.equal(blocked.error.code, "NAVIGATION_BLOCKED");
   assert.equal(routed.length, 0);
 
   const allowed = await broker.handleRequest(request("req_003", "tab.navigate", {
@@ -608,12 +620,21 @@ test("routes existing-tab navigation through active origin policy and records se
   assert.equal(allowed.ok, true);
   assert.equal(routed[0].type, "tab.navigate");
 
-  const steps = await broker.handleRequest(request("req_004", "session.steps", {
+  const fileAllowed = await broker.handleRequest(request("req_004", "tab.navigate", {
+    browserId: register.result.browserId,
+    tabId: 9,
+    url: "file:///C:/Projects/example.txt"
+  }));
+  assert.equal(fileAllowed.ok, true);
+  assert.equal(routed[1].args.url, "file:///C:/Projects/example.txt");
+
+  const steps = await broker.handleRequest(request("req_005", "session.steps", {
     browserId: register.result.browserId
   }));
   assert.equal(steps.ok, true);
   assert.deepEqual(steps.result.steps.map((step) => [step.commandType, step.status]), [
     ["tab.navigate", "blocked"],
+    ["tab.navigate", "completed"],
     ["tab.navigate", "completed"]
   ]);
 });
@@ -625,8 +646,8 @@ test("routes tab history navigation and records session steps", async () => {
     ...registration,
     policyPreferences: {
       policyMode: "blocklist",
-      allowedOrigins: [],
-      blockedOrigins: [],
+      allowedNavigationRules: [],
+      blockedNavigationRules: [],
       commandPolicy: DEFAULT_COMMAND_POLICY,
       sessionStepRetentionLimit: 10
     }
@@ -750,8 +771,8 @@ test("blocks routed commands disabled by bridge command policy", async () => {
     ...registration,
     policyPreferences: {
       policyMode: "blocklist",
-      allowedOrigins: [],
-      blockedOrigins: [],
+      allowedNavigationRules: [],
+      blockedNavigationRules: [],
       commandPolicy: {
         ...DEFAULT_COMMAND_POLICY,
         "tab.close": false,
@@ -774,7 +795,8 @@ test("blocks routed commands disabled by bridge command policy", async () => {
   }));
   const policyWrite = await broker.handleRequest(request("req_003", "policy.allow.add", {
     browserId: register.result.browserId,
-    origin: "https://example.com"
+    match: "authority",
+    value: "https://example.com"
   }));
 
   assert.equal(close.ok, false);
@@ -800,9 +822,10 @@ test("accepts policy sync updates from connected bridge sessions", async () => {
   const synced = await broker.handleRequest(request("req_002", "policy.sync", {
     browserId,
     policyPreferences: {
-      allowedOrigins: [],
-      blockedOrigins: [{
-        origin: "https://blocked.example",
+      allowedNavigationRules: [],
+      blockedNavigationRules: [{
+        match: "authority",
+        value: "https://blocked.example",
         source: "extension",
         updatedAt: "2026-04-28T00:00:00.000Z"
       }],
@@ -817,7 +840,7 @@ test("accepts policy sync updates from connected bridge sessions", async () => {
     url: "https://blocked.example/a"
   }));
   assert.equal(blocked.ok, false);
-  assert.equal(blocked.error.code, "ORIGIN_BLOCKED");
+  assert.equal(blocked.error.code, "NAVIGATION_BLOCKED");
 });
 
 test("keeps active settings profile selection per browser type", async () => {
@@ -1014,8 +1037,8 @@ test("uses configured defaults for built-in settings profiles", async () => {
     now: fixedClock(),
     config: {
       policy: {
-        defaultAllowlist: ["https://allowed.example"],
-        defaultBlocklist: ["https://blocked.example"],
+        defaultAllowedNavigationRules: [{ match: "authority", value: "https://allowed.example" }],
+        defaultBlockedNavigationRules: [{ match: "authority", value: "https://blocked.example" }],
         sessionStepRetentionLimit: 25
       },
       terminal: {
@@ -1028,8 +1051,8 @@ test("uses configured defaults for built-in settings profiles", async () => {
   const state = await broker.handleRequest(request("req_profile_state", "settings.profile.state", { browserName: "Chrome" }));
 
   assert.equal(state.ok, true);
-  assert.equal(state.result.settingsProfiles.content.policyPreferences.allowedOrigins[0].origin, "https://allowed.example");
-  assert.equal(state.result.settingsProfiles.content.policyPreferences.blockedOrigins[0].origin, "https://blocked.example");
+  assert.equal(state.result.settingsProfiles.content.policyPreferences.allowedNavigationRules[0].value, "https://allowed.example");
+  assert.equal(state.result.settingsProfiles.content.policyPreferences.blockedNavigationRules[0].value, "https://blocked.example");
   assert.equal(state.result.settingsProfiles.content.policyPreferences.sessionStepRetentionLimit, 25);
   assert.equal(state.result.settingsProfiles.content.terminalPreferences.defaultProfileId, "pwsh");
   assert.equal(state.result.settingsProfiles.content.terminalPreferences.startupCommand, null);
@@ -1106,6 +1129,67 @@ test("persists Broker-owned settings profile catalog", async () => {
   assert.ok(state.result.settingsProfiles.profiles.some((profile) => profile.name === "Profile_2"));
 });
 
+test("migrates persisted version 1 origin profiles to version 2 navigation rules", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "portus-settings-profiles-legacy-"));
+  const settingsProfilesPath = join(directory, "settings-profiles.json");
+  await writeFile(settingsProfilesPath, JSON.stringify({
+    version: 1,
+    maxCustomProfiles: 10,
+    profiles: [{
+      profileId: "profile_default",
+      name: "Default_Profile",
+      builtIn: true,
+      readOnly: true,
+      content: {
+        policyPreferences: {},
+        uxPreferences: {},
+        terminalPreferences: {},
+        autoSave: true
+      },
+      createdAt: "2026-04-28T00:00:00.000Z",
+      updatedAt: "2026-04-28T00:00:00.000Z"
+    }, {
+      profileId: "profile_1",
+      name: "Profile_1",
+      builtIn: false,
+      readOnly: false,
+      content: {
+        policyPreferences: {
+          originPolicyEnabled: true,
+          policyMode: "blocklist",
+          allowedOrigins: [],
+          blockedOrigins: [{
+            origin: "https://blocked.example",
+            source: "extension",
+            updatedAt: "2026-04-28T00:00:00.000Z"
+          }]
+        },
+        uxPreferences: {},
+        terminalPreferences: {},
+        autoSave: true
+      },
+      createdAt: "2026-04-28T00:00:00.000Z",
+      updatedAt: "2026-04-28T00:00:00.000Z"
+    }],
+    activeProfileByBrowserType: {}
+  }), "utf8");
+
+  const broker = createRealBroker({ brokerToken: TEST_BROKER_TOKEN, settingsProfilesPath, now: fixedClock() });
+  await broker.handleRequest(request("req_profile_select", "settings.profile.select", {
+    browserName: "Chrome",
+    profileId: "profile_1"
+  }));
+  const state = await broker.handleRequest(request("req_profile_state", "settings.profile.state", { browserName: "Chrome" }));
+  const stored = JSON.parse(await readFile(settingsProfilesPath, "utf8"));
+  const storedProfile = stored.profiles.find((profile) => profile.profileId === "profile_1");
+
+  assert.equal(state.result.settingsProfiles.content.policyPreferences.blockedNavigationRules[0].match, "authority");
+  assert.equal(state.result.settingsProfiles.content.policyPreferences.blockedNavigationRules[0].value, "https://blocked.example");
+  assert.equal(stored.version, 2);
+  assert.equal(storedProfile.content.policyPreferences.blockedNavigationRules[0].value, "https://blocked.example");
+  assert.equal("blockedOrigins" in storedProfile.content.policyPreferences, false);
+});
+
 test("accepts extension-published tab lifecycle events and streams them to subscribers", async () => {
   const broker = createBroker({ brokerToken: TEST_BROKER_TOKEN, now: fixedClock() });
   const bridgeClient = {
@@ -1148,20 +1232,22 @@ test("accepts extension-published tab lifecycle events and streams them to subsc
   assert.equal(rejected.error.code, "BROKER_TOKEN_INVALID");
 });
 
-test("enforces wildcard origins only for the active policy mode", async () => {
+test("enforces wildcard navigation rules only for the active policy mode", async () => {
   const routed = [];
   const broker = createBroker({ brokerToken: TEST_BROKER_TOKEN, now: fixedClock() });
   const register = await broker.handleRequest(request("req_001", "bridge.register", {
     ...registration,
     policyPreferences: {
       policyMode: "allowlist",
-      allowedOrigins: [{
-        origin: "*.tripadvisor.com",
+      allowedNavigationRules: [{
+        match: "host-wildcard",
+        value: "*.tripadvisor.com",
         source: "extension",
         updatedAt: "2026-04-28T00:00:00.000Z"
       }],
-      blockedOrigins: [{
-        origin: "*.tripadvisor.com",
+      blockedNavigationRules: [{
+        match: "host-wildcard",
+        value: "*.tripadvisor.com",
         source: "extension",
         updatedAt: "2026-04-28T00:00:00.000Z"
       }],
@@ -1202,7 +1288,7 @@ test("enforces wildcard origins only for the active policy mode", async () => {
     url: "https://example.com/"
   }));
   assert.equal(blocked.ok, false);
-  assert.equal(blocked.error.code, "ORIGIN_BLOCKED");
+  assert.equal(blocked.error.code, "NAVIGATION_BLOCKED");
   assert.equal(routed.length, 1);
 });
 
@@ -1531,7 +1617,7 @@ test("returns typed protocol errors for invalid messages", async () => {
   assert.equal(missingVersion.error.code, "INVALID_MESSAGE");
 
   const unsupportedVersion = await broker.handleRequest({
-    protocolVersion: "2",
+    protocolVersion: "1",
     requestId: "req_002",
     kind: "request",
     type: "browser.list",
@@ -1550,8 +1636,8 @@ function registrationWithCommandPolicy(overrides) {
     ...registration,
     policyPreferences: {
       policyMode: "blocklist",
-      allowedOrigins: [],
-      blockedOrigins: [],
+      allowedNavigationRules: [],
+      blockedNavigationRules: [],
       commandPolicy: {
         ...DEFAULT_COMMAND_POLICY,
         ...overrides

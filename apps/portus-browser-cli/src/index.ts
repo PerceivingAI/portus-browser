@@ -31,6 +31,7 @@ import {
   TabSchema,
   WaitResultSchema,
   createPortusError,
+  normalizeNavigationRulePattern,
   type ActionResult,
   type BrowserSession,
   type ConsoleListResult,
@@ -41,6 +42,8 @@ import {
   type FillFormResult,
   type NetworkGetResult,
   type NetworkListResult,
+  type NavigationRuleMatch,
+  type NavigationRulePattern,
   type PolicyPreferences,
   type PortusError,
   type RequestEnvelope,
@@ -666,25 +669,24 @@ async function handlePolicy(context: CliContext, parsed: ParsedArgs): Promise<Re
       return {
         ok: true,
         policy: result.policy,
-        entries: area === "allow" ? result.policy.allowedOrigins : result.policy.blockedOrigins
+        entries: area === "allow" ? result.policy.allowedNavigationRules : result.policy.blockedNavigationRules
       };
     }
 
     if (action === "add" || action === "remove") {
-      const originInput = parsed.positionals[2];
-      if (!originInput) throw usageError(`policy ${area} ${action} requires an origin.`);
-      if (parsed.positionals.length > 3) throw usageError(`policy ${area} ${action} accepts one origin.`);
+      if (parsed.positionals.length > 2) throw usageError(`policy ${area} ${action} accepts navigation rule flags only.`);
+      const rule = readNavigationRuleFlags(parsed);
       const payload: Record<string, unknown> = {
         browserId,
-        origin: normalizeOriginInput(originInput)
+        ...rule
       };
       const reason = readOptionalStringFlag(parsed, "reason");
-      if (reason) payload.reason = reason;
+      if (reason && action === "add") payload.reason = reason;
       const result = PolicyResultSchema.parse(await context.broker.request(`policy.${area}.${action}`, payload, context.timeoutMs));
       return {
         ok: true,
         policy: result.policy,
-        entries: area === "allow" ? result.policy.allowedOrigins : result.policy.blockedOrigins
+        entries: area === "allow" ? result.policy.allowedNavigationRules : result.policy.blockedNavigationRules
       };
     }
 
@@ -1378,7 +1380,7 @@ function renderSuccess(output: OutputMode, result: Record<string, unknown>): str
   if (isRecord(result.network)) return renderNetworkTable(result.network as NetworkListResult | NetworkGetResult);
   if (Array.isArray(result.recipes)) return renderRecipeTable(result.recipes as Array<Record<string, unknown>>);
   if (isRecord(result.recipe)) return `${JSON.stringify(result.recipe, null, 2)}\n`;
-  if (Array.isArray(result.entries)) return renderPolicyEntryTable(result.entries as PolicyPreferences["allowedOrigins"]);
+  if (Array.isArray(result.entries)) return renderPolicyEntryTable(result.entries as PolicyPreferences["allowedNavigationRules"]);
   if (typeof result.retention === "number") return renderTable(["RETENTION"], [{ RETENTION: String(result.retention) }]);
   if (isRecord(result.policy)) return renderPolicyTable(result.policy as PolicyPreferences);
   if (Array.isArray(result.events)) return renderEventTable(result.events as EventEnvelope[]);
@@ -1549,24 +1551,26 @@ function renderRecipeTable(recipes: Array<Record<string, unknown>>): string {
 
 
 function renderPolicyTable(policy: PolicyPreferences): string {
-  return renderTable(["MODE", "ALLOWED", "BLOCKED", "RETENTION"], [{
+  return renderTable(["ENABLED", "MODE", "ALLOWED", "BLOCKED", "RETENTION"], [{
+    ENABLED: String(policy.navigationPolicyEnabled),
     MODE: policy.policyMode,
-    ALLOWED: String(policy.allowedOrigins.length),
-    BLOCKED: String(policy.blockedOrigins.length),
+    ALLOWED: String(policy.allowedNavigationRules.length),
+    BLOCKED: String(policy.blockedNavigationRules.length),
     RETENTION: String(policy.sessionStepRetentionLimit)
   }]);
 }
 
-function renderPolicyEntryTable(entries: PolicyPreferences["allowedOrigins"]): string {
+function renderPolicyEntryTable(entries: PolicyPreferences["allowedNavigationRules"]): string {
   const rows = [...entries]
-    .sort((a, b) => a.origin.localeCompare(b.origin))
+    .sort((a, b) => a.match.localeCompare(b.match) || a.value.localeCompare(b.value))
     .map((entry) => ({
-      ORIGIN: entry.origin,
+      MATCH: entry.match,
+      VALUE: entry.value,
       SOURCE: entry.source,
       UPDATED_AT: entry.updatedAt ?? "",
       REASON: entry.reason ?? ""
     }));
-  return renderTable(["ORIGIN", "SOURCE", "UPDATED_AT", "REASON"], rows);
+  return renderTable(["MATCH", "VALUE", "SOURCE", "UPDATED_AT", "REASON"], rows);
 }
 
 function renderEventTable(events: EventEnvelope[]): string {
@@ -1668,7 +1672,7 @@ function parseArgs(argv: string[]): ParsedArgs {
 }
 
 function flagTakesValue(name: string): boolean {
-  return ["output", "browser", "timeout", "tab-id", "index", "element", "snapshot", "from", "to", "fields", "json-fields", "field", "x", "y", "reason", "type", "limit", "kind", "strategy", "query", "role", "max-elements", "state", "url-contains", "text", "element-query", "directory", "file", "json-input", "content", "description", "name", "id"].includes(name);
+  return ["output", "browser", "timeout", "tab-id", "index", "element", "snapshot", "from", "to", "fields", "json-fields", "field", "x", "y", "reason", "scheme", "authority", "host-wildcard", "url-exact", "url-prefix", "type", "limit", "kind", "strategy", "query", "role", "max-elements", "state", "url-contains", "text", "element-query", "directory", "file", "json-input", "content", "description", "name", "id"].includes(name);
 }
 
 function setParsedFlag(flags: Map<string, string | boolean | string[]>, name: string, value: string | boolean): void {
@@ -1838,13 +1842,28 @@ function normalizeUrl(input: string, normalize: boolean): string {
   }
 }
 
-function normalizeOriginInput(input: string): string {
-  const wildcard = input.trim().toLowerCase().match(/^(?:(https?):\/\/)?\*\.([a-z0-9-]+(?:\.[a-z0-9-]+)+)$/);
-  if (wildcard) return wildcard[1] ? `${wildcard[1]}://*.${wildcard[2]}` : `*.${wildcard[2]}`;
-  const url = normalizeUrl(input, true);
-  const parsed = new URL(url);
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw usageError("Origin must use http or https.");
-  return parsed.origin;
+const NAVIGATION_RULE_FLAGS: ReadonlyArray<readonly [string, NavigationRuleMatch]> = [
+  ["scheme", "scheme"],
+  ["authority", "authority"],
+  ["host-wildcard", "host-wildcard"],
+  ["url-exact", "url-exact"],
+  ["url-prefix", "url-prefix"]
+];
+
+function readNavigationRuleFlags(parsed: ParsedArgs): NavigationRulePattern {
+  const provided = NAVIGATION_RULE_FLAGS.flatMap(([flag, match]) => {
+    const value = readOptionalStringFlag(parsed, flag);
+    return value === undefined ? [] : [{ match, value }];
+  });
+  if (provided.length !== 1) {
+    throw usageError("Provide exactly one navigation rule flag: --scheme, --authority, --host-wildcard, --url-exact, or --url-prefix.");
+  }
+  const rule = provided[0] as { match: NavigationRuleMatch; value: string };
+  try {
+    return normalizeNavigationRulePattern(rule.match, rule.value);
+  } catch {
+    throw usageError(`Invalid ${rule.match} navigation rule: ${rule.value}.`);
+  }
 }
 
 function createCliConfig(options: PortusBrowserCliOptions): PortusConfig {
@@ -1911,7 +1930,7 @@ function exitCodeForError(error: PortusError): number {
     BROKER_UNAVAILABLE: 4,
     NATIVE_HOST_UNAVAILABLE: 4,
     BROWSER_ACCESS_DENIED: 5,
-    ORIGIN_BLOCKED: 5,
+    NAVIGATION_BLOCKED: 5,
     COMMAND_DISABLED_BY_POLICY: 5,
     BROWSER_SESSION_UNAVAILABLE: 6,
     BRIDGE_DISCONNECTED: 6,

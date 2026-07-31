@@ -2,7 +2,7 @@
 
 Portus Browser lets a user and an AI agent (Codex, Pi, Claude Code, and others) co-navigate one or more visible browser sessions from the terminal.
 
-Any agent in your system can use the `portus-browser` CLI. Portus routes commands through a local Broker and browser Extension, allowing each browser to use its own settings profile, origin policy, command policy, and terminal settings.
+Any agent in your system can use the `portus-browser` CLI. Portus routes commands through a local Broker and browser Extension, allowing each browser to use its own settings profile, navigation policy, command policy, and terminal settings.
 
 ## What Portus Browser Does
 
@@ -21,9 +21,9 @@ Portus Browser is local first and the Broker runs on the user's machine.
 
 ## Access And Policy
 
-The Extension permanently requests Chrome host access for normal web pages through `"<all_urls>"`; there is no site-by-site Chrome permission request or revoke workflow. While the Bridge is connected, Portus origin policy and command policy are the authorization boundary for agent actions.
+The Extension permanently requests Chrome host access for normal web pages through `"<all_urls>"`; there is no site-by-site Chrome permission request or revoke workflow. While the Bridge is connected, Portus navigation policy and command policy are the authorization boundary for agent actions.
 
-Blocked origins return `ORIGIN_BLOCKED`. Protected browser pages and other targets Chrome cannot expose return `BROWSER_ACCESS_DENIED`.
+Navigation rules can match a URL by scheme, authority, wildcard host, exact URL, or URL prefix. Portus does not impose a built-in scheme restriction: users decide which browser-supported URLs to allow or block. A denied URL returns `NAVIGATION_BLOCKED`; protected pages and other targets the browser cannot expose return `BROWSER_ACCESS_DENIED`.
 
 ## Quick Start
 

@@ -429,45 +429,45 @@ test("policy commands route visible-browser allow, block, and retention updates"
     "browser.list": { browsers },
     "policy.get": {
       policy: policy({
-        allowedOrigins: [policyEntry("https://allowed.example", "extension")],
-        blockedOrigins: [policyEntry("https://blocked.example", "extension")],
+        allowedNavigationRules: [policyEntry("authority", "https://allowed.example", "extension")],
+        blockedNavigationRules: [policyEntry("authority", "https://blocked.example", "extension")],
         sessionStepRetentionLimit: 10
       })
     },
     "policy.allow.add": {
       policy: policy({
-        allowedOrigins: [policyEntry("https://example.com", "cli")],
-        blockedOrigins: [],
+        allowedNavigationRules: [policyEntry("scheme", "file:", "cli")],
+        blockedNavigationRules: [],
         sessionStepRetentionLimit: 10
       })
     },
     "policy.block.add": {
       policy: policy({
-        allowedOrigins: [],
-        blockedOrigins: [policyEntry("*.tripadvisor.com", "cli")],
+        allowedNavigationRules: [],
+        blockedNavigationRules: [policyEntry("host-wildcard", "*.tripadvisor.com", "cli")],
         sessionStepRetentionLimit: 10
       })
     },
     "policy.block.remove": {
       policy: policy({
-        allowedOrigins: [],
-        blockedOrigins: [],
+        allowedNavigationRules: [],
+        blockedNavigationRules: [],
         sessionStepRetentionLimit: 10
       })
     },
     "policy.retention.set": {
       policy: policy({
-        allowedOrigins: [],
-        blockedOrigins: [],
+        allowedNavigationRules: [],
+        blockedNavigationRules: [],
         sessionStepRetentionLimit: 25
       })
     }
   });
 
   const allowList = await runPortusBrowserCli(["policy", "allow", "list", "--browser", "1", "--json"], { brokerClient: broker });
-  const allowAdd = await runPortusBrowserCli(["policy", "allow", "add", "example.com", "--browser", "1", "--reason", "manual", "--json"], { brokerClient: broker });
-  const blockAddWildcard = await runPortusBrowserCli(["policy", "block", "add", "*.tripadvisor.com", "--browser", "br_000001", "--reason", "manual", "--json"], { brokerClient: broker });
-  const blockRemove = await runPortusBrowserCli(["policy", "block", "remove", "https://blocked.example", "--browser", "br_000001", "--json"], { brokerClient: broker });
+  const allowAdd = await runPortusBrowserCli(["policy", "allow", "add", "--scheme", "file:", "--browser", "1", "--reason", "manual", "--json"], { brokerClient: broker });
+  const blockAddWildcard = await runPortusBrowserCli(["policy", "block", "add", "--host-wildcard", "*.tripadvisor.com", "--browser", "br_000001", "--reason", "manual", "--json"], { brokerClient: broker });
+  const blockRemove = await runPortusBrowserCli(["policy", "block", "remove", "--authority", "https://blocked.example", "--browser", "br_000001", "--json"], { brokerClient: broker });
   const retentionSet = await runPortusBrowserCli(["policy", "retention", "set", "25", "--browser", "br_000001", "--json"], { brokerClient: broker });
 
   assert.equal(allowList.exitCode, 0);
@@ -484,10 +484,12 @@ test("policy commands route visible-browser allow, block, and retention updates"
     "policy.block.remove",
     "policy.retention.set"
   ]);
-  assert.equal(broker.requests[3].payload.origin, "https://example.com");
+  assert.equal(broker.requests[3].payload.match, "scheme");
+  assert.equal(broker.requests[3].payload.value, "file:");
   assert.equal(broker.requests[3].payload.reason, "manual");
-  assert.equal(broker.requests[4].payload.origin, "*.tripadvisor.com");
-  assert.equal(JSON.parse(allowList.stdout).entries[0].origin, "https://allowed.example");
+  assert.equal(broker.requests[4].payload.match, "host-wildcard");
+  assert.equal(broker.requests[4].payload.value, "*.tripadvisor.com");
+  assert.equal(JSON.parse(allowList.stdout).entries[0].value, "https://allowed.example");
   assert.equal(JSON.parse(retentionSet.stdout).retention, 25);
 });
 
@@ -697,8 +699,8 @@ test("broker errors map to documented exit codes", async () => {
       retryable: true
     },
     "screenshot.capture": {
-      code: "ORIGIN_BLOCKED",
-      message: "Portus policy blocks browser control for https://blocked.example."
+      code: "NAVIGATION_BLOCKED",
+      message: "Portus navigation policy blocks https://blocked.example/."
     },
     "policy.allow.add": {
       code: "COMMAND_DISABLED_BY_POLICY",
@@ -708,12 +710,12 @@ test("broker errors map to documented exit codes", async () => {
 
   const result = await runPortusBrowserCli(["browsers", "--json"], { brokerClient: broker });
   const blocked = await runPortusBrowserCli(["screenshot", "--browser", "br_000001", "--json"], { brokerClient: broker });
-  const disabled = await runPortusBrowserCli(["policy", "allow", "add", "https://example.com", "--browser", "br_000001", "--json"], { brokerClient: broker });
+  const disabled = await runPortusBrowserCli(["policy", "allow", "add", "--authority", "https://example.com", "--browser", "br_000001", "--json"], { brokerClient: broker });
 
   assert.equal(result.exitCode, 4);
   assert.equal(JSON.parse(result.stderr).error.code, "BROKER_UNAVAILABLE");
   assert.equal(blocked.exitCode, 5);
-  assert.equal(JSON.parse(blocked.stderr).error.code, "ORIGIN_BLOCKED");
+  assert.equal(JSON.parse(blocked.stderr).error.code, "NAVIGATION_BLOCKED");
   assert.equal(disabled.exitCode, 5);
   assert.equal(JSON.parse(disabled.stderr).error.code, "COMMAND_DISABLED_BY_POLICY");
 });
@@ -756,7 +758,7 @@ test("broker status and stop route through broker management requests", async ()
       pipePath: "\\\\.\\pipe\\portus-browser-broker",
       pipeName: "portus-browser-broker",
       startedAt: "2026-04-28T00:00:00.000Z",
-      protocolVersion: "1",
+      protocolVersion: "2",
       processId: 123
     },
     "broker.stop": {
@@ -829,7 +831,7 @@ test("named pipe broker client sends validated transport frames", async () => {
       const frame = deserializeTransportFrame(buffer.slice(0, newlineIndex));
       seen.push(frame.message);
       socket.write(serializeTransportFrame({
-        protocolVersion: "1",
+        protocolVersion: "2",
         requestId: frame.message.requestId,
         kind: "response",
         ok: true,
@@ -1140,7 +1142,7 @@ function dismissResult() {
 
 function event(eventId, type, browserId, overrides = {}) {
   return {
-    protocolVersion: "1",
+    protocolVersion: "2",
     eventId,
     kind: "event",
     type,
@@ -1166,17 +1168,19 @@ function sessionStep(stepId, commandType, status) {
 
 function policy(overrides = {}) {
   return {
+    navigationPolicyEnabled: overrides.navigationPolicyEnabled ?? true,
     policyMode: overrides.policyMode ?? "blocklist",
-    allowedOrigins: overrides.allowedOrigins ?? [],
-    blockedOrigins: overrides.blockedOrigins ?? [],
+    allowedNavigationRules: overrides.allowedNavigationRules ?? [],
+    blockedNavigationRules: overrides.blockedNavigationRules ?? [],
     commandPolicy: overrides.commandPolicy ?? {},
     sessionStepRetentionLimit: overrides.sessionStepRetentionLimit ?? 10
   };
 }
 
-function policyEntry(origin, source) {
+function policyEntry(match, value, source) {
   return {
-    origin,
+    match,
+    value,
     source,
     updatedAt: "2026-04-28T00:00:00.000Z"
   };
