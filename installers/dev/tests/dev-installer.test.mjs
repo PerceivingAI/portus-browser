@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import {
   NativeHostManifestSchema,
   createChromeExtensionOrigin,
@@ -114,20 +116,22 @@ test("creates browser-specific macOS and Linux native messaging plans", () => {
 });
 
 test("uses INIT_CWD as repo root when pnpm exec runs from the package directory", () => {
+  const repoRootFixture = resolve(tmpdir(), "portus-browser-dev");
+  const userProfileFixture = resolve(tmpdir(), "portus-profile");
   const repoRoot = resolveRepoRoot(undefined, {
-    INIT_CWD: "C:\\repo\\portus-browser-dev"
+    INIT_CWD: repoRootFixture
   });
-  assert.equal(repoRoot, "C:\\repo\\portus-browser-dev");
+  assert.equal(repoRoot, repoRootFixture);
 
   const plan = createDevInstallPlan({
     extensionId,
     env: {
-      INIT_CWD: "C:\\repo\\portus-browser-dev",
-      USERPROFILE: "C:\\Users\\portus-test"
+      INIT_CWD: repoRootFixture,
+      [process.platform === "win32" ? "USERPROFILE" : "HOME"]: userProfileFixture
     }
   });
-  assert.equal(plan.repoRoot, "C:\\repo\\portus-browser-dev");
-  assert.equal(plan.extensionDirectory, "C:\\repo\\portus-browser-dev\\apps\\portus-extension");
+  assert.equal(plan.repoRoot, repoRootFixture);
+  assert.equal(plan.extensionDirectory, join(repoRootFixture, "apps", "portus-extension"));
 });
 
 test("diagnoses manifest, native host, extension, and origin state", async () => {
@@ -287,11 +291,13 @@ test("Linux apply writes launchers and manifests without registry commands", asy
 
 
 test("resolves the default terminal session folder from the user profile", () => {
-  const folder = resolveTerminalSessionDirectory(undefined, {
-    USERPROFILE: "C:\\Users\\portus-test"
-  });
+  const userProfileFixture = resolve(tmpdir(), "portus-profile");
+  const env = process.platform === "win32"
+    ? { USERPROFILE: userProfileFixture }
+    : { HOME: userProfileFixture };
+  const folder = resolveTerminalSessionDirectory(undefined, env);
 
-  assert.equal(folder, "C:\\Users\\portus-test\\Downloads\\portus-session");
+  assert.equal(folder, join(userProfileFixture, "Downloads", "portus-session"));
 });
 
 test("apply keeps native host registration when terminal session folder creation fails", async () => {
@@ -302,7 +308,7 @@ test("apply keeps native host registration when terminal session folder creation
     repoRoot: "C:\\repo\\portus-browser-dev",
     platform: "win32",
     extensionId,
-    terminalSessionDirectory: "C:\\Users\\portus-test\\Downloads\\portus-session",
+    terminalSessionDirectory: "C:\\PortusTest\\portus-session",
     apply: true,
     writeTextFile: async (path, content) => {
       writes.push({ path, content });
@@ -319,7 +325,7 @@ test("apply keeps native host registration when terminal session folder creation
         repoRoot: "C:\\repo\\portus-browser-dev",
         platform: "win32",
         extensionId,
-        terminalSessionDirectory: "C:\\Users\\portus-test\\Downloads\\portus-session"
+        terminalSessionDirectory: "C:\\PortusTest\\portus-session"
       });
       return path === plan.extensionDirectory || plan.nativeHosts.some((host) => path === host.manifestPath || path === host.nativeHostPath);
     },

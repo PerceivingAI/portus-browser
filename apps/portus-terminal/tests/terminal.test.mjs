@@ -11,6 +11,8 @@ import {
 } from "../dist/index.js";
 import { NodePtyAdapter, sanitizePtyEnv } from "../dist/ptyAdapter.js";
 
+const WINDOWS_TEST_HOME = "C:\\Users\\portus-test";
+
 class FakeProbe {
   constructor(commands, distributions = []) {
     this.commands = new Set(commands);
@@ -100,7 +102,7 @@ function fixedClock(...dates) {
 }
 
 function windowsManager(options = {}) {
-  const home = "C:\\Users\\portus-test";
+  const home = WINDOWS_TEST_HOME;
   const cwd = path.join(home, "Downloads", "portus-session");
   const fileSystem = new FakeFileSystem([cwd]);
   const ptyAdapter = new FakePtyAdapter();
@@ -132,7 +134,7 @@ test("detects Windows terminal profiles and WSL distributions", async () => {
   const detector = new ShellDetector({
     platform: "win32",
     probe: new FakeProbe(["powershell.exe", "pwsh.exe", "cmd.exe", "wsl.exe", "C:\\Program Files\\Git\\bin\\bash.exe"], ["Ubuntu", "Debian"]),
-    env: { USERPROFILE: "C:\\Users\\portus-test" }
+    env: { USERPROFILE: WINDOWS_TEST_HOME }
   });
   const profiles = await detector.detect({ manualTerminalPath: "C:\\Tools\\CustomShell.exe" });
   assert.deepEqual(profiles.map((profile) => profile.profileId), [
@@ -152,11 +154,11 @@ test("resolves and creates the default Downloads portus-session directory", asyn
   const fileSystem = new FakeFileSystem();
   const resolver = new WorkingDirectoryResolver({
     platform: "win32",
-    env: { USERPROFILE: "C:\\Users\\portus-test" },
+    env: { USERPROFILE: WINDOWS_TEST_HOME },
     fileSystem
   });
   const directory = await resolver.resolve();
-  assert.equal(directory, path.join("C:\\Users\\portus-test", "Downloads", "portus-session"));
+  assert.equal(directory, path.join(WINDOWS_TEST_HOME, "Downloads", "portus-session"));
   assert.deepEqual(fileSystem.created, [directory]);
 });
 

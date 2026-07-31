@@ -39,7 +39,7 @@ function validSession(overrides = {}) {
     terminalId: "term_abc123",
     profileId: "pwsh",
     title: "PowerShell 7",
-    cwd: "C:\Users\portus-test\Downloads\portus-session",
+    cwd: "C:\\Users\\portus-test\\Downloads\\portus-session",
     status: "running",
     createdAt,
     lastActiveAt: createdAt,
