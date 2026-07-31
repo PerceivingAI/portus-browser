@@ -41,11 +41,15 @@ const registration = {
   capabilities: ["tabs", "events", "screenshots", "snapshots", "actions", "policy"]
 };
 
-test("validates config at startup and exposes named pipe endpoint", () => {
+test("validates config at startup and exposes the platform-local endpoint", () => {
   const broker = createBroker({ brokerToken: TEST_BROKER_TOKEN });
-  assert.equal(broker.endpoint.transport, "named-pipe");
+  const expectedTransport = process.platform === "win32" ? "named-pipe" : "unix-socket";
+  const expectedPathSuffix =
+    process.platform === "win32" ? "\\\\.\\pipe\\portus-browser-broker" : "/portus-browser-broker.sock";
+
+  assert.equal(broker.endpoint.transport, expectedTransport);
   assert.equal(broker.endpoint.pipeName, "portus-browser-broker");
-  assert.equal(broker.pipePath, "\\\\.\\pipe\\portus-browser-broker");
+  assert.equal(broker.pipePath.endsWith(expectedPathSuffix), true);
   assert.throws(() => createBroker({ config: { broker: { allowRemoteConnections: true } } }));
 });
 
