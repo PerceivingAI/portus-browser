@@ -557,6 +557,7 @@ export class TerminalNativeHost implements TerminalSessionClient {
   private readonly clearTimer: (handle: unknown) => void;
   private cleanupTimer: unknown | undefined;
   private stopped = false;
+  private messageQueue: Promise<void> | null = null;
 
   constructor(options: TerminalNativeHostOptions) {
     this.manager = options.manager ?? new TerminalManager({ ...options, ptyAdapter: options.ptyAdapter ?? new NodePtyAdapter() });
@@ -613,7 +614,18 @@ export class TerminalNativeHost implements TerminalSessionClient {
       let read = tryReadNativeMessageFrame(this.nativeBuffer);
       while (read) {
         this.nativeBuffer = read.remaining;
-        void this.handleClientMessage(read.payload);
+        const message = read.payload;
+        const previous = this.messageQueue;
+        const operation = previous === null
+          ? this.handleClientMessage(message)
+          : previous.then(
+            () => this.handleClientMessage(message),
+            () => this.handleClientMessage(message)
+          );
+        this.messageQueue = operation;
+        void operation.finally(() => {
+          if (this.messageQueue === operation) this.messageQueue = null;
+        }).catch(() => undefined);
         read = tryReadNativeMessageFrame(this.nativeBuffer);
       }
     } catch (error) {
@@ -623,6 +635,7 @@ export class TerminalNativeHost implements TerminalSessionClient {
   }
 
   private async handleClientMessage(input: unknown): Promise<void> {
+    if (this.stopped) return;
     const parsed = TerminalClientMessageSchema.safeParse(input);
     if (!parsed.success) {
       this.writeMessage(this.errorMessage({
@@ -635,8 +648,16 @@ export class TerminalNativeHost implements TerminalSessionClient {
 
     try {
       const response = await this.dispatchClientMessage(parsed.data);
+      if (this.stopped) {
+        this.manager.closeAllSessions();
+        return;
+      }
       if (response) this.writeMessage(response);
     } catch (error) {
+      if (this.stopped) {
+        this.manager.closeAllSessions();
+        return;
+      }
       this.writeMessage(this.errorMessage(normalizeTerminalHostError(error), parsed.data));
     }
   }

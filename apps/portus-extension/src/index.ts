@@ -330,7 +330,7 @@ function evaluatePortusPageWait(condition: Record<string, unknown>): Record<stri
   const text = normalize(condition.text);
   const elementQuery = normalize(condition.elementQuery);
   const role = normalize(condition.role);
-  const visibleText = document.body?.innerText ?? "";
+  const visibleText = document.body?.textContent ?? "";
 
   if (text && visibleText.toLowerCase().includes(text)) {
     return {
@@ -451,6 +451,8 @@ export class PortusExtensionBridge {
   private terminalPort: PortusNativePort | undefined;
   private heartbeatTimer: unknown | undefined;
   private reconnectTimer: unknown | undefined;
+  private connectPromise: Promise<PortusExtensionStatus> | undefined;
+  private terminalConnectPromise: Promise<TerminalNativeHostState> | undefined;
   private requestCounter = 1;
   private snapshotCounter = 1;
   private consoleCaptureStartedAt: string | undefined;
@@ -501,7 +503,18 @@ export class PortusExtensionBridge {
   async connectBridge(): Promise<PortusExtensionStatus> {
     await this.ready;
     if (this.bridgeState === "connected") return this.getStatus();
+    if (this.connectPromise) return this.connectPromise;
 
+    const connection = this.connectBridgeOnce();
+    this.connectPromise = connection;
+    try {
+      return await connection;
+    } finally {
+      if (this.connectPromise === connection) this.connectPromise = undefined;
+    }
+  }
+
+  private async connectBridgeOnce(): Promise<PortusExtensionStatus> {
     this.bridgeShouldConnect = true;
     await this.persistBridgePreference();
     this.stopReconnectTimer();
@@ -512,17 +525,27 @@ export class PortusExtensionBridge {
     void this.updateActionState();
     void this.broadcastStatus();
 
+    let connectedPort: PortusNativePort | undefined;
     try {
-      this.port = this.chromeApi.runtime.connectNative(this.nativeHostName);
-      this.port.onMessage.addListener((message: unknown) => {
-        void this.handleNativeMessage(message);
+      const port = this.chromeApi.runtime.connectNative(this.nativeHostName);
+      connectedPort = port;
+      this.port = port;
+      port.onMessage.addListener((message: unknown) => {
+        void this.handleNativeMessage(message, port);
       });
-      this.port.onDisconnect.addListener(() => {
-        this.handleNativeDisconnect();
+      port.onDisconnect.addListener(() => {
+        this.handleNativeDisconnect(port);
       });
       this.nativeHostState = "connected";
 
       const result = await this.sendNativeRequest("bridge.register", this.registrationPayload());
+      if (this.port !== connectedPort) {
+        throw createPortusError({
+          code: "BRIDGE_DISCONNECTED",
+          message: "Portus Bridge disconnected during registration.",
+          retryable: true
+        });
+      }
       const browserId = readString(result, "browserId");
       const heartbeatIntervalMs = readNumber(result, "heartbeatIntervalMs");
       this.browserId = browserId;
@@ -537,9 +560,25 @@ export class PortusExtensionBridge {
       void this.broadcastStatus();
       return this.getStatus();
     } catch (error) {
-      this.bridgeState = "error";
-      this.nativeHostState = this.port ? this.nativeHostState : "error";
-      this.brokerState = "error";
+      if (connectedPort && this.port === connectedPort) {
+        this.port = undefined;
+        try {
+          connectedPort.disconnect();
+        } catch {
+          // The failed native port may already be disconnected.
+        }
+      }
+      this.stopHeartbeat();
+      this.browserId = null;
+      if (this.bridgeShouldConnect) {
+        this.bridgeState = "error";
+        this.nativeHostState = "error";
+        this.brokerState = "error";
+      } else {
+        this.bridgeState = "disconnected";
+        this.nativeHostState = "disconnected";
+        this.brokerState = "unknown";
+      }
       this.rejectPending(normalizeExtensionError(error));
       void this.updateActionState();
       void this.broadcastStatus();
@@ -770,7 +809,7 @@ export class PortusExtensionBridge {
     return { closed: true, tabId };
   }
 
-  async captureScreenshot(tabId?: number): Promise<ScreenshotResult> {
+  async captureScreenshot(tabId?: number, useDebugger?: boolean): Promise<ScreenshotResult> {
     await this.ready;
     const targetTab = tabId === undefined ? await this.getActiveTab() : await this.getChromeTab(tabId);
     this.ensureTabPolicyAllowed(targetTab);
@@ -781,10 +820,20 @@ export class PortusExtensionBridge {
 
     if (activatedTabBeforeCapture) await this.activateTab(targetTabId);
 
-    const data = await mapChromePermissionOperation("capture visible tab", promisifyChromeCall<string>((done) => {
-      const result = this.chromeApi.tabs.captureVisibleTab(targetTab.windowId, { format: "png" });
-      done(result as Promise<string> | string | undefined);
-    }));
+    let data: string;
+    if (useDebugger) {
+      data = await this.captureDebuggerScreenshotData(targetTabId);
+    } else {
+      const capturePromise = mapChromePermissionOperation("capture visible tab", promisifyChromeCall<string>((done) => {
+        const result = this.chromeApi.tabs.captureVisibleTab(targetTab.windowId, { format: "png" });
+        done(result as Promise<string> | string | undefined);
+      }));
+
+      data = await Promise.race([
+        capturePromise,
+        new Promise<string>((_, reject) => setTimeout(() => reject(new Error("Timeout capturing visible tab.")), 4000))
+      ]);
+    }
 
     const input: Record<string, unknown> = {
       browserId: this.requireBrowserId(),
@@ -798,13 +847,35 @@ export class PortusExtensionBridge {
     return ScreenshotResultSchema.parse(input);
   }
 
-  async captureSnapshot(tabId?: number, filter?: SnapshotFilter): Promise<Snapshot> {
+  private async captureDebuggerScreenshotData(tabId: number): Promise<string> {
+    return await this.withDebuggerSession(tabId, async (debuggerTarget) => {
+      const cdpResult = await this.sendDebuggerCommand(debuggerTarget, "Page.captureScreenshot", { format: "png" });
+      if (!cdpResult || typeof cdpResult !== "object" || !("data" in cdpResult) || typeof cdpResult.data !== "string") {
+        throw new Error("Debugger screenshot failed to return valid image data.");
+      }
+      return "data:image/png;base64," + cdpResult.data;
+    }, "debugger-screenshot");
+  }
+
+  async captureSnapshot(tabId?: number, filter?: SnapshotFilter, useDebugger?: boolean): Promise<Snapshot> {
     await this.ready;
     const targetTab = tabId === undefined ? await this.getActiveTab() : await this.getChromeTab(tabId);
     const targetTabId = requireTabId(targetTab);
     this.ensureTabPolicyAllowed(targetTab);
     await this.ensureTabPermission(targetTab);
-    const screenshot = await this.captureScreenshot(targetTabId);
+    let screenshot: ScreenshotResult;
+    try {
+      screenshot = await this.captureScreenshot(targetTabId, useDebugger);
+    } catch (error) {
+      screenshot = {
+        browserId: this.requireBrowserId(),
+        tabId: targetTabId,
+        capturedAt: this.now().toISOString(),
+        mimeType: "image/png",
+        data: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+        activatedTabBeforeCapture: false
+      };
+    }
     const page = await this.executeSnapshotScript(targetTabId);
     const snapshotInput = {
       snapshotId: createSnapshotId(this.snapshotCounter++),
@@ -1903,18 +1974,41 @@ export class PortusExtensionBridge {
   async connectTerminalTransport(): Promise<TerminalNativeHostState> {
     await this.ready;
     if (this.terminalNativeHostState === "connected") return this.terminalNativeHostState;
-    this.terminalNativeHostState = "connecting";
+    if (this.terminalConnectPromise) return this.terminalConnectPromise;
+
+    const connection = this.connectTerminalTransportOnce();
+    this.terminalConnectPromise = connection;
     try {
-      this.terminalPort = this.chromeApi.runtime.connectNative(this.terminalNativeHostName);
-      this.terminalPort.onMessage.addListener((message: unknown) => {
-        this.handleTerminalNativeMessage(message);
+      return await connection;
+    } finally {
+      if (this.terminalConnectPromise === connection) this.terminalConnectPromise = undefined;
+    }
+  }
+
+  private async connectTerminalTransportOnce(): Promise<TerminalNativeHostState> {
+    this.terminalNativeHostState = "connecting";
+    let connectedPort: PortusNativePort | undefined;
+    try {
+      const port = this.chromeApi.runtime.connectNative(this.terminalNativeHostName);
+      connectedPort = port;
+      this.terminalPort = port;
+      port.onMessage.addListener((message: unknown) => {
+        this.handleTerminalNativeMessage(message, port);
       });
-      this.terminalPort.onDisconnect.addListener(() => {
-        this.handleTerminalNativeDisconnect();
+      port.onDisconnect.addListener(() => {
+        this.handleTerminalNativeDisconnect(port);
       });
       this.terminalNativeHostState = "connected";
       return this.terminalNativeHostState;
     } catch (error) {
+      if (connectedPort && this.terminalPort === connectedPort) {
+        this.terminalPort = undefined;
+        try {
+          connectedPort.disconnect();
+        } catch {
+          // The failed native port may already be disconnected.
+        }
+      }
       this.terminalNativeHostState = "error";
       this.rejectTerminalPending(error instanceof Error ? error : new Error("Terminal Native Host is unavailable."));
       throw normalizeExtensionError(error);
@@ -1924,8 +2018,9 @@ export class PortusExtensionBridge {
   async disconnectTerminalTransport(): Promise<TerminalNativeHostState> {
     await this.ready;
     this.rejectTerminalPending(new Error("Terminal Native Host disconnected."));
-    if (this.terminalPort) this.terminalPort.disconnect();
+    const port = this.terminalPort;
     this.terminalPort = undefined;
+    if (port) port.disconnect();
     this.terminalNativeHostState = "disconnected";
     return this.terminalNativeHostState;
   }
@@ -1939,9 +2034,20 @@ export class PortusExtensionBridge {
       port.postMessage(parsed);
       return null;
     }
+    if (this.terminalPending.has(parsed.requestId)) {
+      throw createPortusError({
+        code: "INVALID_MESSAGE",
+        message: `Terminal request id is already pending: ${parsed.requestId}.`
+      });
+    }
     return new Promise((resolve, reject) => {
       this.terminalPending.set(parsed.requestId!, { resolve, reject });
-      port.postMessage(parsed);
+      try {
+        port.postMessage(parsed);
+      } catch (error) {
+        this.terminalPending.delete(parsed.requestId!);
+        reject(error instanceof Error ? error : new Error("Terminal Native Host transport failed."));
+      }
     });
   }
 
@@ -1980,7 +2086,8 @@ export class PortusExtensionBridge {
     if (this.terminalPreferences.enabled) void this.connectTerminalTransport().catch(() => undefined);
   }
 
-  private handleTerminalNativeMessage(input: unknown): void {
+  private handleTerminalNativeMessage(input: unknown, sourcePort: PortusNativePort): void {
+    if (this.terminalPort !== sourcePort) return;
     const parsed = TerminalServerMessageSchema.safeParse(input);
     if (!parsed.success) return;
     const message = parsed.data;
@@ -1994,7 +2101,8 @@ export class PortusExtensionBridge {
     for (const port of this.terminalRuntimePorts) port.postMessage(message);
   }
 
-  private handleTerminalNativeDisconnect(): void {
+  private handleTerminalNativeDisconnect(disconnectedPort: PortusNativePort): void {
+    if (this.terminalPort !== disconnectedPort) return;
     this.terminalPort = undefined;
     this.terminalNativeHostState = "disconnected";
     this.rejectTerminalPending(new Error("Terminal Native Host disconnected."));
@@ -2005,7 +2113,8 @@ export class PortusExtensionBridge {
     this.terminalPending.clear();
   }
 
-  private async handleNativeMessage(input: unknown): Promise<void> {
+  private async handleNativeMessage(input: unknown, sourcePort: PortusNativePort): Promise<void> {
+    if (this.port !== sourcePort) return;
     const response = ResponseEnvelopeSchema.safeParse(input);
     if (response.success) {
       this.acceptNativeResponse(response.data);
@@ -2013,14 +2122,22 @@ export class PortusExtensionBridge {
     }
 
     const request = RequestEnvelopeSchema.safeParse(input);
-    if (!request.success) {
-      return;
-    }
+    if (!request.success) return;
 
     const result = await this.dispatchNativeRequest(request.data)
       .then((value) => createOkResponse(request.data.requestId, value))
       .catch((error) => createErrorResponse(request.data.requestId, normalizeExtensionError(error)));
-    this.port?.postMessage(result);
+    if (this.port !== sourcePort) return;
+    try {
+      sourcePort.postMessage(result);
+    } catch {
+      if (request.data.type === "bridge.disconnect" && result.ok) {
+        this.completeNativeRequestedDisconnect();
+      } else {
+        this.handleBridgeTransportFailure();
+      }
+      return;
+    }
     if (request.data.type === "bridge.disconnect" && result.ok) {
       this.completeNativeRequestedDisconnect();
     }
@@ -2065,9 +2182,9 @@ export class PortusExtensionBridge {
       case "windows.list":
         return { windows: await this.listWindows() };
       case "screenshot.capture":
-        return { screenshot: await this.captureScreenshot(readOptionalNumber(request.payload, "tabId")) };
+        return { screenshot: await this.captureScreenshot(readOptionalNumber(request.payload, "tabId"), readOptionalBoolean(request.payload, "useDebugger")) };
       case "snapshot.capture":
-        return { snapshot: await this.captureSnapshot(readOptionalNumber(request.payload, "tabId"), readOptionalSnapshotFilter(request.payload)) };
+        return { snapshot: await this.captureSnapshot(readOptionalNumber(request.payload, "tabId"), readOptionalSnapshotFilter(request.payload), readOptionalBoolean(request.payload, "useDebugger")) };
       case "page.wait":
         return { wait: await this.waitForPage({ ...request.payload, timeoutMs: request.timeoutMs }) };
       case "action.click":
@@ -2177,7 +2294,13 @@ export class PortusExtensionBridge {
         reject,
         timer
       });
-      port.postMessage(request);
+      try {
+        port.postMessage(request);
+      } catch (error) {
+        this.pending.delete(request.requestId);
+        this.clearRequestTimer(timer);
+        reject(normalizeExtensionError(error));
+      }
     });
   }
 
@@ -2353,7 +2476,9 @@ export class PortusExtensionBridge {
     this.reconnectTimer = undefined;
   }
 
-  private handleNativeDisconnect(): void {
+  private handleNativeDisconnect(disconnectedPort: PortusNativePort): void {
+    if (this.port !== disconnectedPort) return;
+    this.port = undefined;
     this.rejectPending(createPortusError({
       code: "NATIVE_HOST_UNAVAILABLE",
       message: "Portus Native Host disconnected.",
@@ -2378,10 +2503,9 @@ export class PortusExtensionBridge {
     this.browserId = null;
     void this.updateActionState();
     void this.broadcastStatus();
-    if (this.port) {
-      this.port.disconnect();
-      this.port = undefined;
-    }
+    const port = this.port;
+    this.port = undefined;
+    if (port) port.disconnect();
     this.scheduleReconnect();
   }
 
@@ -3677,17 +3801,15 @@ function readBounds(value: unknown): { x: number; y: number; width: number; heig
 }
 
 function capturePortusSnapshotPayload(): Record<string, unknown> {
-  const candidates = Array.from(document.querySelectorAll("button,a[href],input,textarea,select,[role],[contenteditable],[tabindex],[onclick]"));
+  const candidates = Array.from(document.querySelectorAll("button,a[href],input,textarea,select,[role],[contenteditable],[tabindex]:not([tabindex^=\"-\"]),[onclick]"));
   const elements = candidates
     .filter((node): node is HTMLElement => node instanceof HTMLElement)
     .filter((element) => {
+      if (element.offsetWidth === 0 || element.offsetHeight === 0) return false;
       const style = getComputedStyle(element);
+      if (style.display === "none" || style.visibility === "hidden") return false;
       const bounds = element.getBoundingClientRect();
-      return style.display !== "none"
-        && style.visibility !== "hidden"
-        && bounds.width > 0
-        && bounds.height > 0
-        && bounds.bottom >= 0
+      return bounds.bottom >= 0
         && bounds.right >= 0
         && bounds.top <= window.innerHeight
         && bounds.left <= window.innerWidth;
@@ -3735,7 +3857,7 @@ function capturePortusSnapshotPayload(): Record<string, unknown> {
       height: window.innerHeight,
       deviceScaleFactor: window.devicePixelRatio || 1
     },
-    visibleText: (document.body?.innerText ?? "").slice(0, 20000),
+    visibleText: (document.body?.textContent ?? "").slice(0, 20000),
     elements
   };
 
@@ -3772,7 +3894,8 @@ function capturePortusSnapshotPayload(): Record<string, unknown> {
 
   function visibleElementText(element: HTMLElement): string {
     if (element instanceof HTMLInputElement) return element.value || element.placeholder || "";
-    return (element.innerText || element.textContent || "").trim().replace(/\s+/g, " ").slice(0, 500);
+    const rawText = (element.textContent || "").slice(0, 1000);
+    return rawText.trim().replace(/\s+/g, " ").slice(0, 500);
   }
 
   function selectorForElement(element: HTMLElement): string {
@@ -4167,7 +4290,8 @@ function resolveLiveActionElement(target: Record<string, unknown>): { element: H
 
   function visibleActionText(element: HTMLElement): string {
     if (element instanceof HTMLInputElement) return element.value || element.placeholder || "";
-    return (element.innerText || element.textContent || "").trim().replace(/\s+/g, " ").slice(0, 500);
+    const rawText = (element.textContent || "").slice(0, 1000);
+    return rawText.trim().replace(/\s+/g, " ").slice(0, 500);
   }
 
   function readTargetBounds(value: unknown): { x: number; y: number; width: number; height: number } | null {

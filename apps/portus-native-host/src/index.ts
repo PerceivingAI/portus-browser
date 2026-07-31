@@ -48,6 +48,7 @@ export class NativeHostRelay {
   private brokerBuffer = "";
   private brokerConnected = false;
   private readonly startBroker: (() => Promise<void> | void) | undefined;
+  private connectPromise: Promise<void> | undefined;
 
   constructor(options: NativeHostRelayOptions = {}) {
     this.config = PortusConfigSchema.parse(options.config ?? DEFAULT_PORTUS_CONFIG);
@@ -65,6 +66,12 @@ export class NativeHostRelay {
   attach(input: Readable, output: Writable): void {
     this.input = input;
     this.output = output;
+    input.once("end", () => {
+      void this.stop();
+    });
+    input.once("close", () => {
+      void this.stop();
+    });
     input.on("data", (chunk: Buffer | string) => {
       this.acceptNativeData(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
     });
@@ -72,12 +79,22 @@ export class NativeHostRelay {
 
   async connectBroker(): Promise<void> {
     if (this.brokerConnected && this.brokerSocket) return Promise.resolve();
+    if (this.connectPromise) return this.connectPromise;
+
+    const connection = (async () => {
+      try {
+        await this.connectBrokerOnce();
+      } catch (error) {
+        if (!this.config.nativeHost.startBrokerIfMissing || !this.startBroker) throw error;
+        await this.startBroker();
+        await this.connectBrokerAfterStart();
+      }
+    })();
+    this.connectPromise = connection;
     try {
-      await this.connectBrokerOnce();
-    } catch (error) {
-      if (!this.config.nativeHost.startBrokerIfMissing || !this.startBroker) throw error;
-      await this.startBroker();
-      await this.connectBrokerAfterStart();
+      await connection;
+    } finally {
+      if (this.connectPromise === connection) this.connectPromise = undefined;
     }
   }
 
@@ -94,14 +111,22 @@ export class NativeHostRelay {
           this.acceptBrokerData(typeof chunk === "string" ? chunk : chunk.toString("utf8"));
         });
         socket.on("close", () => {
+          if (this.brokerSocket !== socket) return;
+          this.brokerConnected = false;
+          this.brokerSocket = undefined;
+        });
+        socket.on("error", () => {
+          if (this.brokerSocket !== socket) return;
           this.brokerConnected = false;
         });
         resolve();
       };
       const onError = (error: Error) => {
         socket.off("connect", onConnect);
-        this.brokerConnected = false;
-        this.brokerSocket = undefined;
+        if (this.brokerSocket === socket) {
+          this.brokerConnected = false;
+          this.brokerSocket = undefined;
+        }
         reject(error);
       };
 

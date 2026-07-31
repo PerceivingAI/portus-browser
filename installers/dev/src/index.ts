@@ -2,6 +2,7 @@
 
 import { execFile as execFileCallback } from "node:child_process";
 import { access, chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { dirname, posix as pathPosix, win32 as pathWin32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -772,6 +773,12 @@ async function main(): Promise<void> {
 }
 
 const currentModulePath = fileURLToPath(import.meta.url);
-if (process.argv[1] === currentModulePath) {
+let isMain = false;
+try {
+  isMain = process.argv[1] ? realpathSync(process.argv[1]) === realpathSync(currentModulePath) : false;
+} catch {
+  isMain = process.argv[1] === currentModulePath;
+}
+if (isMain) {
   void main();
 }

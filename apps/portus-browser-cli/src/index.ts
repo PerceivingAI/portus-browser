@@ -2,6 +2,7 @@
 
 import { createConnection, type Socket } from "node:net";
 import { copyFile, mkdir, readFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
@@ -250,6 +251,7 @@ export class NamedPipeBrokerClient implements BrokerClient {
     reject: (reason: PortusError) => void;
     timer: ReturnType<typeof setTimeout> | undefined;
   }>();
+  private connectPromise: Promise<Socket> | undefined;
 
   constructor(
     private readonly endpointPath: string,
@@ -339,7 +341,9 @@ export class NamedPipeBrokerClient implements BrokerClient {
 
   private connect(): Promise<Socket> {
     if (this.socket && !this.socket.destroyed) return Promise.resolve(this.socket);
-    return new Promise((resolve, reject) => {
+    if (this.connectPromise) return this.connectPromise;
+
+    const connection = new Promise<Socket>((resolve, reject) => {
       const socket = createConnection(this.endpointPath);
       const onConnect = () => {
         socket.off("error", onError);
@@ -349,8 +353,12 @@ export class NamedPipeBrokerClient implements BrokerClient {
           this.acceptData(typeof chunk === "string" ? chunk : chunk.toString("utf8"));
         });
         socket.on("close", () => {
-          this.socket = undefined;
+          if (this.socket === socket) this.socket = undefined;
           this.rejectAllPending(brokerUnavailableError("Broker connection closed."));
+        });
+        socket.on("error", (error) => {
+          if (this.socket !== socket) return;
+          this.rejectAllPending(brokerUnavailableError(error.message));
         });
         resolve(socket);
       };
@@ -361,6 +369,11 @@ export class NamedPipeBrokerClient implements BrokerClient {
       socket.once("connect", onConnect);
       socket.once("error", onError);
     });
+    this.connectPromise = connection;
+    void connection.finally(() => {
+      if (this.connectPromise === connection) this.connectPromise = undefined;
+    }).catch(() => undefined);
+    return connection;
   }
 
   private acceptData(chunk: string): void {
@@ -424,10 +437,12 @@ export async function runPortusBrowserCli(
   options: PortusBrowserCliOptions = {}
 ): Promise<CliCommandResult> {
   let broker: BrokerClient | undefined;
+  let outputMode = inferOutputMode(argv);
   try {
     const config = createCliConfig(options);
     const parsed = parseArgs(argv);
     const output = resolveOutputMode(parsed, config);
+    outputMode = output;
     broker = options.brokerClient ?? createDefaultBrokerClient(config);
     const timeoutMs = readOptionalPositiveIntegerFlag(parsed, "timeout") ?? config.commands.timeoutMs;
       const context: CliContext = {
@@ -509,7 +524,7 @@ export async function runPortusBrowserCli(
         throw usageError(`Unknown command: ${parsed.command}.`);
     }
   } catch (error) {
-    return renderFailure(error, inferOutputMode(argv));
+    return renderFailure(error, outputMode);
   } finally {
     await broker?.close?.();
   }
@@ -619,6 +634,7 @@ async function handleScreenshot(context: CliContext, parsed: ParsedArgs): Promis
   const payload: Record<string, unknown> = { browserId };
   const tabId = readOptionalIntegerFlag(parsed, "tab-id");
   if (tabId !== undefined) payload.tabId = tabId;
+  if (hasFlag(parsed, "debugger")) payload.useDebugger = true;
   const result = ScreenshotCommandResultSchema.parse(await context.broker.request("screenshot.capture", payload, context.timeoutMs));
   return {
     ok: true,
@@ -633,6 +649,7 @@ async function handleSnapshot(context: CliContext, parsed: ParsedArgs): Promise<
   if (tabId !== undefined) payload.tabId = tabId;
   const filter = readSnapshotFilter(parsed);
   if (filter !== undefined) payload.filter = filter;
+  if (hasFlag(parsed, "debugger")) payload.useDebugger = true;
   const result = SnapshotCommandResultSchema.parse(await context.broker.request("snapshot.capture", payload, context.timeoutMs));
   return {
     ok: true,
@@ -1961,7 +1978,13 @@ async function main(): Promise<void> {
 }
 
 const currentModulePath = fileURLToPath(import.meta.url);
-if (process.argv[1] === currentModulePath) {
+let isMain = false;
+try {
+  isMain = process.argv[1] ? realpathSync(process.argv[1]) === realpathSync(currentModulePath) : false;
+} catch {
+  isMain = process.argv[1] === currentModulePath;
+}
+if (isMain) {
   void main();
 }
 

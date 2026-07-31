@@ -2,7 +2,7 @@
 
 import { fileURLToPath } from "node:url";
 import { timingSafeEqual } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { dirname } from "node:path";
 import { z } from "zod";
@@ -2364,7 +2364,14 @@ export const portusBrokerApp = {
   phase: "broker-core"
 } as const;
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+const currentModulePath = fileURLToPath(import.meta.url);
+let isMain = false;
+try {
+  isMain = process.argv[1] ? realpathSync(process.argv[1]) === realpathSync(currentModulePath) : false;
+} catch {
+  isMain = process.argv[1] === currentModulePath;
+}
+if (isMain) {
   startBrokerCli().catch((error: unknown) => {
     const normalized = normalizeBrokerError(error);
     process.stderr.write(`${normalized.code}: ${normalized.message}\n`);

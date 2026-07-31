@@ -2,6 +2,7 @@
 
 import { spawn } from "node:child_process";
 import { access } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runNativeHost } from "./index.js";
@@ -48,6 +49,13 @@ export async function runNativeHostCli(): Promise<void> {
   }
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+const currentModulePath = fileURLToPath(import.meta.url);
+let isMain = false;
+try {
+  isMain = process.argv[1] ? realpathSync(process.argv[1]) === realpathSync(currentModulePath) : false;
+} catch {
+  isMain = process.argv[1] === currentModulePath;
+}
+if (isMain) {
   void runNativeHostCli();
 }
