@@ -239,16 +239,79 @@ export function validateCliInvocationFlags(
   invocation: ResolvedCliInvocation,
   providedFlagNames: Iterable<string>
 ): string | undefined {
-  const allowed = new Set<string>([
-    ...CLI_INHERITED_GLOBAL_FLAGS.map((flag) => flag.name),
-    ...invocation.spec.flags.map((flag) => flag.name)
-  ]);
+  const allowed = new Set(cliInvocationAllowedFlags(invocation).map((flag) => flag.name));
   const invocationPath = cliInvocationPath(invocation.spec);
 
   for (const name of providedFlagNames) {
     if (!allowed.has(name)) return `--${name} is not valid for ${invocationPath}.`;
   }
   return undefined;
+}
+
+/**
+ * CLI-6 repeatability validation.
+ *
+ * Lexical parsing preserves duplicate occurrences so repeatability is decided
+ * only after the exact invocation has been resolved. This keeps duplicate
+ * policy in the same declarative contract that owns per-invocation legality.
+ */
+export function validateCliInvocationRepeatability(
+  invocation: ResolvedCliInvocation,
+  providedFlags: ReadonlyMap<string, string | boolean | string[]>
+): string | undefined {
+  const allowedByName = new Map(cliInvocationAllowedFlags(invocation).map((flag) => [flag.name, flag] as const));
+
+  for (const [name, value] of providedFlags) {
+    if (!Array.isArray(value)) continue;
+    const spec = allowedByName.get(name);
+    if (spec && !spec.repeatable) return `--${name} may only be provided once.`;
+  }
+  return undefined;
+}
+
+/**
+ * CLI-7 positional contract validation.
+ *
+ * Subcommand tokens have already been consumed by resolution, so only actual
+ * positional arguments are validated here. Variadic specs consume the rest.
+ */
+export function validateCliInvocationPositionals(invocation: ResolvedCliInvocation): string | undefined {
+  const specs = invocation.spec.positionals;
+  const values = invocation.argumentPositionals;
+  const invocationPath = cliInvocationPath(invocation.spec);
+  let valueIndex = 0;
+
+  for (const spec of specs) {
+    if (spec.variadic) {
+      if (spec.required && valueIndex >= values.length) {
+        return `${invocationPath} requires <${spec.name}>.`;
+      }
+      return undefined;
+    }
+
+    if (valueIndex >= values.length) {
+      if (spec.required) return `${invocationPath} requires <${spec.name}>.`;
+      continue;
+    }
+    valueIndex += 1;
+  }
+
+  if (valueIndex < values.length) {
+    if (specs.length === 0) return `${invocationPath} does not accept positional arguments.`;
+    const expected = specs.map(formatPositionalSpec).join(" ");
+    return `${invocationPath} accepts only ${expected}.`;
+  }
+
+  return undefined;
+}
+
+function cliInvocationAllowedFlags(invocation: ResolvedCliInvocation): readonly CliFlagSpec[] {
+  return [...CLI_INHERITED_GLOBAL_FLAGS, ...invocation.spec.flags];
+}
+
+function formatPositionalSpec(spec: CliPositionalSpec): string {
+  const value = spec.variadic ? `<${spec.name}...>` : `<${spec.name}>`;
+  return spec.required ? value : `[${value}]`;
 }
 
 function unresolvedInvocationMessage(command: string, positionals: readonly string[]): string {

@@ -27,16 +27,16 @@ test("CLI-1 flag definitions encode primitive kind and repeatability", () => {
   assert.equal(getCliFlagSpec("does-not-exist"), undefined);
 });
 
-test("CLI-1 parser rejects duplicate non-repeatable value flags before dispatch", async () => {
+test("CLI-6 declarative validation rejects duplicate non-repeatable value flags before dispatch", async () => {
   const broker = createRecordingBroker();
-  const result = await runPortusBrowserCli(["browsers", "--browser", "1", "--browser", "2", "--json"], { brokerClient: broker });
+  const result = await runPortusBrowserCli(["tabs", "--browser", "1", "--browser", "2", "--json"], { brokerClient: broker });
 
   assert.equal(result.exitCode, 2);
   assert.match(JSON.parse(result.stderr).error.message, /--browser may only be provided once/);
   assert.deepEqual(broker.requests, []);
 });
 
-test("CLI-1 parser preserves intentionally repeatable --field values", async () => {
+test("CLI-6 declarative validation preserves intentionally repeatable --field values", async () => {
   const broker = createRecordingBroker({
     "action.fillForm": {
       fillForm: {

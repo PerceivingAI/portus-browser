@@ -6,7 +6,9 @@ import {
   CLI_INVOCATIONS,
   cliInvocationPath,
   resolveCliInvocation,
-  validateCliInvocationFlags
+  validateCliInvocationFlags,
+  validateCliInvocationPositionals,
+  validateCliInvocationRepeatability
 } from "../dist/command-spec.js";
 import { CLI_SURFACE_BASELINE } from "../dist/cli-surface.js";
 import { runPortusBrowserCli } from "../dist/index.js";
@@ -158,6 +160,102 @@ test("CLI-5 keeps global presentation flags valid across invocation types", asyn
   assert.equal(result.exitCode, 0);
   assert.equal(result.stdout, "");
   assert.deepEqual(broker.requests.map((request) => request.type), ["browser.list"]);
+});
+
+test("CLI-6 enforces repeatability after exact invocation resolution", () => {
+  const browsers = resolveCliInvocation("browsers", []);
+  assert.equal(browsers.ok, true);
+  assert.equal(
+    validateCliInvocationRepeatability(browsers.invocation, new Map([["json", ["true", "true"]]])),
+    "--json may only be provided once."
+  );
+
+  const open = resolveCliInvocation("open", ["example.com"]);
+  assert.equal(open.ok, true);
+  assert.equal(
+    validateCliInvocationRepeatability(open.invocation, new Map([["browser", ["1", "2"]]])),
+    "--browser may only be provided once."
+  );
+
+  const fillForm = resolveCliInvocation("fill-form", []);
+  assert.equal(fillForm.ok, true);
+  assert.equal(
+    validateCliInvocationRepeatability(fillForm.invocation, new Map([["field", ["el_1=a", "el_2=b"]]])),
+    undefined
+  );
+});
+
+test("CLI-6 rejects duplicate non-repeatable flags before Broker dispatch", async () => {
+  for (const argv of [
+    ["browsers", "--json", "--json"],
+    ["open", "example.com", "--browser", "1", "--browser", "2", "--json"]
+  ]) {
+    const broker = createRecordingBroker({});
+    const result = await runPortusBrowserCli(argv, { brokerClient: broker });
+    assert.equal(result.exitCode, 2, argv.join(" "));
+    assert.match(JSON.parse(result.stderr).error.message, /may only be provided once/, argv.join(" "));
+    assert.deepEqual(broker.requests, [], argv.join(" "));
+  }
+});
+
+test("CLI-7 validates required optional variadic and zero-positional contracts", () => {
+  const openMissing = resolveCliInvocation("open", []);
+  assert.equal(openMissing.ok, true);
+  assert.equal(validateCliInvocationPositionals(openMissing.invocation), "open requires <url>.");
+
+  const browsersExtra = resolveCliInvocation("browsers", ["stray"]);
+  assert.equal(browsersExtra.ok, true);
+  assert.equal(validateCliInvocationPositionals(browsersExtra.invocation), "browsers does not accept positional arguments.");
+
+  const createRequiredOnly = resolveCliInvocation("recipes", ["create", "recipe-1"]);
+  assert.equal(createRequiredOnly.ok, true);
+  assert.equal(validateCliInvocationPositionals(createRequiredOnly.invocation), undefined);
+
+  const createWithOptional = resolveCliInvocation("recipes", ["create", "recipe-1", "Display Name"]);
+  assert.equal(createWithOptional.ok, true);
+  assert.equal(validateCliInvocationPositionals(createWithOptional.invocation), undefined);
+
+  const createExtra = resolveCliInvocation("recipes", ["create", "recipe-1", "Display Name", "extra"]);
+  assert.equal(createExtra.ok, true);
+  assert.equal(
+    validateCliInvocationPositionals(createExtra.invocation),
+    "recipes create accepts only <recipe-id> [<name>]."
+  );
+
+  const searchMissing = resolveCliInvocation("recipes", ["search"]);
+  assert.equal(searchMissing.ok, true);
+  assert.equal(validateCliInvocationPositionals(searchMissing.invocation), "recipes search requires <query>.");
+
+  const searchMany = resolveCliInvocation("recipes", ["search", "latest", "AI", "news"]);
+  assert.equal(searchMany.ok, true);
+  assert.equal(validateCliInvocationPositionals(searchMany.invocation), undefined);
+});
+
+test("CLI-7 rejects positional misuse before Broker or filesystem side effects", async () => {
+  for (const argv of [
+    ["open", "--json"],
+    ["browsers", "stray", "--json"],
+    ["network", "get", "--browser", "br_000001", "--tab-id", "11", "--json"]
+  ]) {
+    const broker = createRecordingBroker({});
+    const result = await runPortusBrowserCli(argv, { brokerClient: broker });
+    assert.equal(result.exitCode, 2, argv.join(" "));
+    assert.deepEqual(broker.requests, [], argv.join(" "));
+  }
+
+  const { mkdtemp, readdir } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const directory = await mkdtemp(join(tmpdir(), "portus-cli7-no-side-effect-"));
+  const broker = createRecordingBroker({});
+  const local = await runPortusBrowserCli([
+    "recipes", "create", "recipe-1", "Name", "extra", "--content", "must not be written", "--directory", directory, "--json"
+  ], { brokerClient: broker });
+
+  assert.equal(local.exitCode, 2);
+  assert.match(JSON.parse(local.stderr).error.message, /recipes create accepts only/);
+  assert.deepEqual(await readdir(directory), []);
+  assert.deepEqual(broker.requests, []);
 });
 
 test("CLI-5 rejects meaningless timeout on local recipe operations before filesystem work", async () => {

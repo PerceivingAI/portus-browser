@@ -75,10 +75,14 @@ import {
   CLI_OUTPUT_FLAG,
   CLI_TIMEOUT_FLAG,
   cliFlagTakesValue,
-  getCliFlagSpec,
-  type CliFlagSpec
+  getCliFlagSpec
 } from "./cli-flags.js";
-import { resolveCliInvocation, validateCliInvocationFlags } from "./command-spec.js";
+import {
+  resolveCliInvocation,
+  validateCliInvocationFlags,
+  validateCliInvocationPositionals,
+  validateCliInvocationRepeatability
+} from "./command-spec.js";
 import {
   deserializeTransportFrame,
   resolveBrokerEndpoint,
@@ -453,6 +457,10 @@ export async function runPortusBrowserCli(
     const invocation = resolution.invocation;
     const flagValidationError = validateCliInvocationFlags(invocation, parsed.flags.keys());
     if (flagValidationError) throw usageError(flagValidationError);
+    const repeatabilityValidationError = validateCliInvocationRepeatability(invocation, parsed.flags);
+    if (repeatabilityValidationError) throw usageError(repeatabilityValidationError);
+    const positionalValidationError = validateCliInvocationPositionals(invocation);
+    if (positionalValidationError) throw usageError(positionalValidationError);
     const output = resolveOutputMode(parsed, config);
     outputMode = output;
     const timeoutMs = readOptionalPositiveIntegerFlag(parsed, CLI_TIMEOUT_FLAG.name) ?? config.commands.timeoutMs;
@@ -1689,13 +1697,16 @@ function parseArgs(argv: string[]): ParsedArgs {
   return { command, positionals, flags };
 }
 
-function setParsedFlag(flags: Map<string, string | boolean | string[]>, spec: CliFlagSpec, value: string | boolean): void {
+function setParsedFlag(
+  flags: Map<string, string | boolean | string[]>,
+  spec: { name: string },
+  value: string | boolean
+): void {
   const current = flags.get(spec.name);
   if (current === undefined) {
     flags.set(spec.name, value);
     return;
   }
-  if (!spec.repeatable) throw usageError(`--${spec.name} may only be provided once.`);
   if (Array.isArray(current)) {
     current.push(String(value));
     return;
