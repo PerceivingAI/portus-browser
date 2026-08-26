@@ -340,6 +340,65 @@ test("publishes Chrome tab lifecycle events while bridge is connected", async ()
   await waitFor(() => port.messages.some((message) => message.type === "event.publish" && message.payload.type === "tab.closed"));
 });
 
+test("snapshot lifecycle invalidates on top-level loading but preserves same-document updates", async () => {
+  const fixture = createChromeFixture();
+  const bridge = createConnectedBridge(fixture);
+
+  const first = await bridge.captureSnapshot(1);
+  assert.equal(bridge.snapshots.get(first.snapshotId).mainDocumentId, first.elements[0].documentId);
+  fixture.tabEvents.onUpdated.emit(1, { url: "https://example.com/spa" }, chromeTab(1, "https://example.com/spa", true));
+  const firstAction = await bridge.performAction("click", {
+    tabId: 1,
+    snapshotId: first.snapshotId,
+    elementId: first.elements[0].elementId
+  });
+  assert.equal(firstAction.backend, "content-script-dom");
+
+  const second = await bridge.captureSnapshot(1);
+  fixture.tabEvents.onUpdated.emit(1, { status: "complete" }, chromeTab(1, "https://example.com/1", true));
+  const secondAction = await bridge.performAction("click", {
+    tabId: 1,
+    snapshotId: second.snapshotId,
+    elementId: second.elements[0].elementId
+  });
+  assert.equal(secondAction.backend, "content-script-dom");
+
+  await bridge.setAdvancedBackendEnabled(true, false);
+  const third = await bridge.captureSnapshot(1);
+  const debuggerCommandCount = fixture.debuggerCommands.length;
+  fixture.tabEvents.onUpdated.emit(1, { status: "loading" }, chromeTab(1, "https://example.com/new", true));
+
+  await assert.rejects(() => bridge.performAction("click", {
+    tabId: 1,
+    snapshotId: third.snapshotId,
+    elementId: third.elements[0].elementId
+  }), { code: "SNAPSHOT_STALE" });
+
+  assert.equal(bridge.snapshots.get(third.snapshotId).stale, true);
+  assert.equal(fixture.debuggerCommands.length, debuggerCommandCount);
+});
+
+test("closing a tab removes its structural and pierced snapshot state", async () => {
+  const fixture = createPiercedCoreActionFixture();
+  const bridge = createConnectedBridge(fixture);
+  await bridge.setAdvancedBackendEnabled(true, false);
+  const snapshot = await bridge.captureSnapshot(1, { query: "secret input" });
+
+  assert.equal(bridge.snapshots.has(snapshot.snapshotId), true);
+  assert.equal(bridge.debuggerSnapshotTargets.has(snapshot.snapshotId), true);
+
+  fixture.tabEvents.onRemoved.emit(1, { windowId: 11, isWindowClosing: false });
+
+  assert.equal(bridge.snapshots.has(snapshot.snapshotId), false);
+  assert.equal(bridge.debuggerSnapshotTargets.has(snapshot.snapshotId), false);
+  await assert.rejects(() => bridge.performAction("type", {
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    elementId: snapshot.elements[0].elementId,
+    text: "Ada"
+  }), { code: "SNAPSHOT_STALE" });
+});
+
 test("disconnects bridge and clears local availability state", async () => {
   const fixture = createChromeFixture();
   const bridge = createPortusExtensionBridge(fixture.chrome, {
@@ -3057,6 +3116,26 @@ test("CDP-only drag fails stale before dispatching mouse input when live bounds 
   assert.equal(dragCommands[0].params.backendNodeId, 5);
 });
 
+test("pierced drag verifies document identity before CDP geometry or input", async () => {
+  const fixture = createPiercedDragFixture({ documentAvailable: false });
+  const bridge = createConnectedBridge(fixture);
+  await bridge.setCommandPolicyEnabled("action.drag", true, false);
+  await bridge.setAdvancedBackendEnabled(true, false);
+  const snapshot = await bridge.captureSnapshot(1);
+  const commandCount = fixture.debuggerCommands.length;
+
+  await assert.rejects(() => bridge.performAction("drag", {
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    sourceElementId: snapshot.elements[0].elementId,
+    targetElementId: snapshot.elements[2].elementId
+  }), { code: "SNAPSHOT_STALE" });
+
+  assert.equal(fixture.debuggerCommands.length, commandCount);
+  assert.equal(fixture.actions.length, 0);
+  assert.deepEqual(fixture.scriptInjections.at(-1).target, { tabId: 1, documentIds: ["doc_main"] });
+});
+
 test("CDP-only drag cannot fall through to DOM after Advanced Backend is disabled", async () => {
   const fixture = createPiercedDragFixture();
   const bridge = createConnectedBridge(fixture);
@@ -3303,6 +3382,26 @@ test("pierced closed-shadow core actions keep the specialized debugger reachabil
   }
 });
 
+test("pierced actions verify the captured document before resolving CDP nodes", async () => {
+  const fixture = createPiercedCoreActionFixture({ documentAvailable: false });
+  const bridge = createConnectedBridge(fixture);
+  await bridge.setAdvancedBackendEnabled(true, false);
+  const snapshot = await bridge.captureSnapshot(1, { query: "secret input" });
+  const commandCount = fixture.debuggerCommands.length;
+  const attachCount = fixture.debuggerAttaches.length;
+
+  await assert.rejects(() => bridge.performAction("type", {
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    elementId: snapshot.elements[0].elementId,
+    text: "Ada"
+  }), { code: "SNAPSHOT_STALE" });
+
+  assert.equal(fixture.debuggerCommands.length, commandCount);
+  assert.equal(fixture.debuggerAttaches.length, attachCount);
+  assert.deepEqual(fixture.scriptInjections.at(-1).target, { tabId: 1, documentIds: ["doc_main"] });
+});
+
 test("pierced closed-shadow actions never fall through to DOM after Advanced Backend is disabled", async () => {
   const fixture = createPiercedCoreActionFixture();
   const bridge = createConnectedBridge(fixture);
@@ -3471,6 +3570,30 @@ test("atomic mixed fill-form does not mutate normal fields when a CDP-only targe
   assert.equal(fixture.actions[0].validateOnly, true);
 });
 
+test("atomic mixed fill-form performs zero mutations when a pierced document was replaced", async () => {
+  const { fixture, chronology } = createPiercedFillFormFixture({ documentAvailable: false });
+  const bridge = createConnectedBridge(fixture);
+  await bridge.setAdvancedBackendEnabled(true, false);
+  const snapshot = await bridge.captureSnapshot(1);
+  chronology.length = 0;
+  fixture.actions.length = 0;
+  const commandCount = fixture.debuggerCommands.length;
+
+  await assert.rejects(() => bridge.fillForm({
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    fields: [
+      { elementId: snapshot.elements[0].elementId, value: "Ada" },
+      { elementId: snapshot.elements[1].elementId, value: "Lovelace" }
+    ]
+  }), { code: "SNAPSHOT_STALE" });
+
+  assert.deepEqual(chronology, ["normal-validate"]);
+  assert.equal(fixture.actions.length, 1);
+  assert.equal(fixture.actions[0].validateOnly, true);
+  assert.equal(fixture.debuggerCommands.length, commandCount);
+});
+
 test("partial mixed fill-form reports a stale CDP-only field without blocking a normal field", async () => {
   const { fixture, chronology } = createPiercedFillFormFixture({ resolveFails: true });
   const bridge = createConnectedBridge(fixture);
@@ -3500,6 +3623,34 @@ test("partial mixed fill-form reports a stale CDP-only field without blocking a 
   assert.deepEqual(chronology, ["normal-mutate", "cdp-resolve"]);
   assert.equal(fixture.actions.length, 1);
   assert.equal(fixture.actions[0].partial, true);
+});
+
+test("partial mixed fill-form isolates a replaced pierced document to that field", async () => {
+  const { fixture, chronology } = createPiercedFillFormFixture({ documentAvailable: false });
+  const bridge = createConnectedBridge(fixture);
+  await bridge.setAdvancedBackendEnabled(true, false);
+  const snapshot = await bridge.captureSnapshot(1);
+  chronology.length = 0;
+  fixture.actions.length = 0;
+  const commandCount = fixture.debuggerCommands.length;
+
+  const result = await bridge.fillForm({
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    partial: true,
+    fields: [
+      { elementId: snapshot.elements[0].elementId, value: "Ada" },
+      { elementId: snapshot.elements[1].elementId, value: "Lovelace" }
+    ]
+  });
+
+  assert.deepEqual(result.fields.map((field) => [field.ok, field.error?.code]), [
+    [true, undefined],
+    [false, "SNAPSHOT_STALE"]
+  ]);
+  assert.deepEqual(chronology, ["normal-mutate"]);
+  assert.equal(fixture.actions.length, 1);
+  assert.equal(fixture.debuggerCommands.length, commandCount);
 });
 
 test("detaches debugger sessions when a debugger command fails after attach", async () => {
@@ -4049,11 +4200,15 @@ function withInjectionMetadata(injection, results) {
   });
 }
 
-function createPiercedFillFormFixture({ debuggerEditable = true, resolveFails = false } = {}) {
+function createPiercedFillFormFixture({ debuggerEditable = true, resolveFails = false, documentAvailable = true } = {}) {
   const chronology = [];
   const fixture = createChromeFixture({
     executeScript(injection, actions) {
       if (injection.files) return Promise.resolve([{ result: undefined }]);
+      if (Array.isArray(injection.target?.documentIds) && !Array.isArray(injection.args)) {
+        if (!documentAvailable) return Promise.reject(new Error("No document with id doc_main"));
+        return Promise.resolve([{ frameId: 0, documentId: injection.target.documentIds[0], result: true }]);
+      }
       if (isActionInjection(injection)) {
         const payload = injection.args[0];
         actions.push(payload);
@@ -4159,11 +4314,15 @@ function createPiercedFillFormFixture({ debuggerEditable = true, resolveFails = 
   return { fixture, chronology };
 }
 
-function createPiercedDragFixture({ staleBackendNodeId } = {}) {
+function createPiercedDragFixture({ staleBackendNodeId, documentAvailable = true } = {}) {
   const boxCalls = new Map();
   return createChromeFixture({
     executeScript(injection) {
       if (injection.files) return Promise.resolve([{ result: undefined }]);
+      if (Array.isArray(injection.target?.documentIds) && !Array.isArray(injection.args)) {
+        if (!documentAvailable) return Promise.reject(new Error("No document with id doc_main"));
+        return Promise.resolve([{ frameId: 0, documentId: injection.target.documentIds[0], result: true }]);
+      }
       const payload = Array.isArray(injection.args) ? injection.args[0] : undefined;
       if (payload && typeof payload === "object" && payload.action === "__portus.inspect-target") {
         return Promise.resolve([{
@@ -4262,10 +4421,14 @@ function createPiercedDragFixture({ staleBackendNodeId } = {}) {
   });
 }
 
-function createPiercedCoreActionFixture() {
+function createPiercedCoreActionFixture({ documentAvailable = true } = {}) {
   return createChromeFixture({
     executeScript(injection) {
       if (injection.files) return Promise.resolve([{ result: undefined }]);
+      if (Array.isArray(injection.target?.documentIds) && !Array.isArray(injection.args)) {
+        if (!documentAvailable) return Promise.reject(new Error("No document with id doc_main"));
+        return Promise.resolve([{ frameId: 0, documentId: injection.target.documentIds[0], result: true }]);
+      }
       if (injection.target?.allFrames === true) {
         return Promise.resolve([{
           frameId: 0,

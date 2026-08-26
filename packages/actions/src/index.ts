@@ -25,6 +25,7 @@ export {
 export interface SnapshotStoreEntry {
   snapshot: Snapshot;
   stale: boolean;
+  mainDocumentId?: string;
 }
 
 export function createDomActionResult(completedAt: string, details: Record<string, unknown> = {}): ActionResult {

@@ -168,7 +168,8 @@ Rules:
 
 - Snapshot output contains `snapshotId` and `elementId` values. Elements may originate from regular DOM, scriptable iframes, or recursively nested open/closed Shadow DOM. Portus retains frame, document, and shadow identity internally.
 - Continue targeting any returned element only with its `snapshotId` and `elementId`. Do not construct Shadow DOM selectors or depend on internal shadow metadata.
-- Element ids are scoped to the snapshot that produced them. Element-targeted actions are routed back to the exact captured document and shadow tree automatically.
+- Element ids are scoped to the snapshot that produced them. Element-targeted actions are routed back to the exact captured document and shadow tree automatically. If that captured document has been replaced, Portus rejects the action as `SNAPSHOT_STALE` rather than retargeting the current document.
+- Top-level page loading proactively invalidates snapshots for that tab. Same-document URL/SPA updates do not invalidate solely because the URL changed; live element re-resolution and exact document identity remain the safety checks.
 - `page.wait` evaluates scriptable child frames and their Shadow DOM as well as the main frame; matched wait details may include frame/document and shadow diagnostics.
 - Same-document actions, including drag, can cross Shadow DOM boundaries. Cross-frame/document drag remains unsupported.
 - If the page changes, scrolls, navigates, hovers, or updates, take a fresh snapshot before acting.

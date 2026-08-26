@@ -493,6 +493,7 @@ function formatConsoleArgument(value: unknown): string {
 
 interface DebuggerSnapshotTarget {
   backendNodeId: number;
+  documentId: string;
 }
 
 type ActionExecutionBackend = "content-script-dom" | "debugger-input" | "debugger-pierced";
@@ -750,6 +751,7 @@ export class PortusExtensionBridge {
       copyDefinedTabField(eventTab, "pinned", changeInfo.pinned ?? tab.pinned);
       copyDefinedTabField(eventTab, "discarded", changeInfo.discarded ?? tab.discarded);
       this.publishTabLifecycleEvent("tab.updated", eventTab, tabChangeDetails(changeInfo));
+      if (changeInfo.status === "loading") this.invalidateSnapshotsForTabLifecycle(tabId);
       if (changeInfo.url !== undefined || changeInfo.status !== undefined) void this.broadcastStatus();
     });
     this.chromeApi.tabs.onActivated?.addListener((activeInfo) => {
@@ -763,6 +765,7 @@ export class PortusExtensionBridge {
         });
     });
     this.chromeApi.tabs.onRemoved?.addListener((tabId, removeInfo) => {
+      this.removeSnapshotsForTabLifecycle(tabId);
       if (this.policyVisibleTabIds.delete(tabId)) {
         this.publishBrowserEvent("tab.closed", {
           tabId,
@@ -994,6 +997,7 @@ export class PortusExtensionBridge {
       ? await this.captureScreenshot(targetTabId, options.useDebugger)
       : undefined;
     const page = await this.executeSnapshotScript(targetTabId, filter);
+    const mainDocumentId = readString(page, "mainDocumentId");
     const normalCandidates = readElementCandidates(page.elements);
     const requestedLimit = Math.min(filter?.maxElements ?? SNAPSHOT_COLLECTION_LIMIT, SNAPSHOT_COLLECTION_LIMIT);
     const remainingLimit = Math.max(0, requestedLimit - normalCandidates.length);
@@ -1002,7 +1006,7 @@ export class PortusExtensionBridge {
     const supplement = shouldUsePiercedFallback
       ? await this.capturePiercedClosedShadowSupplement(
           targetTabId,
-          readString(page, "mainDocumentId"),
+          mainDocumentId,
           readViewport(page.viewport),
           filter,
           remainingLimit
@@ -1030,7 +1034,7 @@ export class PortusExtensionBridge {
       ? { ...snapshotInput, cleanedDom: page.cleanedDom }
       : snapshotInput);
     const result = filter === undefined ? snapshot : filterSnapshot(snapshot, filter);
-    this.snapshots.set(result.snapshotId, { snapshot: result, stale: false });
+    this.snapshots.set(result.snapshotId, { snapshot: result, stale: false, mainDocumentId });
     if (supplement.candidates.length > 0) {
       const debuggerTargets = new Map<string, DebuggerSnapshotTarget>();
       const resultIds = new Set(result.elements.map((element) => element.elementId));
@@ -1038,7 +1042,10 @@ export class PortusExtensionBridge {
         const snapshotElement = snapshot.elements[normalCandidates.length + index];
         const cdpTarget = supplement.candidates[index];
         if (!snapshotElement || !cdpTarget || !resultIds.has(snapshotElement.elementId)) continue;
-        debuggerTargets.set(snapshotElement.elementId, { backendNodeId: cdpTarget.backendNodeId });
+        debuggerTargets.set(snapshotElement.elementId, {
+          backendNodeId: cdpTarget.backendNodeId,
+          documentId: snapshotElement.documentId
+        });
       }
       if (debuggerTargets.size > 0) this.debuggerSnapshotTargets.set(result.snapshotId, debuggerTargets);
     }
@@ -3755,6 +3762,72 @@ export class PortusExtensionBridge {
     for (const snapshotId of snapshotIds) this.debuggerSnapshotTargets.delete(snapshotId);
   }
 
+  private invalidateSnapshotsForTabLifecycle(tabId: number): string[] {
+    const affected: string[] = [];
+    for (const [snapshotId, entry] of this.snapshots) {
+      if (entry.snapshot.tabId !== tabId) continue;
+      entry.stale = true;
+      affected.push(snapshotId);
+    }
+    this.clearDebuggerTargetsForSnapshots(affected);
+    return affected;
+  }
+
+  private removeSnapshotsForTabLifecycle(tabId: number): void {
+    for (const [snapshotId, entry] of this.snapshots) {
+      if (entry.snapshot.tabId !== tabId) continue;
+      this.snapshots.delete(snapshotId);
+      this.debuggerSnapshotTargets.delete(snapshotId);
+    }
+  }
+
+  private async ensureDebuggerSnapshotDocumentAvailable(
+    tabId: number,
+    target: DebuggerSnapshotTarget,
+    description: string
+  ): Promise<void> {
+    if (!this.chromeApi.scripting) {
+      throw createPortusError({
+        code: "SNAPSHOT_STALE",
+        message: `CDP ${description} snapshot document cannot be verified.`
+      });
+    }
+
+    let results: ChromeScriptInjectionResult[];
+    try {
+      results = await promisifyChromeCall<ChromeScriptInjectionResult[]>((done) => {
+        const result = this.chromeApi.scripting?.executeScript({
+          target: { tabId, documentIds: [target.documentId] },
+          func: () => true
+        });
+        done(result as Promise<ChromeScriptInjectionResult[]> | ChromeScriptInjectionResult[] | undefined);
+      });
+    } catch (error) {
+      throw createPortusError({
+        code: "SNAPSHOT_STALE",
+        message: `CDP ${description} snapshot document is no longer available.`,
+        details: {
+          tabId,
+          documentId: target.documentId,
+          reason: isPortusError(error) ? error.message : error instanceof Error ? error.message : "Document preflight failed."
+        }
+      });
+    }
+
+    const injection = results[0];
+    if (!injection || injection.documentId !== target.documentId) {
+      throw createPortusError({
+        code: "SNAPSHOT_STALE",
+        message: `CDP ${description} snapshot document changed before the action.`,
+        details: {
+          tabId,
+          expectedDocumentId: target.documentId,
+          actualDocumentId: injection?.documentId
+        }
+      });
+    }
+  }
+
   private async resolveDebuggerEditableFillObject(
     debuggerTarget: ChromeDebuggerTarget,
     target: DebuggerSnapshotTarget
@@ -3815,6 +3888,9 @@ export class PortusExtensionBridge {
     fields: Array<{ elementId: string; value: string; target: DebuggerSnapshotTarget }>,
     mutateNormalFields: () => Promise<void>
   ): Promise<void> {
+    for (const field of fields) {
+      await this.ensureDebuggerSnapshotDocumentAvailable(tabId, field.target, "fill-form target");
+    }
     await this.withDebuggerSession(tabId, async (debuggerTarget) => {
       const resolved: Array<{ objectId: string; value: string }> = [];
       for (const field of fields) {
@@ -3837,22 +3913,38 @@ export class PortusExtensionBridge {
     tabId: number,
     fields: Array<{ index: number; elementId: string; value: string; target: DebuggerSnapshotTarget }>
   ): Promise<Array<{ index: number; result: Record<string, unknown> }>> {
-    return await this.withDebuggerSession(tabId, async (debuggerTarget) => {
-      const results: Array<{ index: number; result: Record<string, unknown> }> = [];
-      for (const field of fields) {
+    const results: Array<{ index: number; result: Record<string, unknown> }> = [];
+    const liveFields: typeof fields = [];
+    for (const field of fields) {
+      try {
+        await this.ensureDebuggerSnapshotDocumentAvailable(tabId, field.target, "fill-form target");
+        liveFields.push(field);
+      } catch (error) {
+        results.push({
+          index: field.index,
+          result: { elementId: field.elementId, ok: false, error: normalizeExtensionError(error) }
+        });
+      }
+    }
+    if (liveFields.length === 0) return results;
+
+    const liveResults = await this.withDebuggerSession(tabId, async (debuggerTarget) => {
+      const debuggerResults: Array<{ index: number; result: Record<string, unknown> }> = [];
+      for (const field of liveFields) {
         try {
           const objectId = await this.resolveDebuggerEditableFillObject(debuggerTarget, field.target);
           await this.setDebuggerEditableFillValue(debuggerTarget, objectId, field.value);
-          results.push({ index: field.index, result: { elementId: field.elementId, ok: true } });
+          debuggerResults.push({ index: field.index, result: { elementId: field.elementId, ok: true } });
         } catch (error) {
-          results.push({
+          debuggerResults.push({
             index: field.index,
             result: { elementId: field.elementId, ok: false, error: normalizeExtensionError(error) }
           });
         }
       }
-      return results;
+      return debuggerResults;
     }, "fill-form.partial.pierced-closed-shadow");
+    return [...results, ...liveResults];
   }
 
   private async executeDebuggerSnapshotElementAction(
@@ -3868,6 +3960,8 @@ export class PortusExtensionBridge {
         message: "Advanced debugger backend is required for this snapshot element."
       });
     }
+
+    await this.ensureDebuggerSnapshotDocumentAvailable(tabId, target, "snapshot element");
 
     const details = await this.withDebuggerSession(tabId, async (debuggerTarget) => {
       let resolved: unknown;
@@ -3941,6 +4035,13 @@ export class PortusExtensionBridge {
         code: "SNAPSHOT_STALE",
         message: "Drag source or target is unavailable in the current snapshot."
       });
+    }
+
+    if (sourceDebuggerTarget) {
+      await this.ensureDebuggerSnapshotDocumentAvailable(tabId, sourceDebuggerTarget, "drag source");
+    }
+    if (targetDebuggerTarget) {
+      await this.ensureDebuggerSnapshotDocumentAvailable(tabId, targetDebuggerTarget, "drag target");
     }
 
     let source = sourceDebuggerTarget
