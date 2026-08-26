@@ -8,6 +8,7 @@ import {
   resolveCliInvocation,
   validateCliInvocationFlags,
   validateCliInvocationPositionals,
+  validateCliInvocationPrimitiveValues,
   validateCliInvocationRepeatability
 } from "../dist/command-spec.js";
 import { CLI_SURFACE_BASELINE } from "../dist/cli-surface.js";
@@ -49,7 +50,7 @@ test("CLI-3 registry references canonical flag definitions and keeps globals inh
   assert.deepEqual(exportRecipe.flags.map((flag) => flag.name), ["output", "directory", "force"]);
 });
 
-test("CLI-3 records positional shapes without enforcing them yet", () => {
+test("CLI-3 registry records positional shapes for declarative validation", () => {
   const byPath = (path) => CLI_INVOCATIONS.find((entry) => cliInvocationPath(entry) === path);
   assert.deepEqual(byPath("open").positionals, [{ name: "url", required: true, variadic: false }]);
   assert.deepEqual(byPath("recipes create").positionals, [
@@ -255,6 +256,69 @@ test("CLI-7 rejects positional misuse before Broker or filesystem side effects",
   assert.equal(local.exitCode, 2);
   assert.match(JSON.parse(local.stderr).error.message, /recipes create accepts only/);
   assert.deepEqual(await readdir(directory), []);
+  assert.deepEqual(broker.requests, []);
+});
+
+test("CLI-8 validates primitive numeric and enum values from the declarative specs", () => {
+  const tab = resolveCliInvocation("tab", []);
+  assert.equal(tab.ok, true);
+  assert.equal(validateCliInvocationPrimitiveValues(tab.invocation, new Map([["tab-id", "12"]])), undefined);
+  assert.equal(validateCliInvocationPrimitiveValues(tab.invocation, new Map([["tab-id", "1.5"]])), "--tab-id must be an integer.");
+  assert.equal(validateCliInvocationPrimitiveValues(tab.invocation, new Map([["index", "0"]])), "--index must be a positive integer.");
+
+  const scroll = resolveCliInvocation("scroll", []);
+  assert.equal(scroll.ok, true);
+  assert.equal(validateCliInvocationPrimitiveValues(scroll.invocation, new Map([["x", "12.5"], ["y", "-3"]])), undefined);
+  assert.equal(validateCliInvocationPrimitiveValues(scroll.invocation, new Map([["x", "NaN"]])), "--x must be a number.");
+
+  const wait = resolveCliInvocation("wait", []);
+  assert.equal(wait.ok, true);
+  assert.equal(validateCliInvocationPrimitiveValues(wait.invocation, new Map([["state", "complete"]])), undefined);
+  assert.equal(validateCliInvocationPrimitiveValues(wait.invocation, new Map([["state", "ready"]])), "--state must be loading or complete.");
+
+  const dismiss = resolveCliInvocation("dismiss", []);
+  assert.equal(dismiss.ok, true);
+  assert.equal(validateCliInvocationPrimitiveValues(dismiss.invocation, new Map([["kind", "cookie"], ["strategy", "accept"]])), undefined);
+  assert.equal(validateCliInvocationPrimitiveValues(dismiss.invocation, new Map([["kind", "modal"]])), "--kind must be any, popup, or cookie.");
+  assert.equal(validateCliInvocationPrimitiveValues(dismiss.invocation, new Map([["strategy", "aggressive"]])), "--strategy must be conservative or accept.");
+
+  const retention = resolveCliInvocation("policy", ["retention", "set", "1001"]);
+  assert.equal(retention.ok, true);
+  assert.equal(validateCliInvocationPrimitiveValues(retention.invocation, new Map()), "Retention limit must be an integer from 0 to 1000.");
+});
+
+test("CLI-8 rejects invalid primitives before Broker dispatch", async () => {
+  const invalidInvocations = [
+    ["tabs", "--browser", "br_000001", "--timeout", "0", "--json"],
+    ["tab", "--browser", "br_000001", "--tab-id", "1.5", "--json"],
+    ["tab", "--browser", "br_000001", "--index", "0", "--json"],
+    ["snapshot", "--browser", "br_000001", "--max-elements", "10001", "--json"],
+    ["scroll", "--browser", "br_000001", "--tab-id", "11", "--x", "NaN", "--json"],
+    ["wait", "--browser", "br_000001", "--tab-id", "11", "--state", "ready", "--json"],
+    ["dismiss", "--browser", "br_000001", "--tab-id", "11", "--kind", "modal", "--json"],
+    ["policy", "retention", "set", "1001", "--browser", "br_000001", "--json"]
+  ];
+
+  for (const argv of invalidInvocations) {
+    const broker = createRecordingBroker({});
+    const result = await runPortusBrowserCli(argv, { brokerClient: broker });
+    assert.equal(result.exitCode, 2, argv.join(" "));
+    assert.deepEqual(broker.requests, [], argv.join(" "));
+  }
+});
+
+test("CLI-8 keeps overloaded recipe --kind outside dismiss enum semantics", async () => {
+  const { mkdtemp } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const directory = await mkdtemp(join(tmpdir(), "portus-cli8-kind-"));
+  const broker = createRecordingBroker({});
+  const result = await runPortusBrowserCli([
+    "recipes", "create", "custom-kind", "--content", "example", "--kind", "user-defined", "--directory", directory, "--json"
+  ], { brokerClient: broker });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(JSON.parse(result.stdout).recipe.kind, "user-defined");
   assert.deepEqual(broker.requests, []);
 });
 

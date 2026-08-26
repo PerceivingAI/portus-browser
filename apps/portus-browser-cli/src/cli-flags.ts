@@ -4,6 +4,9 @@ export interface CliFlagSpec {
   name: string;
   kind: CliFlagKind;
   repeatable: boolean;
+  positive?: boolean;
+  min?: number;
+  max?: number;
 }
 
 /**
@@ -16,9 +19,9 @@ export interface CliFlagSpec {
 export const CLI_FLAGS = {
   output: { name: "output", kind: "string", repeatable: false },
   browser: { name: "browser", kind: "string", repeatable: false },
-  timeout: { name: "timeout", kind: "integer", repeatable: false },
+  timeout: { name: "timeout", kind: "integer", repeatable: false, positive: true },
   tabId: { name: "tab-id", kind: "integer", repeatable: false },
-  index: { name: "index", kind: "integer", repeatable: false },
+  index: { name: "index", kind: "integer", repeatable: false, positive: true },
   element: { name: "element", kind: "string", repeatable: false },
   snapshot: { name: "snapshot", kind: "string", repeatable: false },
   from: { name: "from", kind: "string", repeatable: false },
@@ -35,12 +38,12 @@ export const CLI_FLAGS = {
   urlExact: { name: "url-exact", kind: "string", repeatable: false },
   urlPrefix: { name: "url-prefix", kind: "string", repeatable: false },
   type: { name: "type", kind: "string", repeatable: false },
-  limit: { name: "limit", kind: "integer", repeatable: false },
+  limit: { name: "limit", kind: "integer", repeatable: false, positive: true },
   kind: { name: "kind", kind: "string", repeatable: false },
   strategy: { name: "strategy", kind: "string", repeatable: false },
   query: { name: "query", kind: "string", repeatable: false },
   role: { name: "role", kind: "string", repeatable: false },
-  maxElements: { name: "max-elements", kind: "integer", repeatable: false },
+  maxElements: { name: "max-elements", kind: "integer", repeatable: false, positive: true, max: 10000 },
   state: { name: "state", kind: "string", repeatable: false },
   urlContains: { name: "url-contains", kind: "string", repeatable: false },
   text: { name: "text", kind: "string", repeatable: false },

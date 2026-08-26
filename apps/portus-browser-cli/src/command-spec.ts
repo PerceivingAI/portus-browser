@@ -6,10 +6,22 @@ import {
   type CliFlagSpec
 } from "./cli-flags.js";
 
+export type CliPositionalKind = "string" | "integer" | "number";
+
 export interface CliPositionalSpec {
   name: string;
   required: boolean;
   variadic: boolean;
+  kind?: CliPositionalKind;
+  min?: number;
+  max?: number;
+  validationMessage?: string;
+}
+
+export interface CliFlagEnumConstraint {
+  flag: CliFlagSpec;
+  values: readonly string[];
+  validationMessage: string;
 }
 
 export interface CliInvocationSpec {
@@ -17,6 +29,7 @@ export interface CliInvocationSpec {
   aliases?: readonly (readonly string[])[];
   flags: readonly CliFlagSpec[];
   positionals: readonly CliPositionalSpec[];
+  flagEnums?: readonly CliFlagEnumConstraint[];
 }
 
 export interface ResolvedCliInvocation {
@@ -31,7 +44,12 @@ export type CliInvocationResolution =
   | { ok: false; message: string };
 
 const noArgs = [] as const;
-const arg = (name: string, required = true, variadic = false): CliPositionalSpec => ({ name, required, variadic });
+const arg = (
+  name: string,
+  required = true,
+  variadic = false,
+  primitive: Pick<CliPositionalSpec, "kind" | "min" | "max" | "validationMessage"> = {}
+): CliPositionalSpec => ({ name, required, variadic, ...primitive });
 const brokerFlags = (...flags: CliFlagSpec[]): readonly CliFlagSpec[] => [CLI_OUTPUT_FLAG, CLI_TIMEOUT_FLAG, ...flags];
 const localFlags = (...flags: CliFlagSpec[]): readonly CliFlagSpec[] => [CLI_OUTPUT_FLAG, ...flags];
 
@@ -51,8 +69,9 @@ const navigationRuleFlags = [
  * parser is migrating toward. CLI_GLOBAL_PRESENTATION_FLAGS are inherited by
  * every invocation and therefore are not repeated in each `flags` array.
  *
- * CLI-4 resolves invocations against this registry before dispatch. CLI-5 will
- * enforce the exact flag sets. CLI-7 will enforce the positional contracts.
+ * CLI-4 resolves invocations against this registry before dispatch. CLI-5
+ * enforces exact flag sets, CLI-6 repeatability, CLI-7 positional contracts,
+ * and CLI-8 primitive value constraints.
  */
 export const CLI_INVOCATIONS = [
   { path: ["browsers"], flags: brokerFlags(), positionals: noArgs },
@@ -97,7 +116,15 @@ export const CLI_INVOCATIONS = [
   { path: ["type"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.tabId, CLI_FLAGS.snapshot, CLI_FLAGS.element), positionals: [arg("text")] },
   { path: ["press"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.tabId), positionals: [arg("key")] },
   { path: ["scroll"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.tabId, CLI_FLAGS.x, CLI_FLAGS.y), positionals: noArgs },
-  { path: ["dismiss"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.tabId, CLI_FLAGS.kind, CLI_FLAGS.strategy, CLI_FLAGS.dryRun), positionals: noArgs },
+  {
+    path: ["dismiss"],
+    flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.tabId, CLI_FLAGS.kind, CLI_FLAGS.strategy, CLI_FLAGS.dryRun),
+    positionals: noArgs,
+    flagEnums: [
+      { flag: CLI_FLAGS.kind, values: ["any", "popup", "cookie"], validationMessage: "--kind must be any, popup, or cookie." },
+      { flag: CLI_FLAGS.strategy, values: ["conservative", "accept"], validationMessage: "--strategy must be conservative or accept." }
+    ]
+  },
   {
     path: ["wait"],
     flags: brokerFlags(
@@ -109,7 +136,10 @@ export const CLI_INVOCATIONS = [
       CLI_FLAGS.elementQuery,
       CLI_FLAGS.role
     ),
-    positionals: noArgs
+    positionals: noArgs,
+    flagEnums: [
+      { flag: CLI_FLAGS.state, values: ["loading", "complete"], validationMessage: "--state must be loading or complete." }
+    ]
   },
   { path: ["watch"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.type), positionals: noArgs },
 
@@ -135,7 +165,16 @@ export const CLI_INVOCATIONS = [
   { path: ["policy", "block", "add"], flags: brokerFlags(CLI_FLAGS.browser, ...navigationRuleFlags, CLI_FLAGS.reason), positionals: noArgs },
   { path: ["policy", "block", "remove"], flags: brokerFlags(CLI_FLAGS.browser, ...navigationRuleFlags), positionals: noArgs },
   { path: ["policy", "retention", "get"], flags: brokerFlags(CLI_FLAGS.browser), positionals: noArgs },
-  { path: ["policy", "retention", "set"], flags: brokerFlags(CLI_FLAGS.browser), positionals: [arg("limit")] },
+  {
+    path: ["policy", "retention", "set"],
+    flags: brokerFlags(CLI_FLAGS.browser),
+    positionals: [arg("limit", true, false, {
+      kind: "integer",
+      min: 0,
+      max: 1000,
+      validationMessage: "Retention limit must be an integer from 0 to 1000."
+    })]
+  },
 
   { path: ["recipes", "list"], aliases: [["recipes"]], flags: brokerFlags(CLI_FLAGS.directory), positionals: noArgs },
   {
@@ -303,6 +342,85 @@ export function validateCliInvocationPositionals(invocation: ResolvedCliInvocati
   }
 
   return undefined;
+}
+
+/**
+ * CLI-8 primitive value validation.
+ *
+ * Universal primitive constraints live on the canonical flag definition.
+ * Invocation-specific enum semantics live on the exact command spec so
+ * overloaded spellings such as --kind remain context-sensitive.
+ */
+export function validateCliInvocationPrimitiveValues(
+  invocation: ResolvedCliInvocation,
+  providedFlags: ReadonlyMap<string, string | boolean | string[]>
+): string | undefined {
+  const allowedByName = new Map(cliInvocationAllowedFlags(invocation).map((flag) => [flag.name, flag] as const));
+
+  for (const [name, rawValue] of providedFlags) {
+    const flag = allowedByName.get(name);
+    if (!flag) continue;
+    const values = Array.isArray(rawValue) ? rawValue : [rawValue];
+    for (const value of values) {
+      const error = validateCliFlagPrimitive(flag, value);
+      if (error) return error;
+    }
+  }
+
+  for (const constraint of invocation.spec.flagEnums ?? []) {
+    const rawValue = providedFlags.get(constraint.flag.name);
+    if (rawValue === undefined) continue;
+    const values = Array.isArray(rawValue) ? rawValue : [rawValue];
+    for (const value of values) {
+      if (typeof value !== "string" || !constraint.values.includes(value)) return constraint.validationMessage;
+    }
+  }
+
+  for (let index = 0; index < invocation.spec.positionals.length; index += 1) {
+    const spec = invocation.spec.positionals[index] as CliPositionalSpec;
+    if (!spec.kind || spec.kind === "string") continue;
+    const values = spec.variadic
+      ? invocation.argumentPositionals.slice(index)
+      : invocation.argumentPositionals[index] === undefined
+        ? []
+        : [invocation.argumentPositionals[index] as string];
+    for (const value of values) {
+      const error = validateCliPositionalPrimitive(spec, value);
+      if (error) return error;
+    }
+  }
+
+  return undefined;
+}
+
+function validateCliFlagPrimitive(flag: CliFlagSpec, value: string | boolean): string | undefined {
+  if (flag.kind === "boolean") return value === true ? undefined : `--${flag.name} does not take a value.`;
+  if (typeof value !== "string" || value.length === 0) return `--${flag.name} requires a value.`;
+  if (flag.kind === "string") return undefined;
+
+  const parsedValue = Number(value);
+  if (flag.kind === "integer") {
+    if (flag.positive && (!Number.isInteger(parsedValue) || parsedValue <= 0)) {
+      return `--${flag.name} must be a positive integer.`;
+    }
+    if (!Number.isInteger(parsedValue)) return `--${flag.name} must be an integer.`;
+  } else if (!Number.isFinite(parsedValue)) {
+    return `--${flag.name} must be a number.`;
+  }
+
+  if (flag.min !== undefined && parsedValue < flag.min) return `--${flag.name} must be at least ${flag.min}.`;
+  if (flag.max !== undefined && parsedValue > flag.max) return `--${flag.name} must be at most ${flag.max}.`;
+  return undefined;
+}
+
+function validateCliPositionalPrimitive(spec: CliPositionalSpec, value: string): string | undefined {
+  const parsedValue = Number(value);
+  const validKind = spec.kind === "integer" ? Number.isInteger(parsedValue) : Number.isFinite(parsedValue);
+  const validMin = spec.min === undefined || parsedValue >= spec.min;
+  const validMax = spec.max === undefined || parsedValue <= spec.max;
+  if (validKind && validMin && validMax) return undefined;
+  if (spec.validationMessage) return spec.validationMessage;
+  return `<${spec.name}> must be ${spec.kind === "integer" ? "an integer" : "a number"}.`;
 }
 
 function cliInvocationAllowedFlags(invocation: ResolvedCliInvocation): readonly CliFlagSpec[] {

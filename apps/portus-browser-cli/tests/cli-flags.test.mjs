@@ -18,7 +18,10 @@ test("CLI-1 defines every pre-declarative flag exactly once", () => {
 });
 
 test("CLI-1 flag definitions encode primitive kind and repeatability", () => {
-  assert.deepEqual(CLI_FLAGS.timeout, { name: "timeout", kind: "integer", repeatable: false });
+  assert.deepEqual(CLI_FLAGS.timeout, { name: "timeout", kind: "integer", repeatable: false, positive: true });
+  assert.deepEqual(CLI_FLAGS.index, { name: "index", kind: "integer", repeatable: false, positive: true });
+  assert.deepEqual(CLI_FLAGS.limit, { name: "limit", kind: "integer", repeatable: false, positive: true });
+  assert.deepEqual(CLI_FLAGS.maxElements, { name: "max-elements", kind: "integer", repeatable: false, positive: true, max: 10000 });
   assert.deepEqual(CLI_FLAGS.x, { name: "x", kind: "number", repeatable: false });
   assert.deepEqual(CLI_FLAGS.background, { name: "background", kind: "boolean", repeatable: false });
   assert.deepEqual(CLI_FLAGS.field, { name: "field", kind: "string", repeatable: true });

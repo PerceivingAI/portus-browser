@@ -12,9 +12,7 @@ import {
   ActionResultSchema,
   ConsoleListResultSchema,
   DialogResultSchema,
-  DismissKindSchema,
   DismissResultSchema,
-  DismissStrategySchema,
   FillFormResultSchema,
   NetworkGetResultSchema,
   NetworkListResultSchema,
@@ -81,6 +79,7 @@ import {
   resolveCliInvocation,
   validateCliInvocationFlags,
   validateCliInvocationPositionals,
+  validateCliInvocationPrimitiveValues,
   validateCliInvocationRepeatability
 } from "./command-spec.js";
 import {
@@ -461,9 +460,11 @@ export async function runPortusBrowserCli(
     if (repeatabilityValidationError) throw usageError(repeatabilityValidationError);
     const positionalValidationError = validateCliInvocationPositionals(invocation);
     if (positionalValidationError) throw usageError(positionalValidationError);
+    const primitiveValidationError = validateCliInvocationPrimitiveValues(invocation, parsed.flags);
+    if (primitiveValidationError) throw usageError(primitiveValidationError);
     const output = resolveOutputMode(parsed, config);
     outputMode = output;
-    const timeoutMs = readOptionalPositiveIntegerFlag(parsed, CLI_TIMEOUT_FLAG.name) ?? config.commands.timeoutMs;
+    const timeoutMs = readOptionalIntegerFlag(parsed, CLI_TIMEOUT_FLAG.name) ?? config.commands.timeoutMs;
     broker = options.brokerClient ?? createDefaultBrokerClient(config);
     const context: CliContext = {
         config,
@@ -575,9 +576,7 @@ async function handleTab(context: CliContext, parsed: ParsedArgs): Promise<Recor
 }
 
 async function handleOpen(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
-  const urlInput = parsed.positionals[0];
-  if (!urlInput) throw usageError("URL is required.");
-  if (parsed.positionals.length > 1) throw usageError("Only one URL is supported.");
+  const urlInput = parsed.positionals[0] as string;
 
   const active = !hasFlag(parsed, "background");
   const payload: Record<string, unknown> = {
@@ -596,9 +595,7 @@ async function handleOpen(context: CliContext, parsed: ParsedArgs): Promise<Reco
 }
 
 async function handleNavigate(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
-  const urlInput = parsed.positionals[0];
-  if (!urlInput) throw usageError("URL is required.");
-  if (parsed.positionals.length > 1) throw usageError("Only one URL is supported.");
+  const urlInput = parsed.positionals[0] as string;
 
   const browserId = await resolveRequiredBrowser(context, parsed);
   const tabId = readRequiredIntegerFlag(parsed, "tab-id");
@@ -614,7 +611,6 @@ async function handleNavigate(context: CliContext, parsed: ParsedArgs): Promise<
 }
 
 async function handleHistory(context: CliContext, parsed: ParsedArgs, requestType: "tab.history.back" | "tab.history.forward"): Promise<Record<string, unknown>> {
-  if (parsed.positionals.length > 0) throw usageError("History navigation does not accept positional arguments.");
   const browserId = await resolveRequiredBrowser(context, parsed);
   const tabId = readRequiredIntegerFlag(parsed, "tab-id");
   const result = TabResultSchema.parse(await context.broker.request(requestType, { browserId, tabId }, context.timeoutMs));
@@ -677,14 +673,11 @@ async function handleSnapshot(context: CliContext, parsed: ParsedArgs): Promise<
 async function handlePolicy(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
   const area = parsed.positionals[0];
   const action = parsed.positionals[1];
-  if (!area) throw usageError("Policy area is required.");
-  if (!action) throw usageError("Policy action is required.");
 
   const browserId = await resolveRequiredBrowser(context, parsed);
 
   if (area === "allow" || area === "block") {
     if (action === "list") {
-      if (parsed.positionals.length > 2) throw usageError(`policy ${area} list does not accept extra positional arguments.`);
       const result = PolicyResultSchema.parse(await context.broker.request("policy.get", { browserId }, context.timeoutMs));
       return {
         ok: true,
@@ -694,7 +687,6 @@ async function handlePolicy(context: CliContext, parsed: ParsedArgs): Promise<Re
     }
 
     if (action === "add" || action === "remove") {
-      if (parsed.positionals.length > 2) throw usageError(`policy ${area} ${action} accepts navigation rule flags only.`);
       const rule = readNavigationRuleFlags(parsed);
       const payload: Record<string, unknown> = {
         browserId,
@@ -715,7 +707,6 @@ async function handlePolicy(context: CliContext, parsed: ParsedArgs): Promise<Re
 
   if (area === "retention") {
     if (action === "get") {
-      if (parsed.positionals.length > 2) throw usageError("policy retention get does not accept extra positional arguments.");
       const result = PolicyResultSchema.parse(await context.broker.request("policy.get", { browserId }, context.timeoutMs));
       return {
         ok: true,
@@ -725,11 +716,7 @@ async function handlePolicy(context: CliContext, parsed: ParsedArgs): Promise<Re
     }
 
     if (action === "set") {
-      const limitInput = parsed.positionals[2];
-      if (!limitInput) throw usageError("policy retention set requires a limit.");
-      if (parsed.positionals.length > 3) throw usageError("policy retention set accepts one limit.");
-      const limit = Number(limitInput);
-      if (!Number.isInteger(limit) || limit < 0 || limit > 1000) throw usageError("Retention limit must be an integer from 0 to 1000.");
+      const limit = Number(parsed.positionals[2]);
       const result = PolicyResultSchema.parse(await context.broker.request("policy.retention.set", { browserId, limit }, context.timeoutMs));
       return {
         ok: true,
@@ -751,7 +738,6 @@ async function handleWatch(context: CliContext, parsed: ParsedArgs): Promise<Rec
       message: "Broker client does not support live event subscriptions."
     });
   }
-  if (parsed.positionals.length > 0) throw usageError("watch does not accept positional arguments.");
   const payload = await buildEventQueryPayload(context, parsed, false);
   const output = hasFlag(parsed, "json") || context.output === "json" || context.output === "ndjson" ? "ndjson" : "table";
   await context.broker.subscribeEvents(payload, (event) => {
@@ -761,11 +747,9 @@ async function handleWatch(context: CliContext, parsed: ParsedArgs): Promise<Rec
 }
 
 async function handleWait(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
-  if (parsed.positionals.length > 0) throw usageError("wait does not accept positional arguments.");
   const browserId = await resolveRequiredBrowser(context, parsed);
   const tabId = readRequiredIntegerFlag(parsed, "tab-id");
   const state = readOptionalStringFlag(parsed, "state");
-  if (state !== undefined && state !== "loading" && state !== "complete") throw usageError("--state must be loading or complete.");
   const urlContains = readOptionalStringFlag(parsed, "url-contains");
   const text = readOptionalStringFlag(parsed, "text");
   const elementQuery = readOptionalStringFlag(parsed, "element-query");
@@ -791,10 +775,6 @@ async function handleWait(context: CliContext, parsed: ParsedArgs): Promise<Reco
 }
 
 async function handleEvents(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
-  const subcommand = parsed.positionals[0];
-  if (!subcommand) throw usageError("Event subcommand is required.");
-  if (subcommand !== "recent") throw usageError(`Unknown event subcommand: ${subcommand}.`);
-  if (parsed.positionals.length > 1) throw usageError("events recent does not accept extra positional arguments.");
   const payload = await buildEventQueryPayload(context, parsed, true);
   const result = EventListResultSchema.parse(await context.broker.request("events.recent", payload, context.timeoutMs));
   return {
@@ -804,12 +784,8 @@ async function handleEvents(context: CliContext, parsed: ParsedArgs): Promise<Re
 }
 
 async function handleSession(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
-  const subcommand = parsed.positionals[0];
-  if (!subcommand) throw usageError("Session subcommand is required.");
-  if (subcommand !== "steps") throw usageError(`Unknown session subcommand: ${subcommand}.`);
-  if (parsed.positionals.length > 1) throw usageError("session steps does not accept extra positional arguments.");
   const browserId = await resolveRequiredBrowser(context, parsed);
-  const limit = readOptionalPositiveIntegerFlag(parsed, "limit");
+  const limit = readOptionalIntegerFlag(parsed, "limit");
   const payload: Record<string, unknown> = { browserId };
   if (limit !== undefined) payload.limit = limit;
   const result = SessionStepsResultSchema.parse(await context.broker.request("session.steps", payload, context.timeoutMs));
@@ -820,10 +796,6 @@ async function handleSession(context: CliContext, parsed: ParsedArgs): Promise<R
 }
 
 async function handleBridge(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
-  const subcommand = parsed.positionals[0];
-  if (!subcommand) throw usageError("Bridge subcommand is required.");
-  if (subcommand !== "disconnect") throw usageError(`Unknown bridge subcommand: ${subcommand}.`);
-  if (parsed.positionals.length > 1) throw usageError("bridge disconnect does not accept extra positional arguments.");
   const browserId = await resolveRequiredBrowser(context, parsed);
   const result = BridgeDisconnectResultSchema.parse(await context.broker.request("bridge.disconnect", {
     browserId,
@@ -837,8 +809,6 @@ async function handleBridge(context: CliContext, parsed: ParsedArgs): Promise<Re
 
 async function handleBroker(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
   const subcommand = parsed.positionals[0];
-  if (!subcommand) throw usageError("Broker subcommand is required.");
-  if (parsed.positionals.length > 1) throw usageError("broker accepts only one subcommand.");
 
   if (subcommand === "status") {
     const status = BrokerStatusResultSchema.parse(await context.broker.request("broker.status", {}, context.timeoutMs));
@@ -887,15 +857,9 @@ async function handleAction(
     if (!payload.snapshotId) throw usageError("--snapshot is required.");
   } else if (action === "type") {
     if (!payload.elementId) throw usageError("--element is required.");
-    const text = parsed.positionals[0];
-    if (text === undefined) throw usageError("Text is required.");
-    if (parsed.positionals.length > 1) throw usageError("Only one text argument is supported.");
-    payload.text = text;
+    payload.text = parsed.positionals[0] as string;
   } else if (action === "press") {
-    const key = parsed.positionals[0];
-    if (key === undefined) throw usageError("Key is required.");
-    if (parsed.positionals.length > 1) throw usageError("Only one key argument is supported.");
-    payload.key = key;
+    payload.key = parsed.positionals[0] as string;
   } else {
     payload.deltaX = readOptionalNumberFlag(parsed, "x") ?? 0;
     payload.deltaY = readOptionalNumberFlag(parsed, "y") ?? 600;
@@ -909,7 +873,6 @@ async function handleAction(
 }
 
 async function handleFillForm(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
-  if (parsed.positionals.length > 0) throw usageError("fill-form does not accept positional arguments.");
   const browserId = await resolveRequiredBrowser(context, parsed);
   const tabId = readRequiredIntegerFlag(parsed, "tab-id");
   const snapshotId = readOptionalStringFlag(parsed, "snapshot");
@@ -929,14 +892,13 @@ async function handleFillForm(context: CliContext, parsed: ParsedArgs): Promise<
 }
 
 async function handleDismiss(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
-  if (parsed.positionals.length > 0) throw usageError("dismiss does not accept positional arguments.");
   const browserId = await resolveRequiredBrowser(context, parsed);
   const tabId = readRequiredIntegerFlag(parsed, "tab-id");
   const payload: Record<string, unknown> = {
     browserId,
     tabId,
-    kind: DismissKindSchema.parse(readOptionalStringFlag(parsed, "kind") ?? "any"),
-    strategy: DismissStrategySchema.parse(readOptionalStringFlag(parsed, "strategy") ?? "conservative"),
+    kind: readOptionalStringFlag(parsed, "kind") ?? "any",
+    strategy: readOptionalStringFlag(parsed, "strategy") ?? "conservative",
     dryRun: hasFlag(parsed, "dry-run")
   };
   const result = DismissCommandResultSchema.parse(await context.broker.request("page.dismiss", payload, context.timeoutMs));
@@ -947,9 +909,7 @@ async function handleDismiss(context: CliContext, parsed: ParsedArgs): Promise<R
 }
 
 async function handleDialog(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
-  const subcommand = parsed.positionals[0];
-  if (subcommand !== "accept" && subcommand !== "dismiss") throw usageError("dialog requires accept or dismiss.");
-  if (parsed.positionals.length > 1) throw usageError("dialog accepts only one subcommand.");
+  const subcommand = parsed.positionals[0] as "accept" | "dismiss";
   const browserId = await resolveRequiredBrowser(context, parsed);
   const tabId = readRequiredIntegerFlag(parsed, "tab-id");
   const payload: Record<string, unknown> = { browserId, tabId };
@@ -964,15 +924,13 @@ async function handleDialog(context: CliContext, parsed: ParsedArgs): Promise<Re
 
 async function handleConsole(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
   const subcommand = parsed.positionals[0] ?? "list";
-  if (subcommand !== "list" && subcommand !== "clear") throw usageError(`Unknown console subcommand: ${subcommand}.`);
-  if (parsed.positionals.length > (parsed.positionals[0] ? 1 : 0)) throw usageError("console accepts only one subcommand.");
   const browserId = await resolveRequiredBrowser(context, parsed);
   const tabId = readRequiredIntegerFlag(parsed, "tab-id");
   if (subcommand === "clear") {
     const result = await context.broker.request("console.clear", { browserId, tabId }, context.timeoutMs);
     return { ok: true, cleared: result.cleared === true, tabId };
   }
-  const limit = readOptionalPositiveIntegerFlag(parsed, "limit");
+  const limit = readOptionalIntegerFlag(parsed, "limit");
   const payload: Record<string, unknown> = { browserId, tabId };
   if (limit !== undefined) payload.limit = limit;
   const result = ConsoleCommandResultSchema.parse(await context.broker.request("console.list", payload, context.timeoutMs));
@@ -984,21 +942,17 @@ async function handleConsole(context: CliContext, parsed: ParsedArgs): Promise<R
 
 async function handleNetwork(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
   const subcommand = parsed.positionals[0] ?? "list";
-  if (subcommand !== "list" && subcommand !== "get") throw usageError(`Unknown network subcommand: ${subcommand}.`);
   const browserId = await resolveRequiredBrowser(context, parsed);
   const tabId = readRequiredIntegerFlag(parsed, "tab-id");
   if (subcommand === "get") {
-    const requestId = parsed.positionals[1];
-    if (!requestId) throw usageError("network get requires a request id.");
-    if (parsed.positionals.length > 2) throw usageError("network get accepts one request id.");
+    const requestId = parsed.positionals[1] as string;
     const result = NetworkGetCommandResultSchema.parse(await context.broker.request("network.get", { browserId, tabId, requestId }, context.timeoutMs));
     return {
       ok: true,
       network: result.network
     };
   }
-  if (parsed.positionals.length > (parsed.positionals[0] ? 1 : 0)) throw usageError("network list does not accept extra positional arguments.");
-  const limit = readOptionalPositiveIntegerFlag(parsed, "limit");
+  const limit = readOptionalIntegerFlag(parsed, "limit");
   const payload: Record<string, unknown> = { browserId, tabId };
   if (limit !== undefined) payload.limit = limit;
   const result = NetworkListCommandResultSchema.parse(await context.broker.request("network.list", payload, context.timeoutMs));
@@ -1014,7 +968,6 @@ async function handleRecipes(context: CliContext, parsed: ParsedArgs): Promise<R
 
   switch (subcommand) {
     case "list": {
-      if (parsed.positionals.length > 1) throw usageError("recipes list does not accept positional arguments.");
       const library = RecipeListResultSchema.parse(await context.broker.request("recipe.list", recipeRequestPayload(directory), context.timeoutMs));
       return {
         ok: true,
@@ -1024,10 +977,8 @@ async function handleRecipes(context: CliContext, parsed: ParsedArgs): Promise<R
       };
     }
     case "create": {
-      const id = parsed.positionals[1];
-      if (id === undefined) throw usageError("recipes create requires a recipe id.");
+      const id = parsed.positionals[1] as string;
       const name = parsed.positionals[2] ?? id;
-      if (parsed.positionals.length > 3) throw usageError("recipes create accepts recipe id and optional name only.");
       const recipe = await readRecipeInput(parsed, id, name);
       const filePath = await saveRecipeRecordToDirectory(recipe, directory ?? defaultRecipeLibraryDirectory(), {
         overwrite: hasFlag(parsed, "force")
@@ -1035,9 +986,7 @@ async function handleRecipes(context: CliContext, parsed: ParsedArgs): Promise<R
       return { ok: true, recipe: parseRecipeRecord(recipe), filePath };
     }
     case "show": {
-      const id = parsed.positionals[1];
-      if (id === undefined) throw usageError("recipes show requires a recipe id.");
-      if (parsed.positionals.length > 2) throw usageError("recipes show accepts one recipe id.");
+      const id = parsed.positionals[1] as string;
       const entry = RecipeRecordResultSchema.parse(await context.broker.request("recipe.get", {
         recipeId: id,
         ...recipeRequestPayload(directory)
@@ -1051,7 +1000,6 @@ async function handleRecipes(context: CliContext, parsed: ParsedArgs): Promise<R
     }
     case "search": {
       const query = parsed.positionals.slice(1).join(" ");
-      if (query.length === 0) throw usageError("recipes search requires a query.");
       const result = RecipeListResultSchema.parse(await context.broker.request("recipe.search", {
         query,
         ...recipeRequestPayload(directory)
@@ -1066,7 +1014,6 @@ async function handleRecipes(context: CliContext, parsed: ParsedArgs): Promise<R
     case "use":
     case "resolve": {
       const query = parsed.positionals.slice(1).join(" ");
-      if (query.length === 0) throw usageError(`recipes ${subcommand} requires a recipe id, name, or example phrase.`);
       const resolved = RecipeRecordResultSchema.parse(await context.broker.request("recipe.resolve", {
         query,
         ...recipeRequestPayload(directory)
@@ -1081,42 +1028,32 @@ async function handleRecipes(context: CliContext, parsed: ParsedArgs): Promise<R
       };
     }
     case "update": {
-      const id = parsed.positionals[1];
-      if (id === undefined) throw usageError("recipes update requires a recipe id.");
-      if (parsed.positionals.length > 2) throw usageError("recipes update accepts one recipe id.");
+      const id = parsed.positionals[1] as string;
       const current = await getRecipeFromLibrary(id, recipeLibraryOptions(directory));
       const recipe = await readRecipeInput(parsed, current.recipe.id, current.recipe.name, current.recipe);
       const filePath = await updateRecipeInLibrary(id, recipe, recipeLibraryOptions(directory));
       return { ok: true, recipe: parseRecipeRecord(recipe), filePath };
     }
     case "rename": {
-      const id = parsed.positionals[1];
-      const newName = parsed.positionals[2];
-      if (id === undefined || newName === undefined) throw usageError("recipes rename requires recipe id and new name.");
-      if (parsed.positionals.length > 3) throw usageError("recipes rename accepts recipe id and new name only.");
+      const id = parsed.positionals[1] as string;
+      const newName = parsed.positionals[2] as string;
       const entry = await getRecipeFromLibrary(id, recipeLibraryOptions(directory));
       const recipe = parseRecipeRecord({ ...entry.recipe, name: newName });
       const filePath = await updateRecipeInLibrary(id, recipe, recipeLibraryOptions(directory));
       return { ok: true, recipe, filePath };
     }
     case "delete": {
-      const id = parsed.positionals[1];
-      if (id === undefined) throw usageError("recipes delete requires a recipe id.");
-      if (parsed.positionals.length > 2) throw usageError("recipes delete accepts one recipe id.");
+      const id = parsed.positionals[1] as string;
       if (!hasFlag(parsed, "yes")) throw usageError("recipes delete requires --yes.");
       const filePath = await deleteRecipeFromLibrary(id, recipeLibraryOptions(directory));
       return { ok: true, deleted: true, recipeId: id, filePath };
     }
     case "validate": {
-      const target = parsed.positionals[1];
-      if (target === undefined) throw usageError("recipes validate requires a file path or recipe id.");
-      if (parsed.positionals.length > 2) throw usageError("recipes validate accepts one file path or recipe id.");
+      const target = parsed.positionals[1] as string;
       return validateRecipeTarget(target, directory);
     }
     case "import": {
-      const filePath = parsed.positionals[1];
-      if (filePath === undefined) throw usageError("recipes import requires a file path.");
-      if (parsed.positionals.length > 2) throw usageError("recipes import accepts one file path.");
+      const filePath = parsed.positionals[1] as string;
       const importId = readOptionalStringFlag(parsed, "id");
       const importName = readOptionalStringFlag(parsed, "name");
       const importedPath = await importRecipeToLibrary(filePath, {
@@ -1129,21 +1066,17 @@ async function handleRecipes(context: CliContext, parsed: ParsedArgs): Promise<R
       return { ok: true, recipe: entry.recipe, filePath: importedPath };
     }
     case "export": {
-      const id = parsed.positionals[1];
+      const id = parsed.positionals[1] as string;
       const outputPath = readOptionalStringFlag(parsed, "output");
-      if (id === undefined) throw usageError("recipes export requires a recipe id.");
       if (outputPath === undefined) throw usageError("recipes export requires --output.");
-      if (parsed.positionals.length > 2) throw usageError("recipes export accepts one recipe id.");
       const entry = await getRecipeFromLibrary(id, recipeLibraryOptions(directory));
       await mkdir(dirname(outputPath), { recursive: true });
       await copyFile(entry.filePath, outputPath, hasFlag(parsed, "force") ? 0 : 1);
       return { ok: true, recipeId: id, filePath: outputPath };
     }
     case "duplicate": {
-      const id = parsed.positionals[1];
-      const newId = parsed.positionals[2];
-      if (id === undefined || newId === undefined) throw usageError("recipes duplicate requires source id and new recipe id.");
-      if (parsed.positionals.length > 3) throw usageError("recipes duplicate accepts source id and new recipe id only.");
+      const id = parsed.positionals[1] as string;
+      const newId = parsed.positionals[2] as string;
       const entry = await getRecipeFromLibrary(id, recipeLibraryOptions(directory));
       const recipe = parseRecipeRecord({
         ...entry.recipe,
@@ -1327,7 +1260,7 @@ async function buildEventQueryPayload(context: CliContext, parsed: ParsedArgs, i
   const type = readOptionalStringFlag(parsed, "type");
   if (type) payload.type = type;
   if (includeLimit) {
-    const limit = readOptionalPositiveIntegerFlag(parsed, "limit");
+    const limit = readOptionalIntegerFlag(parsed, "limit");
     if (limit !== undefined) payload.limit = limit;
   }
   return payload;
@@ -1361,7 +1294,6 @@ async function resolveRequiredTabId(context: CliContext, parsed: ParsedArgs, bro
   if (tabId !== undefined && index !== undefined) throw usageError("Use either --tab-id or --index, not both.");
   if (tabId !== undefined) return tabId;
   if (index === undefined) throw usageError("--tab-id or --index is required.");
-  if (index < 1) throw usageError("--index must be a positive integer.");
   const result = TabListResultSchema.parse(await context.broker.request("tab.list", { browserId }, context.timeoutMs));
   const selected = sortTabs(result.tabs)[index - 1];
   if (!selected) {
@@ -1718,7 +1650,7 @@ function readSnapshotFilter(parsed: ParsedArgs): Record<string, unknown> | undef
   const filter: Record<string, unknown> = {};
   const query = readOptionalStringFlag(parsed, "query");
   const role = readOptionalStringFlag(parsed, "role");
-  const maxElements = readOptionalPositiveIntegerFlag(parsed, "max-elements");
+  const maxElements = readOptionalIntegerFlag(parsed, "max-elements");
   if (query !== undefined) filter.query = query;
   if (role !== undefined) filter.role = role;
   if (hasFlag(parsed, "interactive-only")) filter.interactiveOnly = true;
@@ -1810,28 +1742,13 @@ function inferOutputMode(argv: string[]): OutputMode {
 
 function readOptionalStringFlag(parsed: ParsedArgs, name: string): string | undefined {
   const value = parsed.flags.get(name);
-  if (value === undefined) return undefined;
-  if (Array.isArray(value)) throw usageError(`--${name} may only be provided once.`);
-  if (typeof value !== "string" || value.length === 0) throw usageError(`--${name} requires a value.`);
-  return value;
+  return value === undefined ? undefined : value as string;
 }
 
 function readStringFlags(parsed: ParsedArgs, name: string): string[] {
   const value = parsed.flags.get(name);
   if (value === undefined) return [];
-  const values = Array.isArray(value) ? value : [value];
-  return values.map((item) => {
-    if (typeof item !== "string" || item.length === 0) throw usageError(`--${name} requires a value.`);
-    return item;
-  });
-}
-
-function readOptionalPositiveIntegerFlag(parsed: ParsedArgs, name: string): number | undefined {
-  const value = readOptionalStringFlag(parsed, name);
-  if (value === undefined) return undefined;
-  const parsedValue = Number(value);
-  if (!Number.isInteger(parsedValue) || parsedValue <= 0) throw usageError(`--${name} must be a positive integer.`);
-  return parsedValue;
+  return Array.isArray(value) ? value : [value as string];
 }
 
 function readRequiredIntegerFlag(parsed: ParsedArgs, name: string): number {
@@ -1842,18 +1759,12 @@ function readRequiredIntegerFlag(parsed: ParsedArgs, name: string): number {
 
 function readOptionalIntegerFlag(parsed: ParsedArgs, name: string): number | undefined {
   const value = readOptionalStringFlag(parsed, name);
-  if (value === undefined) return undefined;
-  const parsedValue = Number(value);
-  if (!Number.isInteger(parsedValue)) throw usageError(`--${name} must be an integer.`);
-  return parsedValue;
+  return value === undefined ? undefined : Number(value);
 }
 
 function readOptionalNumberFlag(parsed: ParsedArgs, name: string): number | undefined {
   const value = readOptionalStringFlag(parsed, name);
-  if (value === undefined) return undefined;
-  const parsedValue = Number(value);
-  if (!Number.isFinite(parsedValue)) throw usageError(`--${name} must be a number.`);
-  return parsedValue;
+  return value === undefined ? undefined : Number(value);
 }
 
 function hasFlag(parsed: ParsedArgs, name: string): boolean {
