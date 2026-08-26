@@ -12,6 +12,7 @@ test("packages the composed-DOM runtime as a self-contained classic script", asy
   const source = await readFile(new URL("../dist/composed-dom-runtime.js", import.meta.url), "utf8");
 
   assert.match(source, /__portusComposedDom/);
+  assert.match(source, /openOrClosedShadowRoot/);
   assert.doesNotMatch(source, /\bimport\s/);
   assert.doesNotMatch(source, /\bexport\s/);
 });
@@ -54,6 +55,41 @@ test("walks nested open shadow roots in deterministic order and records host cha
     { hostSelectorHint: "#nested", rootType: "open" }
   ]);
   assert.equal(byId.get("nested-input").root, nestedRoot);
+});
+
+test("traverses closed shadow roots through chrome.dom and degrades to open-only when unavailable", () => {
+  const dom = new JSDOM(`<!doctype html><html><body><secure-shell id="secure"></secure-shell></body></html>`);
+  const document = dom.window.document;
+  const host = document.querySelector("#secure");
+  const closedRoot = host.attachShadow({ mode: "closed" });
+  closedRoot.innerHTML = `<button id="closed-action">Closed action</button>`;
+
+  assert.equal(host.shadowRoot, null);
+
+  const openOnlyRuntime = installPortusComposedDomRuntime({});
+  assert.equal(openOnlyRuntime.shadowRootForElement(host), null);
+  assert.equal(openOnlyRuntime.collect(document).some((entry) => entry.element.id === "closed-action"), false);
+
+  const throwingRuntime = installPortusComposedDomRuntime({
+    chrome: { dom: { openOrClosedShadowRoot() { throw new Error("unsupported"); } } }
+  });
+  assert.equal(throwingRuntime.shadowRootForElement(host), null);
+
+  const closedRuntime = installPortusComposedDomRuntime({
+    chrome: {
+      dom: {
+        openOrClosedShadowRoot(element) {
+          return element === host ? closedRoot : null;
+        }
+      }
+    }
+  });
+  const closedEntry = closedRuntime.collect(document).find((entry) => entry.element.id === "closed-action");
+
+  assert.equal(closedRuntime.shadowRootForElement(host), closedRoot);
+  assert.equal(closedEntry.root, closedRoot);
+  assert.equal(closedEntry.selectorHint, "#closed-action");
+  assert.deepEqual(closedEntry.shadowPath, [{ hostSelectorHint: "#secure", rootType: "closed" }]);
 });
 
 test("builds selectors relative to the current document or shadow root", () => {

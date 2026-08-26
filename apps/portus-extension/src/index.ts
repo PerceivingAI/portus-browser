@@ -4290,6 +4290,13 @@ export function capturePortusSnapshotPayload(
 }
 
 export function performPortusDomAction(payload: Record<string, unknown>): Record<string, unknown> {
+  type ActionComposedDomRuntime = {
+    collect(root?: Document | ShadowRoot): Array<{
+      element: Element;
+      shadowPath?: Array<{ hostSelectorHint: string; rootType: "open" | "closed" }>;
+    }>;
+    shadowRootForElement(element: Element): ShadowRoot | null;
+  };
   try {
     const action = typeof payload.action === "string" ? payload.action : "";
     const target = isPlainRecord(payload.target) ? payload.target : null;
@@ -4611,14 +4618,7 @@ export function performPortusDomAction(payload: Record<string, unknown>): Record
       }
     }
 
-    const runtime = (globalThis as typeof globalThis & {
-      __portusComposedDom?: {
-        collect(root?: Document | ShadowRoot): Array<{
-          element: Element;
-          shadowPath?: Array<{ hostSelectorHint: string; rootType: "open" | "closed" }>;
-        }>;
-      };
-    }).__portusComposedDom;
+    const runtime = readActionComposedDomRuntime();
     if (runtime && typeof runtime.collect === "function") {
       const fallbackSelector = "button,a[href],input,textarea,select,[role],[contenteditable],[tabindex],[onclick]";
       for (const entry of runtime.collect(document)) {
@@ -4667,9 +4667,23 @@ export function performPortusDomAction(payload: Record<string, unknown>): Record
           seenElements.add(hit);
           collected.push(hit);
         }
-        const shadowRoot: ShadowRoot | null = hit.shadowRoot;
+        const shadowRoot = readActionShadowRoot(hit);
         if (shadowRoot) visitRoot(shadowRoot);
       }
+    }
+  }
+
+  function readActionComposedDomRuntime(): ActionComposedDomRuntime | undefined {
+    return (globalThis as typeof globalThis & { __portusComposedDom?: ActionComposedDomRuntime }).__portusComposedDom;
+  }
+
+  function readActionShadowRoot(element: Element): ShadowRoot | null {
+    const runtime = readActionComposedDomRuntime();
+    if (!runtime || typeof runtime.shadowRootForElement !== "function") return null;
+    try {
+      return runtime.shadowRootForElement(element);
+    } catch {
+      return null;
     }
   }
 
@@ -4703,7 +4717,7 @@ export function performPortusDomAction(payload: Record<string, unknown>): Record
         return null;
       }
       if (!host) return null;
-      const shadowRoot: ShadowRoot | null = host.shadowRoot;
+      const shadowRoot = readActionShadowRoot(host);
       if (!shadowRoot || shadowRoot.mode !== segment.rootType) return null;
       root = shadowRoot;
     }

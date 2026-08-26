@@ -1628,6 +1628,117 @@ test("snapshot collection traverses nested Shadow DOM and preserves filtering me
   }
 });
 
+test("closed Shadow DOM participates in snapshots waits and actions through chrome.dom", () => {
+  const dom = new JSDOM(`<!doctype html><html><body><secure-shell id="secure"></secure-shell></body></html>`, { url: "https://example.com/" });
+  const document = dom.window.document;
+  const host = document.querySelector("#secure");
+  const closedRoot = host.attachShadow({ mode: "closed" });
+  closedRoot.innerHTML = `
+    <button id="closed-action">Closed action</button>
+    <span id="closed-label">Secret name</span>
+    <input id="closed-input" aria-labelledby="closed-label" name="secret" />
+  `;
+  const closedButton = closedRoot.querySelector("#closed-action");
+  const closedInput = closedRoot.querySelector("#closed-input");
+
+  const descriptors = new Map();
+  const globals = {
+    window: dom.window,
+    document,
+    location: dom.window.location,
+    HTMLElement: dom.window.HTMLElement,
+    HTMLButtonElement: dom.window.HTMLButtonElement,
+    HTMLInputElement: dom.window.HTMLInputElement,
+    HTMLTextAreaElement: dom.window.HTMLTextAreaElement,
+    HTMLSelectElement: dom.window.HTMLSelectElement,
+    HTMLAnchorElement: dom.window.HTMLAnchorElement,
+    Event: dom.window.Event,
+    InputEvent: dom.window.InputEvent,
+    MouseEvent: dom.window.MouseEvent,
+    KeyboardEvent: dom.window.KeyboardEvent,
+    getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
+    chrome: {
+      dom: {
+        openOrClosedShadowRoot(element) {
+          return element === host ? closedRoot : null;
+        }
+      }
+    }
+  };
+  for (const [key, value] of Object.entries(globals)) {
+    descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  }
+  descriptors.set("__portusComposedDom", Object.getOwnPropertyDescriptor(globalThis, "__portusComposedDom"));
+  installPortusComposedDomRuntime(globalThis);
+  Object.defineProperty(dom.window.HTMLElement.prototype, "offsetWidth", { configurable: true, get: () => 100 });
+  Object.defineProperty(dom.window.HTMLElement.prototype, "offsetHeight", { configurable: true, get: () => 30 });
+  dom.window.HTMLElement.prototype.getBoundingClientRect = () => ({
+    x: 10,
+    y: 20,
+    left: 10,
+    top: 20,
+    right: 110,
+    bottom: 50,
+    width: 100,
+    height: 30,
+    toJSON() { return this; }
+  });
+
+  let clicks = 0;
+  closedButton.addEventListener("click", () => clicks += 1);
+
+  try {
+    assert.equal(host.shadowRoot, null);
+
+    const snapshot = capturePortusSnapshotPayload({ interactiveOnly: true }, 10000);
+    assert.equal(snapshot.candidateCount, 2);
+    const button = snapshot.elements.find((element) => element.selectorHint === "#closed-action");
+    const input = snapshot.elements.find((element) => element.selectorHint === "#closed-input");
+    assert.ok(button);
+    assert.ok(input);
+    assert.deepEqual(button.shadowPath, [{ hostSelectorHint: "#secure", rootType: "closed" }]);
+    assert.deepEqual(input.shadowPath, [{ hostSelectorHint: "#secure", rootType: "closed" }]);
+    assert.equal(input.label, "Secret name");
+
+    const wait = evaluatePortusPageWait({ elementQuery: "closed action", role: "button" });
+    assert.equal(wait.matched, true);
+    assert.equal(wait.details.shadowDepth, 1);
+    assert.deepEqual(wait.details.shadowPath, [{ hostSelectorHint: "#secure", rootType: "closed" }]);
+
+    const click = performPortusDomAction({ action: "click", target: button });
+    assert.equal(click.ok, true);
+    assert.equal(clicks, 1);
+
+    const type = performPortusDomAction({ action: "type", target: input, text: "Ada" });
+    assert.equal(type.ok, true);
+    assert.equal(closedInput.value, "Ada");
+
+    const closedRuntime = globalThis.__portusComposedDom;
+    Object.defineProperty(globalThis, "__portusComposedDom", {
+      configurable: true,
+      writable: true,
+      value: {
+        collect: () => [],
+        shadowRootForElement: closedRuntime.shadowRootForElement
+      }
+    });
+    closedButton.id = "renamed-closed-action";
+    document.elementsFromPoint = () => [host];
+    closedRoot.elementsFromPoint = () => [closedButton];
+
+    const recoveredByBounds = performPortusDomAction({ action: "click", target: button });
+    assert.equal(recoveredByBounds.ok, true);
+    assert.equal(clicks, 2);
+  } finally {
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    }
+    dom.window.close();
+  }
+});
+
 test("live DOM actions resolve nested Shadow DOM without crossing the captured root", () => {
   const dom = new JSDOM(`<!doctype html><html><body>
     <button id="light-save">Save</button>
@@ -1800,7 +1911,10 @@ test("bounds recovery recursively hit-tests nested Shadow DOM", () => {
   Object.defineProperty(globalThis, "__portusComposedDom", {
     configurable: true,
     writable: true,
-    value: { collect: () => [] }
+    value: {
+      collect: () => [],
+      shadowRootForElement: (element) => element.shadowRoot
+    }
   });
 
   dom.window.HTMLElement.prototype.scrollIntoView = () => {};

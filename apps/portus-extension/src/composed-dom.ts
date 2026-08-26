@@ -10,10 +10,20 @@ export interface PortusComposedDomEntry {
 export interface PortusComposedDomRuntime {
   collect(root?: Document | ShadowRoot): PortusComposedDomEntry[];
   selectorForElement(element: Element, root: Document | ShadowRoot): string;
+  shadowRootForElement(element: Element): ShadowRoot | null;
 }
 
+type PortusChromeDomGlobal = typeof globalThis & {
+  chrome?: {
+    dom?: {
+      openOrClosedShadowRoot?: (element: HTMLElement) => unknown;
+    };
+  };
+};
+
 export function collectPortusComposedDomElements(
-  root: Document | ShadowRoot = document
+  root: Document | ShadowRoot = document,
+  environment: typeof globalThis = globalThis
 ): PortusComposedDomEntry[] {
   const entries: PortusComposedDomEntry[] = [];
   const seen = new Set<Element>();
@@ -41,7 +51,7 @@ export function collectPortusComposedDomElements(
       ...(shadowPath.length === 0 ? {} : { shadowPath: shadowPath.map((segment) => ({ ...segment })) })
     });
 
-    const accessibleShadowRoot = element.shadowRoot;
+    const accessibleShadowRoot = shadowRootForPortusElement(element, environment);
     if (accessibleShadowRoot) {
       const hostSegment: ShadowPathSegment = {
         hostSelectorHint: selectorForPortusComposedElement(element, currentRoot),
@@ -90,17 +100,42 @@ export function selectorForPortusComposedElement(
   return parts.join(" > ");
 }
 
-export function createPortusComposedDomRuntime(): PortusComposedDomRuntime {
+export function shadowRootForPortusElement(
+  element: Element,
+  environment: typeof globalThis = globalThis
+): ShadowRoot | null {
+  const openShadowRoot = element.shadowRoot;
+  if (openShadowRoot) return openShadowRoot;
+
+  const chromeDom = (environment as PortusChromeDomGlobal).chrome?.dom;
+  const accessor = chromeDom?.openOrClosedShadowRoot;
+  if (typeof accessor !== "function") return null;
+
+  try {
+    const candidate = accessor.call(chromeDom, element as HTMLElement);
+    if (!candidate || typeof candidate !== "object") return null;
+    const shadowRoot = candidate as Partial<ShadowRoot>;
+    if ((shadowRoot.mode !== "open" && shadowRoot.mode !== "closed") || typeof shadowRoot.querySelector !== "function") return null;
+    return candidate as ShadowRoot;
+  } catch {
+    return null;
+  }
+}
+
+export function createPortusComposedDomRuntime(
+  environment: typeof globalThis = globalThis
+): PortusComposedDomRuntime {
   return {
-    collect: collectPortusComposedDomElements,
-    selectorForElement: selectorForPortusComposedElement
+    collect: (root = document) => collectPortusComposedDomElements(root, environment),
+    selectorForElement: selectorForPortusComposedElement,
+    shadowRootForElement: (element) => shadowRootForPortusElement(element, environment)
   };
 }
 
 export function installPortusComposedDomRuntime(
   target: typeof globalThis = globalThis
 ): PortusComposedDomRuntime {
-  const runtime = createPortusComposedDomRuntime();
+  const runtime = createPortusComposedDomRuntime(target);
   (target as typeof globalThis & { __portusComposedDom?: PortusComposedDomRuntime }).__portusComposedDom = runtime;
   return runtime;
 }
