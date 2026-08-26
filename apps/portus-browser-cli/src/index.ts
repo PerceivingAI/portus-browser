@@ -76,6 +76,7 @@ import {
   getCliFlagSpec
 } from "./cli-flags.js";
 import {
+  cliInvocationPath,
   resolveCliInvocation,
   validateCliInvocationFlags,
   validateCliInvocationPositionals,
@@ -128,6 +129,9 @@ interface CliContext {
   timeoutMs: number | undefined;
   writeStdout: (chunk: string) => void;
 }
+
+type CliPayloadHandler = (context: CliContext, parsed: ParsedArgs) => Promise<Record<string, unknown>>;
+type CliDispatchHandler = (context: CliContext, parsed: ParsedArgs) => Promise<CliCommandResult>;
 
 const BrowserListResultSchema = z.object({
   browsers: z.array(BrowserSessionSchema)
@@ -476,75 +480,89 @@ export async function runPortusBrowserCli(
         })
       };
 
-    switch (invocation.spec.path[0]) {
-      case "browsers":
-        return success(output, await handleBrowsers(context));
-      case "tabs":
-        return success(output, await handleTabs(context, parsed));
-      case "tab":
-        return success(output, await handleTab(context, parsed));
-      case "open":
-        return success(output, await handleOpen(context, parsed));
-      case "navigate":
-        return success(output, await handleNavigate(context, parsed));
-      case "back":
-        return success(output, await handleHistory(context, parsed, "tab.history.back"));
-      case "forward":
-        return success(output, await handleHistory(context, parsed, "tab.history.forward"));
-      case "activate-tab":
-        return success(output, await handleActivateTab(context, parsed));
-      case "close-tab":
-        return success(output, await handleCloseTab(context, parsed));
-      case "screenshot":
-        return success(output, await handleScreenshot(context, parsed));
-      case "snapshot":
-        return success(output, await handleSnapshot(context, parsed));
-      case "click":
-        return success(output, await handleAction(context, parsed, "click"));
-      case "hover":
-        return success(output, await handleAction(context, parsed, "hover"));
-      case "drag":
-        return success(output, await handleAction(context, parsed, "drag"));
-      case "fill-form":
-        return success(output, await handleFillForm(context, parsed));
-      case "type":
-        return success(output, await handleAction(context, parsed, "type"));
-      case "press":
-        return success(output, await handleAction(context, parsed, "press"));
-      case "scroll":
-        return success(output, await handleAction(context, parsed, "scroll"));
-      case "dismiss":
-        return success(output, await handleDismiss(context, parsed));
-      case "dialog":
-        return success(output, await handleDialog(context, parsed));
-      case "console":
-        return success(output, await handleConsole(context, parsed));
-      case "network":
-        return success(output, await handleNetwork(context, parsed));
-      case "recipes":
-        return success(output, await handleRecipes(context, parsed));
-      case "policy":
-        return success(output, await handlePolicy(context, parsed));
-      case "wait":
-        return success(output, await handleWait(context, parsed));
-      case "watch":
-        return success("quiet", await handleWatch(context, parsed));
-      case "events":
-        return success(output, await handleEvents(context, parsed));
-      case "session":
-        return success(output, await handleSession(context, parsed));
-      case "bridge":
-        return success(output, await handleBridge(context, parsed));
-      case "broker":
-        return success(output, await handleBroker(context, parsed));
-      default:
-        throw usageError(`Unknown command: ${parsed.command}.`);
+    const handlerPath = cliInvocationPath(invocation.spec);
+    const handler = getCliHandler(handlerPath);
+    if (!handler) {
+      throw createPortusError({
+        code: "INTERNAL_ERROR",
+        message: `No CLI handler registered for ${handlerPath}.`
+      });
     }
+    return await handler(context, parsed);
   } catch (error) {
     return renderFailure(error, outputMode);
   } finally {
     await broker?.close?.();
   }
+}
+
+function outputHandler(handler: CliPayloadHandler, outputOverride?: OutputMode): CliDispatchHandler {
+  return async (context, parsed) => success(outputOverride ?? context.output, await handler(context, parsed));
+}
+
+const CLI_HANDLERS = {
+  "browsers": outputHandler(handleBrowsers),
+  "tabs": outputHandler(handleTabs),
+  "tab": outputHandler(handleTab),
+  "open": outputHandler(handleOpen),
+  "navigate": outputHandler(handleNavigate),
+  "back": outputHandler((context, parsed) => handleHistory(context, parsed, "tab.history.back")),
+  "forward": outputHandler((context, parsed) => handleHistory(context, parsed, "tab.history.forward")),
+  "activate-tab": outputHandler(handleActivateTab),
+  "close-tab": outputHandler(handleCloseTab),
+  "screenshot": outputHandler(handleScreenshot),
+  "snapshot": outputHandler(handleSnapshot),
+  "click": outputHandler((context, parsed) => handleAction(context, parsed, "click")),
+  "hover": outputHandler((context, parsed) => handleAction(context, parsed, "hover")),
+  "drag": outputHandler((context, parsed) => handleAction(context, parsed, "drag")),
+  "fill-form": outputHandler(handleFillForm),
+  "type": outputHandler((context, parsed) => handleAction(context, parsed, "type")),
+  "press": outputHandler((context, parsed) => handleAction(context, parsed, "press")),
+  "scroll": outputHandler((context, parsed) => handleAction(context, parsed, "scroll")),
+  "dismiss": outputHandler(handleDismiss),
+  "wait": outputHandler(handleWait),
+  "watch": outputHandler(handleWatch, "quiet"),
+
+  "dialog accept": outputHandler(handleDialog),
+  "dialog dismiss": outputHandler(handleDialog),
+  "console list": outputHandler(handleConsole),
+  "console clear": outputHandler(handleConsole),
+  "network list": outputHandler(handleNetwork),
+  "network get": outputHandler(handleNetwork),
+  "events recent": outputHandler(handleEvents),
+  "session steps": outputHandler(handleSession),
+  "bridge disconnect": outputHandler(handleBridge),
+  "broker status": outputHandler(handleBroker),
+  "broker stop": outputHandler(handleBroker),
+
+  "policy allow list": outputHandler(handlePolicy),
+  "policy allow add": outputHandler(handlePolicy),
+  "policy allow remove": outputHandler(handlePolicy),
+  "policy block list": outputHandler(handlePolicy),
+  "policy block add": outputHandler(handlePolicy),
+  "policy block remove": outputHandler(handlePolicy),
+  "policy retention get": outputHandler(handlePolicy),
+  "policy retention set": outputHandler(handlePolicy),
+
+  "recipes list": outputHandler(handleRecipes),
+  "recipes create": outputHandler(handleRecipes),
+  "recipes show": outputHandler(handleRecipes),
+  "recipes search": outputHandler(handleRecipes),
+  "recipes use": outputHandler(handleRecipes),
+  "recipes resolve": outputHandler(handleRecipes),
+  "recipes update": outputHandler(handleRecipes),
+  "recipes rename": outputHandler(handleRecipes),
+  "recipes delete": outputHandler(handleRecipes),
+  "recipes validate": outputHandler(handleRecipes),
+  "recipes import": outputHandler(handleRecipes),
+  "recipes export": outputHandler(handleRecipes),
+  "recipes duplicate": outputHandler(handleRecipes)
+} satisfies Record<string, CliDispatchHandler>;
+
+export const CLI_HANDLER_PATHS: readonly string[] = Object.freeze(Object.keys(CLI_HANDLERS));
+
+function getCliHandler(path: string): CliDispatchHandler | undefined {
+  return (CLI_HANDLERS as Record<string, CliDispatchHandler>)[path];
 }
 
 async function handleBrowsers(context: CliContext): Promise<Record<string, unknown>> {

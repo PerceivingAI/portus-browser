@@ -12,7 +12,7 @@ import {
   validateCliInvocationRepeatability
 } from "../dist/command-spec.js";
 import { CLI_SURFACE_BASELINE } from "../dist/cli-surface.js";
-import { runPortusBrowserCli } from "../dist/index.js";
+import { CLI_HANDLER_PATHS, runPortusBrowserCli } from "../dist/index.js";
 
 test("CLI-3 registry exactly covers the CLI-0 canonical surface and aliases", () => {
   const actualPaths = CLI_INVOCATIONS.map(cliInvocationPath);
@@ -320,6 +320,30 @@ test("CLI-8 keeps overloaded recipe --kind outside dismiss enum semantics", asyn
   assert.equal(result.exitCode, 0);
   assert.equal(JSON.parse(result.stdout).recipe.kind, "user-defined");
   assert.deepEqual(broker.requests, []);
+});
+
+test("CLI-10 handler map exactly matches the declarative invocation registry", () => {
+  const registryPaths = CLI_INVOCATIONS.map(cliInvocationPath);
+  assert.equal(CLI_HANDLER_PATHS.length, 53);
+  assert.deepEqual(CLI_HANDLER_PATHS, registryPaths);
+  assert.equal(new Set(CLI_HANDLER_PATHS).size, CLI_HANDLER_PATHS.length);
+
+  const aliases = CLI_INVOCATIONS.flatMap((entry) => (entry.aliases ?? []).map((alias) => alias.join(" ")));
+  for (const alias of aliases) assert.equal(CLI_HANDLER_PATHS.includes(alias), false, alias);
+});
+
+test("CLI-10 aliases resolve to canonical handler paths", () => {
+  for (const [command, canonical] of [
+    ["console", "console list"],
+    ["network", "network list"],
+    ["recipes", "recipes list"]
+  ]) {
+    const resolution = resolveCliInvocation(command, []);
+    assert.equal(resolution.ok, true, command);
+    const path = cliInvocationPath(resolution.invocation.spec);
+    assert.equal(path, canonical, command);
+    assert.equal(CLI_HANDLER_PATHS.includes(path), true, command);
+  }
 });
 
 test("CLI-5 rejects meaningless timeout on local recipe operations before filesystem work", async () => {
