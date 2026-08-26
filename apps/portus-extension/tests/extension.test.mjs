@@ -8,7 +8,7 @@ import { encodeNativeMessage, tryReadNativeMessageFrame } from "@portus/native-m
 import { DEFAULT_COMMAND_POLICY } from "@portus/protocol";
 import { deserializeTransportFrame, serializeTransportFrame } from "@portus/transport";
 import { createNativeHostRelay } from "@portus/native-host";
-import { capturePortusSnapshotPayload, createPortusExtensionBridge, detectBrowserName, evaluatePortusPageWait } from "../dist/index.js";
+import { capturePortusSnapshotPayload, createPortusExtensionBridge, detectBrowserName, evaluatePortusPageWait, performPortusDomAction } from "../dist/index.js";
 import { installPortusComposedDomRuntime } from "../dist/composed-dom.js";
 import { JSDOM } from "jsdom";
 
@@ -1628,6 +1628,134 @@ test("snapshot collection traverses nested Shadow DOM and preserves filtering me
   }
 });
 
+test("live DOM actions resolve nested Shadow DOM without crossing the captured root", () => {
+  const dom = new JSDOM(`<!doctype html><html><body>
+    <button id="light-save">Save</button>
+    <app-shell id="app"></app-shell>
+  </body></html>`, { url: "https://example.com/" });
+  const document = dom.window.document;
+  const app = document.querySelector("#app");
+  const appRoot = app.attachShadow({ mode: "open" });
+  appRoot.innerHTML = `<nested-panel id="nested"></nested-panel>`;
+  const nested = appRoot.querySelector("#nested");
+  const nestedRoot = nested.attachShadow({ mode: "open" });
+  nestedRoot.innerHTML = `
+    <button id="shadow-save">Save</button>
+    <span id="name-label">Name</span>
+    <input id="shadow-name" aria-labelledby="name-label" name="name" />
+  `;
+  const shadowButton = nestedRoot.querySelector("#shadow-save");
+  const shadowInput = nestedRoot.querySelector("#shadow-name");
+  const lightButton = document.querySelector("#light-save");
+
+  const descriptors = new Map();
+  const globals = {
+    window: dom.window,
+    document,
+    location: dom.window.location,
+    HTMLElement: dom.window.HTMLElement,
+    HTMLButtonElement: dom.window.HTMLButtonElement,
+    HTMLInputElement: dom.window.HTMLInputElement,
+    HTMLTextAreaElement: dom.window.HTMLTextAreaElement,
+    HTMLSelectElement: dom.window.HTMLSelectElement,
+    HTMLAnchorElement: dom.window.HTMLAnchorElement,
+    Event: dom.window.Event,
+    InputEvent: dom.window.InputEvent,
+    MouseEvent: dom.window.MouseEvent,
+    KeyboardEvent: dom.window.KeyboardEvent,
+    getComputedStyle: dom.window.getComputedStyle.bind(dom.window)
+  };
+  for (const [key, value] of Object.entries(globals)) {
+    descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  }
+  descriptors.set("__portusComposedDom", Object.getOwnPropertyDescriptor(globalThis, "__portusComposedDom"));
+  installPortusComposedDomRuntime(globalThis);
+  dom.window.HTMLElement.prototype.getBoundingClientRect = () => ({
+    x: 10,
+    y: 20,
+    left: 10,
+    top: 20,
+    right: 110,
+    bottom: 50,
+    width: 100,
+    height: 30,
+    toJSON() { return this; }
+  });
+
+  const shadowPath = [
+    { hostSelectorHint: "#app", rootType: "open" },
+    { hostSelectorHint: "#nested", rootType: "open" }
+  ];
+  const buttonTarget = {
+    shadowPath,
+    selectorHint: "#shadow-save",
+    tagName: "button",
+    role: "button",
+    label: "Save",
+    text: "Save",
+    bounds: { x: 10, y: 20, width: 100, height: 30 },
+    state: {},
+    disabled: false
+  };
+  const inputTarget = {
+    shadowPath,
+    selectorHint: "#shadow-name",
+    tagName: "input",
+    role: "textbox",
+    label: "Name",
+    text: "",
+    bounds: { x: 10, y: 20, width: 100, height: 30 },
+    state: { value: "" },
+    disabled: false,
+    editable: true,
+    inputType: "text",
+    name: "name"
+  };
+
+  let shadowClicks = 0;
+  let lightClicks = 0;
+  shadowButton.addEventListener("click", () => shadowClicks += 1);
+  lightButton.addEventListener("click", () => lightClicks += 1);
+
+  try {
+    const exact = performPortusDomAction({ action: "click", target: buttonTarget });
+    assert.equal(exact.ok, true);
+    assert.equal(shadowClicks, 1);
+    assert.equal(lightClicks, 0);
+
+    shadowButton.id = "renamed-save";
+    const recovered = performPortusDomAction({ action: "click", target: buttonTarget });
+    assert.equal(recovered.ok, true);
+    assert.equal(shadowClicks, 2);
+    assert.equal(lightClicks, 0);
+
+    const typed = performPortusDomAction({ action: "type", target: inputTarget, text: "Ada" });
+    assert.equal(typed.ok, true);
+    assert.equal(shadowInput.value, "Ada");
+
+    const filled = performPortusDomAction({
+      action: "fillForm",
+      partial: false,
+      fields: [{ elementId: "el_shadow_name", value: "Lovelace", target: inputTarget }]
+    });
+    assert.equal(filled.ok, true);
+    assert.equal(shadowInput.value, "Lovelace");
+
+    nested.remove();
+    const stale = performPortusDomAction({ action: "click", target: buttonTarget });
+    assert.equal(stale.ok, false);
+    assert.equal(stale.error.code, "SNAPSHOT_STALE");
+    assert.equal(lightClicks, 0);
+  } finally {
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    }
+    dom.window.close();
+  }
+});
+
 test("performs DOM actions and rejects stale snapshot ids", async () => {
   const fixture = createChromeFixture();
   const bridge = createConnectedBridge(fixture);
@@ -1646,6 +1774,12 @@ test("performs DOM actions and rejects stale snapshot ids", async () => {
   assert.equal(fixture.actions[0].target.elementId, "el_000001");
   assert.equal(fixture.actions[0].target.label, "Submit");
   assert.deepEqual(fixture.actions[0].target.bounds, { x: 10, y: 20, width: 100, height: 40 });
+  const actionRuntimeInjection = fixture.scriptInjections.at(-2);
+  assert.deepEqual(actionRuntimeInjection.files, ["dist/composed-dom-runtime.js"]);
+  assert.deepEqual(actionRuntimeInjection.target, {
+    tabId: 1,
+    documentIds: [snapshot.elements[0].documentId]
+  });
 
   await assert.rejects(() => bridge.performAction("click", {
     tabId: 1,

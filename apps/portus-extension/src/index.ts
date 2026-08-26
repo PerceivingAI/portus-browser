@@ -2920,7 +2920,7 @@ export class PortusExtensionBridge {
     });
   }
 
-  private async installComposedDomRuntime(tabId: number): Promise<void> {
+  private async installComposedDomRuntime(tabId: number, executionTarget?: DomExecutionTarget): Promise<void> {
     if (!this.chromeApi.scripting) {
       throw createPortusError({
         code: "CAPABILITY_UNAVAILABLE",
@@ -2929,7 +2929,9 @@ export class PortusExtensionBridge {
     }
     await mapChromeAccessOperation("install composed DOM runtime", promisifyChromeCall<ChromeScriptInjectionResult[]>((done) => {
       const result = this.chromeApi.scripting?.executeScript({
-        target: { tabId, allFrames: true },
+        target: executionTarget
+          ? { tabId, documentIds: [executionTarget.documentId] }
+          : { tabId, allFrames: true },
         files: [COMPOSED_DOM_RUNTIME_FILE]
       });
       done(result as Promise<ChromeScriptInjectionResult[]> | ChromeScriptInjectionResult[] | undefined);
@@ -3115,6 +3117,7 @@ export class PortusExtensionBridge {
 
     let results: ChromeScriptInjectionResult[];
     try {
+      if (executionTarget) await this.installComposedDomRuntime(tabId, executionTarget);
       results = await mapChromeAccessOperation("execute action script", promisifyChromeCall<ChromeScriptInjectionResult[]>((done) => {
         const result = this.chromeApi.scripting?.executeScript({
           target: executionTarget
@@ -4286,7 +4289,7 @@ export function capturePortusSnapshotPayload(
   }
 }
 
-function performPortusDomAction(payload: Record<string, unknown>): Record<string, unknown> {
+export function performPortusDomAction(payload: Record<string, unknown>): Record<string, unknown> {
   try {
     const action = typeof payload.action === "string" ? payload.action : "";
     const target = isPlainRecord(payload.target) ? payload.target : null;
@@ -4541,61 +4544,154 @@ function performPortusDomAction(payload: Record<string, unknown>): Record<string
     }
   }
 
-function resolveLiveActionElement(target: Record<string, unknown>): { element: HTMLElement | null; score: number } {
-    const candidates = collectActionCandidates(target);
+  function resolveLiveActionElement(target: Record<string, unknown>): { element: HTMLElement | null; score: number } {
+    const parsedShadowPath = readActionShadowPath(target.shadowPath);
+    if (!parsedShadowPath.valid) return { element: null, score: 0 };
+
+    const expectedShadowPath = parsedShadowPath.path;
+    const targetRoot = resolveActionTargetRoot(expectedShadowPath);
+    const selectorHint = typeof target.selectorHint === "string" ? target.selectorHint : "";
+
+    if (targetRoot && selectorHint) {
+      const exactCandidates: HTMLElement[] = [];
+      try {
+        for (const element of Array.from(targetRoot.querySelectorAll(selectorHint))) {
+          if (element instanceof HTMLElement) exactCandidates.push(element);
+        }
+      } catch {
+        // Selector hints are best-effort. Broader same-root recovery runs below.
+      }
+      const exact = bestActionCandidate(exactCandidates, target);
+      if (exact && exact.score >= 60) return exact;
+    }
+
+    const broaderCandidates = collectActionCandidates(target, expectedShadowPath, targetRoot);
+    const broader = bestActionCandidate(broaderCandidates, target);
+    if (!broader || broader.score < 60) return { element: null, score: broader?.score ?? 0 };
+    return broader;
+  }
+
+  function bestActionCandidate(
+    candidates: HTMLElement[],
+    target: Record<string, unknown>
+  ): { element: HTMLElement; score: number } | null {
     let best: { element: HTMLElement; score: number } | null = null;
     for (const candidate of candidates) {
       const score = scoreActionCandidate(candidate, target);
       if (score === null) continue;
       if (!best || score > best.score) best = { element: candidate, score };
     }
-    if (!best || best.score < 60) return { element: null, score: best?.score ?? 0 };
     return best;
   }
 
-  function collectActionCandidates(target: Record<string, unknown>): HTMLElement[] {
+  function collectActionCandidates(
+    target: Record<string, unknown>,
+    expectedShadowPath: Array<{ hostSelectorHint: string; rootType: "open" | "closed" }> | undefined,
+    targetRoot: Document | ShadowRoot | null
+  ): HTMLElement[] {
     const candidates: HTMLElement[] = [];
     const seen = new Set<HTMLElement>();
-    const selectorHint = typeof target.selectorHint === "string" ? target.selectorHint : "";
-    if (selectorHint) {
-      try {
-        for (const element of Array.from(document.querySelectorAll(selectorHint))) addCandidate(element);
-      } catch {
-        // Selector hints are best-effort and may be invalid on the live page.
-      }
-    }
 
-    const bounds = readTargetBounds(target.bounds);
-    if (bounds) {
-      const points: Array<[number, number]> = [
-        [bounds.x + bounds.width / 2, bounds.y + bounds.height / 2],
-        [bounds.x + Math.min(8, bounds.width / 2), bounds.y + Math.min(8, bounds.height / 2)],
-        [bounds.x + Math.max(bounds.width - 8, bounds.width / 2), bounds.y + Math.min(8, bounds.height / 2)]
-      ];
-      for (const [x, y] of points) {
-        if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) continue;
-        for (const element of document.elementsFromPoint(x, y)) {
-          let current: Element | null = element;
-          while (current && current !== document.body) {
-            addCandidate(current);
-            current = current.parentElement;
+    // Preserve the existing light-DOM spatial recovery path. Recursive shadow hit
+    // testing is intentionally deferred to S5.
+    if (targetRoot === document) {
+      const bounds = readTargetBounds(target.bounds);
+      if (bounds) {
+        const points: Array<[number, number]> = [
+          [bounds.x + bounds.width / 2, bounds.y + bounds.height / 2],
+          [bounds.x + Math.min(8, bounds.width / 2), bounds.y + Math.min(8, bounds.height / 2)],
+          [bounds.x + Math.max(bounds.width - 8, bounds.width / 2), bounds.y + Math.min(8, bounds.height / 2)]
+        ];
+        for (const [x, y] of points) {
+          if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) continue;
+          for (const element of document.elementsFromPoint(x, y)) {
+            let current: Element | null = element;
+            while (current && current !== document.body) {
+              addCandidate(current);
+              current = current.parentElement;
+            }
           }
         }
       }
     }
 
-    if (candidates.length === 0) {
-      for (const element of Array.from(document.querySelectorAll("button,a[href],input,textarea,select,[role],[contenteditable],[tabindex],[onclick]"))) {
-        addCandidate(element);
+    const runtime = (globalThis as typeof globalThis & {
+      __portusComposedDom?: {
+        collect(root?: Document | ShadowRoot): Array<{
+          element: Element;
+          shadowPath?: Array<{ hostSelectorHint: string; rootType: "open" | "closed" }>;
+        }>;
+      };
+    }).__portusComposedDom;
+    if (runtime && typeof runtime.collect === "function") {
+      const fallbackSelector = "button,a[href],input,textarea,select,[role],[contenteditable],[tabindex],[onclick]";
+      for (const entry of runtime.collect(document)) {
+        if (!shadowPathsEqual(entry.shadowPath, expectedShadowPath)) continue;
+        if (!(entry.element instanceof HTMLElement) || !entry.element.matches(fallbackSelector)) continue;
+        addCandidate(entry.element);
       }
     }
+
     return candidates;
 
     function addCandidate(element: Element): void {
       if (!(element instanceof HTMLElement) || seen.has(element)) return;
+      if (expectedShadowPath === undefined && element.getRootNode() !== document) return;
+      if (expectedShadowPath !== undefined && targetRoot && element.getRootNode() !== targetRoot) return;
       seen.add(element);
       candidates.push(element);
     }
+  }
+
+  function readActionShadowPath(value: unknown): {
+    valid: boolean;
+    path?: Array<{ hostSelectorHint: string; rootType: "open" | "closed" }>;
+  } {
+    if (value === undefined) return { valid: true };
+    if (!Array.isArray(value) || value.length === 0) return { valid: false };
+    const path: Array<{ hostSelectorHint: string; rootType: "open" | "closed" }> = [];
+    for (const segment of value) {
+      if (!isPlainRecord(segment)) return { valid: false };
+      const hostSelectorHint = typeof segment.hostSelectorHint === "string" ? segment.hostSelectorHint.trim() : "";
+      const rootType = segment.rootType === "open" || segment.rootType === "closed" ? segment.rootType : null;
+      if (!hostSelectorHint || !rootType) return { valid: false };
+      path.push({ hostSelectorHint, rootType });
+    }
+    return { valid: true, path };
+  }
+
+  function resolveActionTargetRoot(
+    shadowPath: Array<{ hostSelectorHint: string; rootType: "open" | "closed" }> | undefined
+  ): Document | ShadowRoot | null {
+    if (shadowPath === undefined) return document;
+    let root: Document | ShadowRoot = document;
+    for (const segment of shadowPath) {
+      let host: Element | null = null;
+      try {
+        host = root.querySelector(segment.hostSelectorHint);
+      } catch {
+        return null;
+      }
+      if (!host) return null;
+      const shadowRoot: ShadowRoot | null = host.shadowRoot;
+      if (!shadowRoot || shadowRoot.mode !== segment.rootType) return null;
+      root = shadowRoot;
+    }
+    return root;
+  }
+
+  function shadowPathsEqual(
+    left: Array<{ hostSelectorHint: string; rootType: "open" | "closed" }> | undefined,
+    right: Array<{ hostSelectorHint: string; rootType: "open" | "closed" }> | undefined
+  ): boolean {
+    if (left === undefined || right === undefined) return left === right;
+    if (left.length !== right.length) return false;
+    return left.every((segment, index) => {
+      const expected = right[index];
+      return expected !== undefined
+        && segment.hostSelectorHint === expected.hostSelectorHint
+        && segment.rootType === expected.rootType;
+    });
   }
 
   function scoreActionCandidate(element: HTMLElement, target: Record<string, unknown>): number | null {
@@ -4700,7 +4796,11 @@ function resolveLiveActionElement(target: Record<string, unknown>): { element: H
     if (aria) return aria.trim();
     const labelledBy = element.getAttribute("aria-labelledby");
     if (labelledBy) {
-      const text = labelledBy.split(/\s+/).map((id) => document.getElementById(id)?.textContent?.trim() ?? "").filter(Boolean).join(" ");
+      const root = element.getRootNode() as Node & { getElementById?: (id: string) => Element | null };
+      const getById = typeof root.getElementById === "function"
+        ? (id: string) => root.getElementById?.(id) ?? null
+        : (id: string) => document.getElementById(id);
+      const text = labelledBy.split(/\s+/).map((id) => getById(id)?.textContent?.trim() ?? "").filter(Boolean).join(" ");
       if (text) return text;
     }
     if (element instanceof HTMLInputElement && element.labels && element.labels.length > 0) {
