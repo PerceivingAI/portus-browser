@@ -78,6 +78,7 @@ Portus Browser targets Chromium-based browsers:
 
 - Google Chrome
 - Microsoft Edge
+- Brave
 - Chromium
 
 The extension must be installed separately in each browser type you want to use.

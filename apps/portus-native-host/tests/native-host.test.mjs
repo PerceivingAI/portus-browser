@@ -201,6 +201,26 @@ test("relays broker-routed commands to extension and returns extension response"
   }
 });
 
+test("normalizes malformed native JSON as INVALID_MESSAGE", async () => {
+  const { server, relay, input, output } = await startRelayFixture();
+  try {
+    const body = Buffer.from("{", "utf8");
+    const frame = Buffer.alloc(4 + body.byteLength);
+    frame.writeUInt32LE(body.byteLength, 0);
+    body.copy(frame, 4);
+
+    input.write(frame);
+    const message = await readNativeMessage(output);
+    assert.equal(message.kind, "response");
+    assert.equal(message.ok, false);
+    assert.equal(message.error.code, "INVALID_MESSAGE");
+    assert.equal(message.error.details.reason, "invalid JSON");
+  } finally {
+    await relay.stop();
+    await server.stop();
+  }
+});
+
 test("rejects terminal messages on the browser-control native host", async () => {
   const { server, relay, input, output } = await startRelayFixture();
   try {

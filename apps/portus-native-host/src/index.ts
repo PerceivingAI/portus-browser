@@ -288,19 +288,10 @@ function normalizeNativeHostError(error: unknown): PortusError {
     return createInvalidMessageError({ reason: "invalid JSON" });
   }
 
-  const maybeEnvelope = tryDecodeProtocolEnvelope(error);
-  if (maybeEnvelope) return maybeEnvelope;
-
   return createInvalidMessageError({
     reason: error instanceof Error ? error.message : "invalid native host message"
   });
 }
-
-function tryDecodeProtocolEnvelope(error: unknown): PortusError | null {
-  if (!(error instanceof Error)) return null;
-  return null;
-}
-
 export function decodeNativeFrameForTest(frame: Buffer): NativeMessagePayload {
   return decodeNativeMessageFrame(frame);
 }
