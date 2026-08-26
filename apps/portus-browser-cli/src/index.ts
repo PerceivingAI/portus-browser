@@ -78,6 +78,7 @@ import {
   getCliFlagSpec,
   type CliFlagSpec
 } from "./cli-flags.js";
+import { resolveCliInvocation } from "./command-spec.js";
 import {
   deserializeTransportFrame,
   resolveBrokerEndpoint,
@@ -447,11 +448,14 @@ export async function runPortusBrowserCli(
   try {
     const config = createCliConfig(options);
     const parsed = parseArgs(argv);
+    const resolution = resolveCliInvocation(parsed.command, parsed.positionals);
+    if (!resolution.ok) throw usageError(resolution.message);
+    const invocation = resolution.invocation;
     const output = resolveOutputMode(parsed, config);
     outputMode = output;
-    broker = options.brokerClient ?? createDefaultBrokerClient(config);
     const timeoutMs = readOptionalPositiveIntegerFlag(parsed, CLI_TIMEOUT_FLAG.name) ?? config.commands.timeoutMs;
-      const context: CliContext = {
+    broker = options.brokerClient ?? createDefaultBrokerClient(config);
+    const context: CliContext = {
         config,
         output,
         broker,
@@ -461,9 +465,7 @@ export async function runPortusBrowserCli(
         })
       };
 
-    if (!parsed.command) throw usageError("A command is required.");
-
-    switch (parsed.command) {
+    switch (invocation.spec.path[0]) {
       case "browsers":
         return success(output, await handleBrowsers(context));
       case "tabs":
