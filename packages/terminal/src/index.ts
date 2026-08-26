@@ -94,7 +94,7 @@ export const TerminalOutputChunkSchema = z.object({
 }).strict();
 
 export const TerminalErrorPayloadSchema = z.object({
-  code: z.enum(["TERMINAL_UNAVAILABLE", "INVALID_MESSAGE", "PROFILE_NOT_FOUND", "SESSION_NOT_FOUND", "PTY_EXITED", "INTERNAL_ERROR"]),
+  code: z.enum(["TERMINAL_UNAVAILABLE", "INVALID_MESSAGE", "PROFILE_NOT_FOUND", "SESSION_NOT_FOUND", "PTY_EXITED", "COMMAND_TIMEOUT", "INTERNAL_ERROR"]),
   message: NonEmptyStringSchema,
   retryable: z.boolean().optional(),
   details: z.record(z.string(), z.unknown()).optional()

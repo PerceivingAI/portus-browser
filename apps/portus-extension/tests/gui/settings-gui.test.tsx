@@ -315,6 +315,26 @@ describe("Settings view rendered GUI", () => {
     });
   });
 
+  test("terminal unresponsive state exposes restart behind destructive confirmation", async () => {
+    const user = userEvent.setup();
+    runtime().setStatus(createStatus({
+      terminalNativeHostState: "unresponsive",
+      uxPreferences: { defaultPanelView: "terminal" }
+    }));
+    render(<SidePanelApp />);
+
+    const restart = await screen.findByRole("button", { name: "Restart Backend" });
+    expect(restart).toBeEnabled();
+    await user.click(restart);
+
+    expect(screen.getByRole("heading", { name: "Restart Terminal Backend?" })).toBeInTheDocument();
+    expect(screen.getByText(/closes all terminal sessions/i)).toBeInTheDocument();
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByRole("button", { name: "Restart Backend" })).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("heading", { name: "Restart Terminal Backend?" })).not.toBeInTheDocument();
+  });
+
   test("terminal Settings controls save profile-owned terminal settings", async () => {
     const user = userEvent.setup();
     render(<SidePanelApp />);
@@ -730,6 +750,7 @@ function createStatus({
   maxCustomProfiles = 10,
   policyPreferences = {},
   profiles,
+  terminalNativeHostState = "disconnected",
   terminalPreferences = {},
   uxPreferences = {}
 }: {
@@ -740,6 +761,7 @@ function createStatus({
   maxCustomProfiles?: number;
   policyPreferences?: Partial<PortusExtensionStatus["policyPreferences"]>;
   profiles?: ProfileMetadata[];
+  terminalNativeHostState?: PortusExtensionStatus["terminalNativeHostState"];
   terminalPreferences?: Partial<PortusExtensionStatus["terminalPreferences"]>;
   uxPreferences?: Partial<PortusExtensionStatus["uxPreferences"]>;
 } = {}): PortusExtensionStatus {
@@ -780,7 +802,7 @@ function createStatus({
     },
     sidePanelOpen: false,
     terminalNativeHostName: "com.portus.browser.terminal",
-    terminalNativeHostState: "disconnected",
+    terminalNativeHostState,
     terminalPreferences: terminal,
     uxPreferences: ux
   };

@@ -1622,6 +1622,66 @@ test("uses a separate terminal native host channel", async () => {
   assert.equal((await bridge.getStatus()).terminalNativeHostState, "connected");
 });
 
+test("terminal request timeout preserves the native host and recovers on late traffic", async () => {
+  const fixture = createChromeFixture();
+  const requestTimers = createTimeoutFixture();
+  const bridge = createPortusExtensionBridge(fixture.chrome, {
+    setTimeout: requestTimers.setTimeout,
+    clearTimeout: requestTimers.clearTimeout,
+    terminalRequestTimeoutMs: 5
+  });
+
+  const terminalPromise = bridge.sendTerminalClientMessage({
+    type: "terminal.sessions.list",
+    requestId: "treq_timeout",
+    payload: {}
+  });
+  await waitFor(() => fixture.ports.length === 1);
+  const terminalPort = fixture.ports[0];
+  assert.equal(requestTimers.callbacks.length, 1);
+
+  requestTimers.callbacks[0]();
+  await assert.rejects(terminalPromise, { code: "COMMAND_TIMEOUT" });
+  assert.equal((await bridge.getStatus()).terminalNativeHostState, "unresponsive");
+  assert.equal(terminalPort.disconnected, false);
+  assert.equal(fixture.ports.length, 1);
+
+  terminalPort.emitMessage({
+    type: "terminal.sessions",
+    requestId: "treq_timeout",
+    payload: { sessions: [], activeTerminalId: null }
+  });
+  await waitFor(async () => (await bridge.getStatus()).terminalNativeHostState === "connected");
+  assert.equal(terminalPort.disconnected, false);
+  assert.equal(fixture.ports.length, 1);
+});
+
+test("explicit terminal restart replaces the native host connection", async () => {
+  const fixture = createChromeFixture();
+  const bridge = createPortusExtensionBridge(fixture.chrome);
+
+  const terminalPromise = bridge.sendTerminalClientMessage({
+    type: "terminal.sessions.list",
+    requestId: "treq_restart_ready",
+    payload: {}
+  });
+  await waitFor(() => fixture.ports.length === 1);
+  const originalPort = fixture.ports[0];
+  originalPort.emitMessage({
+    type: "terminal.sessions",
+    requestId: "treq_restart_ready",
+    payload: { sessions: [], activeTerminalId: null }
+  });
+  await terminalPromise;
+
+  const result = await bridge.handleRuntimeMessage({ type: "portus.terminal.restart" });
+
+  assert.equal(originalPort.disconnected, true);
+  assert.equal(fixture.ports.length, 2);
+  assert.deepEqual(fixture.connectedHostNames, ["com.portus.browser.terminal", "com.portus.browser.terminal"]);
+  assert.equal(result.status.terminalNativeHostState, "connected");
+});
+
 test("bridge disconnect leaves terminal native host connected", async () => {
   const fixture = createChromeFixture();
   const bridge = createPortusExtensionBridge(fixture.chrome, {

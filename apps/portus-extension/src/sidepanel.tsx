@@ -39,6 +39,7 @@ import type { PortusExtensionStatus } from "./index.js";
 type ViewName = ExtensionUxPreferences["defaultPanelView"];
 type PolicyRuleListKind = "allow" | "block";
 const TERMINAL_PREFERENCES_STORAGE_KEY = "portus.terminalPreferences";
+const TERMINAL_UI_REQUEST_TIMEOUT_MS = 20000;
 
 export function SidePanelApp(): React.JSX.Element {
   const [status, setStatus] = React.useState<PortusExtensionStatus | null>(null);
@@ -261,6 +262,7 @@ export function SidePanelApp(): React.JSX.Element {
               setIsError(false);
             }}
             onError={applyError}
+            terminalNativeHostState={status?.terminalNativeHostState ?? "disconnected"}
             terminalPreferences={terminalPreferencesOverride}
           />
         </div>
@@ -1210,18 +1212,23 @@ function loadProfilesForSettings(): Promise<TerminalProfile[]> {
     const requestId = "treq_settings_profiles_" + Date.now().toString(36);
     const port = connectRuntimePort("portus.terminal");
     let settled = false;
+    const timer = globalThis.setTimeout(() => {
+      fail(new Error(`Terminal profile request timed out after ${TERMINAL_UI_REQUEST_TIMEOUT_MS}ms.`));
+    }, TERMINAL_UI_REQUEST_TIMEOUT_MS);
     const finish = (profiles: TerminalProfile[]) => {
       if (settled) return;
       settled = true;
+      globalThis.clearTimeout(timer);
       port.disconnect();
       resolve(profiles);
     };
-    const fail = (error: Error) => {
+    function fail(error: Error): void {
       if (settled) return;
       settled = true;
+      globalThis.clearTimeout(timer);
       port.disconnect();
       reject(error);
-    };
+    }
 
     port.onMessage.addListener((input: unknown) => {
       if (!isRecord(input) || input.requestId !== requestId || typeof input.type !== "string") return;
@@ -1244,11 +1251,13 @@ function TerminalPanel({
   disabled,
   onDiagnostic,
   onError,
+  terminalNativeHostState,
   terminalPreferences
 }: {
   disabled: boolean;
   onDiagnostic(message: string): void;
   onError(error: unknown): void;
+  terminalNativeHostState: PortusExtensionStatus["terminalNativeHostState"];
   terminalPreferences: TerminalSettings | null;
 }): React.JSX.Element {
   const [settings, setSettings] = React.useState<TerminalSettings>(() => TerminalSettingsSchema.parse({}));
@@ -1258,9 +1267,13 @@ function TerminalPanel({
   const [placeholder, setPlaceholder] = React.useState("Terminal is starting.");
   const [terminalState, setTerminalState] = React.useState("Checking");
   const [optionsOpen, setOptionsOpen] = React.useState(false);
+  const [restartConfirmationOpen, setRestartConfirmationOpen] = React.useState(false);
+  const [restartingBackend, setRestartingBackend] = React.useState(false);
   const portRef = React.useRef<RuntimePort | null>(null);
-  const pendingRef = React.useRef(new Map<string, { resolve: (message: TerminalServerMessage) => void; reject: (error: Error) => void }>());
+  const pendingRef = React.useRef(new Map<string, { resolve: (message: TerminalServerMessage) => void; reject: (error: Error) => void; timer: ReturnType<typeof globalThis.setTimeout> }>());
   const requestCounterRef = React.useRef(0);
+  const unresponsiveRef = React.useRef(false);
+  const reconcilingRef = React.useRef(false);
   const termsRef = React.useRef(new Map<string, { term: XTerm; fit: FitAddon; element: HTMLDivElement }>());
   const surfaceRef = React.useRef<HTMLDivElement | null>(null);
   const syncedSettingsKeyRef = React.useRef<string | null>(null);
@@ -1309,6 +1322,17 @@ function TerminalPanel({
   }, [activeTerminalId, settings.enabled]);
 
   React.useEffect(() => {
+    if (terminalNativeHostState === "unresponsive") {
+      markTerminalUnresponsive("Terminal backend is unresponsive. Existing terminal sessions were preserved.");
+      return;
+    }
+    if (terminalNativeHostState === "connected" && unresponsiveRef.current) {
+      void reconcileRecoveredTerminal();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [terminalNativeHostState]);
+
+  React.useEffect(() => {
     for (const entry of termsRef.current.values()) {
       entry.term.options.fontSize = settings.fontSize;
       entry.fit.fit();
@@ -1343,12 +1367,14 @@ function TerminalPanel({
       await ensurePort();
       await syncSettingsIfNeeded(nextSettings);
       const nextSessions = await refreshSessions();
-      void loadProfiles(nextSettings);
+      void loadProfiles(nextSettings).catch(onError);
       onDiagnostic("");
       if (nextSessions.length === 0) await createSession({ enabled: nextSettings.enabled, reuseExisting: true });
       else activateSession(activeTerminalId ?? nextSessions[0]?.terminalId ?? null);
     } catch (error) {
-      showPlaceholder(error instanceof Error ? error.message : "Terminal backend is unavailable.", "Unavailable");
+      if (!unresponsiveRef.current) {
+        showPlaceholder(error instanceof Error ? error.message : "Terminal backend is unavailable.", "Unavailable");
+      }
     }
   }
 
@@ -1359,23 +1385,62 @@ function TerminalPanel({
     syncedSettingsKeyRef.current = settingsKey;
   }
 
+  function rejectPendingUiRequests(error: Error): void {
+    for (const pending of pendingRef.current.values()) {
+      globalThis.clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    pendingRef.current.clear();
+  }
+
+  function markTerminalUnresponsive(message: string): void {
+    unresponsiveRef.current = true;
+    setTerminalState("Unresponsive");
+    if (termsRef.current.size === 0) setPlaceholder(message);
+    onDiagnostic(message);
+  }
+
+  async function reconcileRecoveredTerminal(): Promise<void> {
+    if (reconcilingRef.current || !portRef.current) return;
+    reconcilingRef.current = true;
+    unresponsiveRef.current = false;
+    setTerminalState("Checking");
+    try {
+      const message = await sendTerminal({ type: "terminal.sessions.list", requestId: nextRequestId(), payload: {} });
+      if (message.type === "terminal.sessions") {
+        applySessions(message.payload.sessions, message.payload.activeTerminalId ?? null);
+        onDiagnostic("Terminal backend recovered.");
+      }
+    } catch (error) {
+      if (!unresponsiveRef.current) {
+        markTerminalUnresponsive(error instanceof Error ? error.message : "Terminal backend is unresponsive.");
+      }
+    } finally {
+      reconcilingRef.current = false;
+    }
+  }
+
   async function ensurePort(): Promise<void> {
     if (portRef.current) return;
     const port = connectRuntimePort("portus.terminal");
     portRef.current = port;
     port.onMessage.addListener(handleServerMessage);
     port.onDisconnect.addListener(() => {
+      if (portRef.current !== port) return;
       portRef.current = null;
-      for (const pending of pendingRef.current.values()) pending.reject(new Error("Terminal channel disconnected."));
-      pendingRef.current.clear();
+      rejectPendingUiRequests(new Error("Terminal channel disconnected."));
+      unresponsiveRef.current = false;
       showPlaceholder("Terminal backend disconnected.", "Disconnected");
     });
   }
 
   function disconnectPort(): void {
-    if (portRef.current) portRef.current.disconnect();
+    const port = portRef.current;
     portRef.current = null;
+    rejectPendingUiRequests(new Error("Terminal channel disconnected."));
+    if (port) port.disconnect();
     syncedSettingsKeyRef.current = null;
+    unresponsiveRef.current = false;
     setSessions([]);
     setActiveTerminalId(null);
   }
@@ -1466,7 +1531,7 @@ function TerminalPanel({
       setTerminalState("Ready");
       onDiagnostic("");
     } catch (error) {
-      setTerminalState("Ready");
+      if (!unresponsiveRef.current) setTerminalState("Ready");
       throw error;
     }
   }
@@ -1495,7 +1560,7 @@ function TerminalPanel({
     term.loadAddon(fit);
     term.loadAddon(new WebLinksAddon());
     term.onData((data) => {
-      if (!portRef.current) return;
+      if (!portRef.current || unresponsiveRef.current) return;
       portRef.current.postMessage({ type: "terminal.session.input", terminalId, payload: { data } } satisfies TerminalClientMessage);
     });
     term.open(element);
@@ -1507,29 +1572,68 @@ function TerminalPanel({
   function handleServerMessage(input: unknown): void {
     if (!isRecord(input) || typeof input.type !== "string") return;
     const message = input as TerminalServerMessage;
-    if (message.requestId) {
-      const pending = pendingRef.current.get(message.requestId);
-      if (pending) {
-        pendingRef.current.delete(message.requestId);
-        if (message.type === "terminal.session.error") pending.reject(new Error(message.payload.message));
-        else pending.resolve(message);
-        if (message.type === "terminal.session.error") return;
+    const timeoutError = message.type === "terminal.session.error" && message.payload.code === "COMMAND_TIMEOUT";
+    const pending = message.requestId ? pendingRef.current.get(message.requestId) : undefined;
+    if (pending && message.requestId) {
+      pendingRef.current.delete(message.requestId);
+      globalThis.clearTimeout(pending.timer);
+    }
+    if (timeoutError) {
+      if (pending) pending.reject(new Error(message.payload.message));
+      markTerminalUnresponsive(message.payload.message);
+      return;
+    }
+
+    const recovering = unresponsiveRef.current;
+    if (pending) {
+      if (message.type === "terminal.session.error") pending.reject(new Error(message.payload.message));
+      else pending.resolve(message);
+      if (message.type === "terminal.session.error") {
+        if (recovering) void reconcileRecoveredTerminal();
+        return;
+      }
+    }
+
+    if (recovering) {
+      if (message.type === "terminal.sessions") {
+        unresponsiveRef.current = false;
+      } else {
+        void reconcileRecoveredTerminal();
       }
     }
     if (message.type === "terminal.session.output" && message.terminalId) ensureTerm(message.terminalId).term.write(message.payload.data);
     if (message.type === "terminal.session.exit" && message.terminalId) {
       setSessions((current) => current.map((session) => session.terminalId === message.terminalId ? { ...session, status: "exited", exitCode: message.payload.exitCode } : session));
     }
-    if (message.type === "terminal.sessions") applySessions(message.payload.sessions, message.payload.activeTerminalId ?? null);
+    if (message.type === "terminal.sessions") {
+      applySessions(message.payload.sessions, message.payload.activeTerminalId ?? null);
+      if (recovering) onDiagnostic("Terminal backend recovered.");
+    }
     if (message.type === "terminal.session.error") showPlaceholder(message.payload.message, "Unavailable");
   }
 
   function sendTerminal(message: TerminalClientMessage): Promise<TerminalServerMessage> {
     return new Promise((resolve, reject) => {
-      if (!portRef.current) return reject(new Error("Terminal channel is not connected."));
+      const port = portRef.current;
+      if (!port) return reject(new Error("Terminal channel is not connected."));
       if (!message.requestId) return reject(new Error("Terminal requestId is required."));
-      pendingRef.current.set(message.requestId, { resolve, reject });
-      portRef.current.postMessage(message);
+      const requestId = message.requestId;
+      const timer = globalThis.setTimeout(() => {
+        const pending = pendingRef.current.get(requestId);
+        if (!pending) return;
+        pendingRef.current.delete(requestId);
+        const error = new Error(`Terminal UI request timed out after ${TERMINAL_UI_REQUEST_TIMEOUT_MS}ms.`);
+        markTerminalUnresponsive(error.message);
+        pending.reject(error);
+      }, TERMINAL_UI_REQUEST_TIMEOUT_MS);
+      pendingRef.current.set(requestId, { resolve, reject, timer });
+      try {
+        port.postMessage(message);
+      } catch (error) {
+        pendingRef.current.delete(requestId);
+        globalThis.clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error("Terminal channel send failed."));
+      }
     });
   }
 
@@ -1552,7 +1656,7 @@ function TerminalPanel({
 
   function resizeActive(): void {
     const active = activeTerminalId ? termsRef.current.get(activeTerminalId) : undefined;
-    if (!active || !portRef.current || !activeTerminalId) return;
+    if (!active || !portRef.current || !activeTerminalId || unresponsiveRef.current) return;
     const size = measureSize();
     portRef.current.postMessage({ type: "terminal.session.resize", terminalId: activeTerminalId, payload: size } satisfies TerminalClientMessage);
   }
@@ -1575,6 +1679,41 @@ function TerminalPanel({
     return "treq_sidepanel_" + requestCounterRef.current;
   }
 
+  function resetTerminalUiForRestart(): void {
+    rejectPendingUiRequests(new Error("Terminal backend restart requested."));
+    for (const entry of termsRef.current.values()) entry.term.dispose();
+    termsRef.current.clear();
+    setSessions([]);
+    setActiveTerminalId(null);
+    setProfiles([]);
+    profilesCacheKeyRef.current = null;
+    syncedSettingsKeyRef.current = null;
+    unresponsiveRef.current = false;
+    setPlaceholder("Terminal backend is restarting.");
+    setTerminalState("Checking");
+  }
+
+  async function restartTerminalBackend(): Promise<void> {
+    setRestartConfirmationOpen(false);
+    setRestartingBackend(true);
+    resetTerminalUiForRestart();
+    try {
+      const response = await sendRuntimeMessage({ type: "portus.terminal.restart" });
+      if (response.result.status?.terminalNativeHostState !== "connected") {
+        throw new Error("Terminal backend did not reconnect after restart.");
+      }
+      await syncTerminal(settings);
+      onDiagnostic("Terminal backend restarted.");
+    } catch (error) {
+      showPlaceholder(error instanceof Error ? error.message : "Terminal backend restart failed.", "Unavailable");
+      onError(error);
+    } finally {
+      setRestartingBackend(false);
+    }
+  }
+
+  const terminalControlsBlocked = terminalState === "Switching" || terminalState === "Unresponsive" || restartingBackend;
+
   return (
     <Tabs value={activeTerminalId || ""} onValueChange={setActiveTerminalId} className="grid h-full min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden">
       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1">
@@ -1593,6 +1732,7 @@ function TerminalPanel({
                   className="ml-1.5 inline-flex size-5 shrink-0 items-center justify-center rounded-[var(--radius-sm)] hover:bg-background/50"
                   onClick={(event) => {
                     event.stopPropagation();
+                    if (terminalControlsBlocked) return;
                     void closeSessionById(session.terminalId).catch(onError);
                   }}
                   role="button"
@@ -1608,7 +1748,7 @@ function TerminalPanel({
         <div className="flex items-center gap-1">
           <Tooltip>
             <TooltipTrigger asChild>
-              <Button aria-label="New Terminal Tab" disabled={disabled || !settings.enabled || terminalState === "Switching"} onClick={() => void createSession().catch(onError)} size="icon" type="button" variant="ghost">
+              <Button aria-label="New Terminal Tab" disabled={disabled || !settings.enabled || terminalControlsBlocked} onClick={() => void createSession().catch(onError)} size="icon" type="button" variant="ghost">
                 <PlusIcon aria-hidden="true" />
               </Button>
             </TooltipTrigger>
@@ -1621,7 +1761,7 @@ function TerminalPanel({
                   aria-expanded={optionsOpen}
                   aria-haspopup="menu"
                   aria-label="Terminal Options"
-                  disabled={disabled || !settings.enabled || terminalState === "Switching"}
+                  disabled={disabled || !settings.enabled || terminalControlsBlocked}
                   onClick={() => setOptionsOpen((current) => !current)}
                   size="icon"
                   type="button"
@@ -1638,7 +1778,7 @@ function TerminalPanel({
                 {(profiles.length === 0 ? [{ profileId: settings.defaultProfileId, label: settings.defaultProfileId }] : profiles).map((profile) => (
                   <button
                     className={`rounded-[var(--radius-sm)] px-2 py-1.5 text-left text-sm hover:bg-accent hover:text-accent-foreground ${profile.profileId === settings.defaultProfileId ? "bg-accent text-accent-foreground" : ""}`}
-                    disabled={terminalState === "Switching"}
+                    disabled={terminalControlsBlocked}
                     key={profile.profileId}
                     onClick={() => {
                       void replaceActiveSessionProfile(profile.profileId).catch(onError);
@@ -1670,17 +1810,34 @@ function TerminalPanel({
       </div>
       <div className="flex min-h-[var(--portus-terminal-footer-height)] items-center justify-between gap-[var(--portus-subsection-gap)] text-xs text-muted-foreground">
         <span>Terminal</span>
-        {terminalState === "Ready" ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Badge className="bg-transparent px-0 font-bold text-brand shadow-none hover:bg-transparent">Ready</Badge>
-            </TooltipTrigger>
-            <TooltipContent>Terminal is ready for input</TooltipContent>
-          </Tooltip>
-        ) : (
-          <StatusBadge label={terminalState} state={terminalState.toLowerCase()} />
-        )}
+        <div className="flex items-center gap-2">
+          {terminalState === "Unresponsive" ? (
+            <Button disabled={disabled || restartingBackend} onClick={() => setRestartConfirmationOpen(true)} size="sm" type="button" variant="destructive">
+              Restart Backend
+            </Button>
+          ) : null}
+          {terminalState === "Ready" ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Badge className="bg-transparent px-0 font-bold text-brand shadow-none hover:bg-transparent">Ready</Badge>
+              </TooltipTrigger>
+              <TooltipContent>Terminal is ready for input</TooltipContent>
+            </Tooltip>
+          ) : (
+            <StatusBadge label={terminalState} state={terminalState.toLowerCase()} />
+          )}
+        </div>
       </div>
+      {restartConfirmationOpen ? (
+        <ConfirmDialog
+          busy={restartingBackend}
+          confirmLabel="Restart Backend"
+          description="Restarting the terminal backend closes all terminal sessions. Use this only if the preserved backend does not recover."
+          onCancel={() => setRestartConfirmationOpen(false)}
+          onConfirm={() => void restartTerminalBackend()}
+          title="Restart Terminal Backend?"
+        />
+      ) : null}
     </Tabs>
   );
 

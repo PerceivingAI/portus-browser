@@ -83,7 +83,7 @@ import { buildSnapshot, createSnapshotId, filterSnapshot, type SnapshotElementCa
 
 export type BridgeState = "disconnected" | "connecting" | "connected" | "disconnecting" | "error";
 export type NativeHostState = "disconnected" | "connecting" | "connected" | "error";
-export type TerminalNativeHostState = NativeHostState;
+export type TerminalNativeHostState = NativeHostState | "unresponsive";
 export type BrokerState = "unknown" | "connected" | "unavailable" | "error";
 
 export interface PortusNativePort {
@@ -245,6 +245,7 @@ export interface PortusExtensionBridgeOptions {
   setTimeout?: (callback: () => void, timeoutMs: number) => unknown;
   clearTimeout?: (handle: unknown) => void;
   nativeRequestTimeoutMs?: number;
+  terminalRequestTimeoutMs?: number;
 }
 
 export interface PortusExtensionStatus {
@@ -271,7 +272,8 @@ interface PendingRequest {
 
 interface PendingTerminalRequest {
   resolve: (message: TerminalServerMessage) => void;
-  reject: (error: Error) => void;
+  reject: (error: Error | PortusError) => void;
+  timer?: unknown;
 }
 
 const POLICY_STORAGE_KEY = "portus.policyPreferences";
@@ -288,6 +290,7 @@ const DEFAULT_SETTINGS_PROFILE_CONTENT: SettingsProfileContent = SettingsProfile
   autoSave: true
 });
 const DEFAULT_NATIVE_REQUEST_TIMEOUT_MS = 15000;
+const DEFAULT_TERMINAL_REQUEST_TIMEOUT_MS = 15000;
 
 function createDefaultSettingsProfileState(): SettingsProfileState {
   return SettingsProfileStateSchema.parse({
@@ -436,6 +439,7 @@ export class PortusExtensionBridge {
   private readonly setRequestTimer: (callback: () => void, timeoutMs: number) => unknown;
   private readonly clearRequestTimer: (handle: unknown) => void;
   private readonly nativeRequestTimeoutMs: number;
+  private readonly terminalRequestTimeoutMs: number;
   private readonly pending = new Map<string, PendingRequest>();
   private readonly terminalPending = new Map<string, PendingTerminalRequest>();
   private readonly terminalRuntimePorts = new Set<PortusRuntimePort>();
@@ -481,6 +485,7 @@ export class PortusExtensionBridge {
     this.setRequestTimer = options.setTimeout ?? ((callback, timeoutMs) => globalThis.setTimeout(callback, timeoutMs));
     this.clearRequestTimer = options.clearTimeout ?? ((handle) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>));
     this.nativeRequestTimeoutMs = options.nativeRequestTimeoutMs ?? DEFAULT_NATIVE_REQUEST_TIMEOUT_MS;
+    this.terminalRequestTimeoutMs = options.terminalRequestTimeoutMs ?? DEFAULT_TERMINAL_REQUEST_TIMEOUT_MS;
     this.ready = this.restoreExtensionState();
     this.installTabLifecycleListeners();
     this.installNetworkListeners();
@@ -1906,6 +1911,8 @@ export class PortusExtensionBridge {
         return { terminal: await this.setTerminalPreferences(readRecord(message, "settings")) };
       case "portus.terminal.settings.reset":
         return { terminal: await this.restoreDefaultTerminalPreferences() };
+      case "portus.terminal.restart":
+        return { status: await this.restartTerminalTransport() };
       case "portus.ux.default-panel-view.set":
         return { ux: await this.setDefaultPanelView(SidePanelDefaultViewSchema.parse(readString(message, "view"))) };
       case "portus.ux.icon-click-behavior.set":
@@ -1924,7 +1931,9 @@ export class PortusExtensionBridge {
 
   async connectTerminalTransport(): Promise<TerminalNativeHostState> {
     await this.ready;
-    if (this.terminalNativeHostState === "connected") return this.terminalNativeHostState;
+    if (this.terminalPort && (this.terminalNativeHostState === "connected" || this.terminalNativeHostState === "unresponsive")) {
+      return this.terminalNativeHostState;
+    }
     if (this.terminalConnectPromise) return this.terminalConnectPromise;
 
     const connection = this.connectTerminalTransportOnce();
@@ -1973,7 +1982,21 @@ export class PortusExtensionBridge {
     this.terminalPort = undefined;
     if (port) port.disconnect();
     this.terminalNativeHostState = "disconnected";
+    void this.broadcastStatus();
     return this.terminalNativeHostState;
+  }
+
+  async restartTerminalTransport(): Promise<PortusExtensionStatus> {
+    await this.ready;
+    this.rejectTerminalPending(new Error("Terminal Native Host is restarting."));
+    const port = this.terminalPort;
+    this.terminalPort = undefined;
+    this.terminalNativeHostState = "disconnected";
+    if (port) port.disconnect();
+    void this.broadcastStatus();
+    if (this.terminalPreferences.enabled) await this.connectTerminalTransport();
+    void this.broadcastStatus();
+    return this.getStatus();
   }
 
   async sendTerminalClientMessage(message: TerminalClientMessage): Promise<TerminalServerMessage | null> {
@@ -1992,11 +2015,26 @@ export class PortusExtensionBridge {
       });
     }
     return new Promise((resolve, reject) => {
-      this.terminalPending.set(parsed.requestId!, { resolve, reject });
+      const requestId = parsed.requestId!;
+      const timer = this.setRequestTimer(() => {
+        const pending = this.terminalPending.get(requestId);
+        if (!pending) return;
+        this.terminalPending.delete(requestId);
+        this.terminalNativeHostState = "unresponsive";
+        pending.reject(createPortusError({
+          code: "COMMAND_TIMEOUT",
+          message: `Terminal request timed out after ${this.terminalRequestTimeoutMs}ms.`,
+          retryable: true,
+          details: { requestId, type: parsed.type, timeoutMs: this.terminalRequestTimeoutMs }
+        }));
+        void this.broadcastStatus();
+      }, this.terminalRequestTimeoutMs);
+      this.terminalPending.set(requestId, { resolve, reject, timer });
       try {
         port.postMessage(parsed);
       } catch (error) {
-        this.terminalPending.delete(parsed.requestId!);
+        this.terminalPending.delete(requestId);
+        this.clearRequestTimer(timer);
         reject(error instanceof Error ? error : new Error("Terminal Native Host transport failed."));
       }
     });
@@ -2023,11 +2061,16 @@ export class PortusExtensionBridge {
         return;
       }
       void this.sendTerminalClientMessage(parsed.data).catch((error) => {
+        const normalized = normalizeExtensionError(error);
         port.postMessage({
           type: "terminal.session.error",
           requestId: parsed.data.requestId,
           terminalId: "terminalId" in parsed.data ? parsed.data.terminalId : undefined,
-          payload: { code: "TERMINAL_UNAVAILABLE", message: error instanceof Error ? error.message : "Terminal transport failed.", retryable: true }
+          payload: {
+            code: normalized.code === "COMMAND_TIMEOUT" ? "COMMAND_TIMEOUT" : normalized.code === "INVALID_MESSAGE" ? "INVALID_MESSAGE" : "TERMINAL_UNAVAILABLE",
+            message: normalized.message,
+            retryable: normalized.retryable
+          }
         });
       });
     });
@@ -2042,10 +2085,15 @@ export class PortusExtensionBridge {
     const parsed = TerminalServerMessageSchema.safeParse(input);
     if (!parsed.success) return;
     const message = parsed.data;
+    if (this.terminalNativeHostState === "unresponsive") {
+      this.terminalNativeHostState = "connected";
+      void this.broadcastStatus();
+    }
     if (message.requestId) {
       const pending = this.terminalPending.get(message.requestId);
       if (pending) {
         this.terminalPending.delete(message.requestId);
+        if (pending.timer !== undefined) this.clearRequestTimer(pending.timer);
         pending.resolve(message);
       }
     }
@@ -2057,10 +2105,14 @@ export class PortusExtensionBridge {
     this.terminalPort = undefined;
     this.terminalNativeHostState = "disconnected";
     this.rejectTerminalPending(new Error("Terminal Native Host disconnected."));
+    void this.broadcastStatus();
   }
 
   private rejectTerminalPending(error: Error): void {
-    for (const pending of this.terminalPending.values()) pending.reject(error);
+    for (const pending of this.terminalPending.values()) {
+      if (pending.timer !== undefined) this.clearRequestTimer(pending.timer);
+      pending.reject(error);
+    }
     this.terminalPending.clear();
   }
 

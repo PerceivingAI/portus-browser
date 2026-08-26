@@ -156,6 +156,12 @@ test("server messages validate output, sessions, and errors", () => {
     terminalId: "term_abc123",
     payload: { code: "TERMINAL_UNAVAILABLE", message: "Terminal backend is unavailable.", retryable: true }
   }).success, true);
+
+  assert.equal(TerminalServerMessageSchema.safeParse({
+    type: "terminal.session.error",
+    requestId: "treq_timeout1",
+    payload: { code: "COMMAND_TIMEOUT", message: "Terminal request timed out.", retryable: true }
+  }).success, true);
 });
 
 test("terminal output chunks are bounded", () => {
