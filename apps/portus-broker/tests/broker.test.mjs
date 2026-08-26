@@ -1148,6 +1148,150 @@ test("persists Broker-owned settings profile catalog", async () => {
   assert.ok(state.result.settingsProfiles.profiles.some((profile) => profile.name === "Profile_2"));
 });
 
+test("missing settings profile catalog initializes from the first browser registration", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "portus-settings-profiles-missing-"));
+  const settingsProfilesPath = join(directory, "settings-profiles.json");
+  const broker = createRealBroker({ brokerToken: TEST_BROKER_TOKEN, settingsProfilesPath, now: fixedClock() });
+
+  const registered = await broker.handleRequest(request("req_register_profiles", "bridge.register", registrationWithCommandPolicy({})), {
+    bridgeClient: profileBridgeClient()
+  });
+
+  assert.equal(registered.ok, true);
+  const stored = JSON.parse(await readFile(settingsProfilesPath, "utf8"));
+  const profile = stored.profiles.find((candidate) => candidate.name === "Profile_1");
+  assert.equal(profile.content.policyPreferences.policyMode, "blocklist");
+  assert.equal(profile.content.policyPreferences.sessionStepRetentionLimit, 10);
+});
+
+test("corrupt settings profile catalog is preserved and blocks persisted profile mutations", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "portus-settings-profiles-corrupt-"));
+  const settingsProfilesPath = join(directory, "settings-profiles.json");
+  const original = "{ this is not valid json\n";
+  await writeFile(settingsProfilesPath, original, "utf8");
+  const broker = createRealBroker({ brokerToken: TEST_BROKER_TOKEN, settingsProfilesPath, now: fixedClock() });
+
+  const state = await broker.handleRequest(request("req_profile_state", "settings.profile.state", { browserName: "Chrome" }));
+  assert.equal(state.ok, true);
+  assert.equal(state.result.settingsProfiles.activeProfileName, "Profile_1");
+
+  const exported = await broker.handleRequest(request("req_export_profiles", "settings.profiles.export"));
+  assert.equal(exported.ok, false);
+  assert.equal(exported.error.code, "CONFIG_INVALID");
+  assert.match(exported.error.message, /original file has been preserved/i);
+
+  const registered = await broker.handleRequest(request("req_register_profiles", "bridge.register", registrationWithCommandPolicy({})), {
+    bridgeClient: profileBridgeClient()
+  });
+  assert.equal(registered.ok, true);
+  assert.equal(await readFile(settingsProfilesPath, "utf8"), original);
+
+  const content = state.result.settingsProfiles.content;
+  const mutations = [
+    ["settings.profile.create", { browserName: "Chrome" }],
+    ["settings.profile.select", { browserName: "Chrome", profileId: "profile_1" }],
+    ["settings.profile.save", { browserName: "Chrome", profileId: "profile_1", content }],
+    ["settings.profile.reset", { browserName: "Chrome", profileId: "profile_1" }],
+    ["settings.profile.rename", { browserName: "Chrome", profileId: "profile_1", name: "Recovered_Profile" }],
+    ["settings.profile.delete", { browserName: "Chrome", profileId: "profile_1" }]
+  ];
+
+  for (const [type, payload] of mutations) {
+    const response = await broker.handleRequest(request(`req_${type.replace(/[^a-z]+/gi, "_")}`, type, payload));
+    assert.equal(response.ok, false, type);
+    assert.equal(response.error.code, "CONFIG_INVALID", type);
+    assert.match(response.error.message, /original file has been preserved/i, type);
+    assert.equal(await readFile(settingsProfilesPath, "utf8"), original, type);
+  }
+});
+
+test("semantic settings profile corruption is preserved instead of silently resetting", async () => {
+  const seed = createBroker({ brokerToken: TEST_BROKER_TOKEN, now: fixedClock() });
+  const exported = await seed.handleRequest(request("req_export_seed", "settings.profiles.export"));
+  const validCatalog = exported.result.catalog;
+  const corruptions = [
+    {
+      name: "duplicate profile id",
+      mutate(catalog) {
+        catalog.profiles[1].profileId = catalog.profiles[0].profileId;
+      }
+    },
+    {
+      name: "missing active profile",
+      mutate(catalog) {
+        catalog.activeProfileByBrowserType.Chrome = "profile_missing";
+      }
+    }
+  ];
+
+  for (const corruption of corruptions) {
+    const directory = await mkdtemp(join(tmpdir(), "portus-settings-profiles-semantic-corrupt-"));
+    const settingsProfilesPath = join(directory, "settings-profiles.json");
+    const catalog = JSON.parse(JSON.stringify(validCatalog));
+    corruption.mutate(catalog);
+    const original = `${JSON.stringify(catalog, null, 2)}\n`;
+    await writeFile(settingsProfilesPath, original, "utf8");
+
+    const broker = createRealBroker({ brokerToken: TEST_BROKER_TOKEN, settingsProfilesPath, now: fixedClock() });
+    const response = await broker.handleRequest(request("req_export_corrupt", "settings.profiles.export"));
+    assert.equal(response.ok, false, corruption.name);
+    assert.equal(response.error.code, "CONFIG_INVALID", corruption.name);
+    assert.equal(await readFile(settingsProfilesPath, "utf8"), original, corruption.name);
+  }
+});
+
+test("valid settings profile import explicitly recovers corrupt persistence", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "portus-settings-profiles-recovery-"));
+  const settingsProfilesPath = join(directory, "settings-profiles.json");
+  const original = "{ broken catalog\n";
+  await writeFile(settingsProfilesPath, original, "utf8");
+  const broker = createRealBroker({ brokerToken: TEST_BROKER_TOKEN, settingsProfilesPath, now: fixedClock() });
+
+  const seed = createBroker({ brokerToken: TEST_BROKER_TOKEN, now: fixedClock() });
+  const seedExport = await seed.handleRequest(request("req_export_seed", "settings.profiles.export"));
+  const catalog = JSON.parse(JSON.stringify(seedExport.result.catalog));
+
+  const failedImport = await broker.handleRequest(request("req_failed_import", "settings.profiles.import", {
+    catalog: { ...catalog, profiles: [] }
+  }));
+  assert.equal(failedImport.ok, false);
+  assert.equal(await readFile(settingsProfilesPath, "utf8"), original);
+
+  const recovered = await broker.handleRequest(request("req_recover_import", "settings.profiles.import", { catalog }));
+  assert.equal(recovered.ok, true);
+  assert.deepEqual(JSON.parse(await readFile(settingsProfilesPath, "utf8")), recovered.result.catalog);
+
+  const created = await broker.handleRequest(request("req_create_after_recovery", "settings.profile.create", { browserName: "Chrome" }));
+  assert.equal(created.ok, true);
+  assert.equal(created.result.settingsProfiles.activeProfileName, "Profile_2");
+  const storedAfterCreate = JSON.parse(await readFile(settingsProfilesPath, "utf8"));
+  assert.ok(storedAfterCreate.profiles.some((profile) => profile.name === "Profile_2"));
+});
+
+test("atomic settings profile persistence failure preserves disk and in-memory state", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "portus-settings-profiles-atomic-failure-"));
+  const settingsProfilesPath = join(directory, "settings-profiles.json");
+  const seed = createBroker({ brokerToken: TEST_BROKER_TOKEN, now: fixedClock() });
+  const seedExport = await seed.handleRequest(request("req_export_seed", "settings.profiles.export"));
+  const original = `${JSON.stringify(seedExport.result.catalog, null, 2)}\n`;
+  await writeFile(settingsProfilesPath, original, "utf8");
+
+  const broker = createRealBroker({ brokerToken: TEST_BROKER_TOKEN, settingsProfilesPath, now: fixedClock() });
+  const occupiedTemporaryPath = `${settingsProfilesPath}.tmp-${process.pid}-1`;
+  await writeFile(occupiedTemporaryPath, "occupied", "utf8");
+
+  const created = await broker.handleRequest(request("req_create_profile", "settings.profile.create", { browserName: "Chrome" }));
+  assert.equal(created.ok, false);
+  assert.equal(created.error.code, "CONFIG_INVALID");
+  assert.match(created.error.message, /persisted atomically/i);
+  assert.equal(await readFile(settingsProfilesPath, "utf8"), original);
+  assert.equal(await readFile(occupiedTemporaryPath, "utf8"), "occupied");
+
+  const state = await broker.handleRequest(request("req_profile_state", "settings.profile.state", { browserName: "Chrome" }));
+  assert.equal(state.ok, true);
+  assert.equal(state.result.settingsProfiles.profiles.some((profile) => profile.name === "Profile_2"), false);
+});
+
 test("migrates persisted invalid terminal profile ids without resetting profile content", async () => {
   const directory = await mkdtemp(join(tmpdir(), "portus-settings-profiles-terminal-legacy-"));
   const settingsProfilesPath = join(directory, "settings-profiles.json");

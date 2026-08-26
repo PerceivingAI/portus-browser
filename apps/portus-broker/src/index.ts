@@ -2,7 +2,7 @@
 
 import { fileURLToPath } from "node:url";
 import { timingSafeEqual } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { dirname } from "node:path";
 import { z } from "zod";
@@ -262,6 +262,15 @@ interface BrowserSessionRecord {
   sessionSteps: SessionStep[];
 }
 
+type SettingsProfilePersistenceState = "disabled" | "missing" | "loaded" | "corrupt";
+type SettingsProfileBootstrapState = "pending" | "complete";
+
+interface SettingsProfileCatalogLoadResult {
+  catalog: SettingsProfileCatalog;
+  state: SettingsProfilePersistenceState;
+  error: PortusError | null;
+}
+
 export class BrokerCore {
   readonly config: PortusConfig;
   readonly endpoint: BrokerEndpoint;
@@ -275,11 +284,14 @@ export class BrokerCore {
   private readonly settingsProfilesPath: string | null;
   private readonly sessions = new Map<string, BrowserSessionRecord>();
   private settingsProfileCatalog: SettingsProfileCatalog;
-  private settingsProfileCatalogLoadedFromDisk = false;
+  private settingsProfilePersistenceState: SettingsProfilePersistenceState;
+  private settingsProfilePersistenceError: PortusError | null;
+  private settingsProfileBootstrapState: SettingsProfileBootstrapState;
   private readonly now: () => Date;
   private nextBrowserNumber = 1;
   private nextCommandNumber = 1;
   private nextSessionStepNumber = 1;
+  private nextSettingsProfileWriteNumber = 1;
 
   constructor(options: BrokerCoreOptions = {}) {
     this.config = PortusConfigSchema.parse(options.config ?? DEFAULT_PORTUS_CONFIG);
@@ -289,7 +301,13 @@ export class BrokerCore {
     this.now = options.now ?? (() => new Date());
     this.recipeLibraryDirectory = options.recipeLibraryDirectory;
     this.settingsProfilesPath = options.settingsProfilesPath === undefined ? getSettingsProfilesPath() : options.settingsProfilesPath;
-    this.settingsProfileCatalog = this.loadSettingsProfileCatalog();
+    const settingsProfileLoad = this.loadSettingsProfileCatalog();
+    this.settingsProfileCatalog = settingsProfileLoad.catalog;
+    this.settingsProfilePersistenceState = settingsProfileLoad.state;
+    this.settingsProfilePersistenceError = settingsProfileLoad.error;
+    this.settingsProfileBootstrapState = settingsProfileLoad.state === "disabled" || settingsProfileLoad.state === "missing"
+      ? "pending"
+      : "complete";
     for (const recipeInput of options.recipes ?? []) {
       const recipeRecord = RecipeRecordSchema.parse(recipeInput);
       this.recipeRecords.set(recipeRecord.id, recipeRecord);
@@ -435,6 +453,7 @@ export class BrokerCore {
       case "settings.profile.delete":
         return await this.deleteSettingsProfile(request);
       case "settings.profiles.export":
+        this.requireHealthySettingsProfileCatalog();
         return { catalog: this.settingsProfileCatalog };
       case "settings.profiles.import":
         return await this.importSettingsProfiles(request);
@@ -639,15 +658,16 @@ export class BrokerCore {
 
   private async selectSettingsProfile(request: RequestEnvelope): Promise<Record<string, unknown>> {
     const payload = SettingsProfileSelectPayloadSchema.parse(request.payload);
+    this.requireSettingsProfilePersistenceWritable();
     this.requireSettingsProfile(payload.profileId);
-    this.settingsProfileCatalog = SettingsProfileCatalogSchema.parse({
+    const catalog = SettingsProfileCatalogSchema.parse({
       ...this.settingsProfileCatalog,
       activeProfileByBrowserType: {
         ...this.settingsProfileCatalog.activeProfileByBrowserType,
         [payload.browserName]: payload.profileId
       }
     });
-    this.persistSettingsProfileCatalog();
+    this.commitSettingsProfileCatalog(catalog);
     await this.alignBrowserTypeToActiveProfile(payload.browserName, "settings.profile.apply-selection");
     return {
       settingsProfiles: this.createSettingsProfileState(payload.browserName)
@@ -656,6 +676,7 @@ export class BrokerCore {
 
   private async createSettingsProfile(request: RequestEnvelope): Promise<Record<string, unknown>> {
     const payload = SettingsProfileCreatePayloadSchema.parse(request.payload);
+    this.requireSettingsProfilePersistenceWritable();
     const customCount = this.countCustomSettingsProfiles();
     if (customCount >= this.settingsProfileCatalog.maxCustomProfiles) {
       throw brokerError("CONFIG_INVALID", "The maximum number of settings profiles has been reached.", false);
@@ -671,7 +692,7 @@ export class BrokerCore {
       createdAt: now,
       updatedAt: now
     });
-    this.settingsProfileCatalog = SettingsProfileCatalogSchema.parse({
+    const catalog = SettingsProfileCatalogSchema.parse({
       ...this.settingsProfileCatalog,
       profiles: [...this.settingsProfileCatalog.profiles, profile],
       activeProfileByBrowserType: {
@@ -679,7 +700,7 @@ export class BrokerCore {
         [payload.browserName]: profile.profileId
       }
     });
-    this.persistSettingsProfileCatalog();
+    this.commitSettingsProfileCatalog(catalog);
     await this.alignBrowserTypeToActiveProfile(payload.browserName, "settings.profile.apply-selection");
     return {
       settingsProfiles: this.createSettingsProfileState(payload.browserName)
@@ -688,12 +709,13 @@ export class BrokerCore {
 
   private async saveSettingsProfile(request: RequestEnvelope): Promise<Record<string, unknown>> {
     const payload = SettingsProfileSavePayloadSchema.parse(request.payload);
+    this.requireSettingsProfilePersistenceWritable();
     const profile = this.requireSettingsProfile(payload.profileId);
     if (profile.readOnly) {
       throw brokerError("CONFIG_INVALID", `${profile.name} is read-only.`, false);
     }
-    this.updateSettingsProfileContent(payload.profileId, payload.content);
-    this.persistSettingsProfileCatalog();
+    const catalog = this.withUpdatedSettingsProfileContent(this.settingsProfileCatalog, payload.profileId, payload.content);
+    this.commitSettingsProfileCatalog(catalog);
     await this.alignProfileContent(payload.profileId, "settings.profile.apply-saved-content");
     return {
       settingsProfiles: this.createSettingsProfileState(payload.browserName)
@@ -702,14 +724,15 @@ export class BrokerCore {
 
   private async resetSettingsProfile(request: RequestEnvelope): Promise<Record<string, unknown>> {
     const payload = SettingsProfileSelectPayloadSchema.parse(request.payload);
+    this.requireSettingsProfilePersistenceWritable();
     const profile = this.requireSettingsProfile(payload.profileId);
     if (profile.readOnly) {
       return {
         settingsProfiles: this.createSettingsProfileState(payload.browserName)
       };
     }
-    this.updateSettingsProfileContent(payload.profileId, this.defaultSettingsProfileContent());
-    this.persistSettingsProfileCatalog();
+    const catalog = this.withUpdatedSettingsProfileContent(this.settingsProfileCatalog, payload.profileId, this.defaultSettingsProfileContent());
+    this.commitSettingsProfileCatalog(catalog);
     await this.alignProfileContent(payload.profileId, "settings.profile.apply-saved-content");
     return {
       settingsProfiles: this.createSettingsProfileState(payload.browserName)
@@ -721,6 +744,7 @@ export class BrokerCore {
       ...request.payload,
       name: typeof request.payload.name === "string" ? request.payload.name.trim() : request.payload.name
     });
+    this.requireSettingsProfilePersistenceWritable();
     const profile = this.requireSettingsProfile(payload.profileId);
     if (profile.readOnly) {
       throw brokerError("CONFIG_INVALID", `${profile.name} is read-only.`, false);
@@ -731,8 +755,8 @@ export class BrokerCore {
     if (duplicate) {
       throw brokerError("CONFIG_INVALID", "Settings profile names must be unique.", false);
     }
-    this.updateSettingsProfileName(payload.profileId, payload.name);
-    this.persistSettingsProfileCatalog();
+    const catalog = this.withUpdatedSettingsProfileName(this.settingsProfileCatalog, payload.profileId, payload.name);
+    this.commitSettingsProfileCatalog(catalog);
     await this.alignSettingsProfileMetadata();
     return {
       settingsProfiles: this.createSettingsProfileState(payload.browserName)
@@ -741,6 +765,7 @@ export class BrokerCore {
 
   private async deleteSettingsProfile(request: RequestEnvelope): Promise<Record<string, unknown>> {
     const payload = SettingsProfileSelectPayloadSchema.parse(request.payload);
+    this.requireSettingsProfilePersistenceWritable();
     const profile = this.requireSettingsProfile(payload.profileId);
     if (profile.readOnly) {
       throw brokerError("CONFIG_INVALID", `${profile.name} is read-only.`, false);
@@ -761,7 +786,7 @@ export class BrokerCore {
     }
 
     const fallbackProfileId = remainingCustomProfiles[0]!.profileId;
-    this.settingsProfileCatalog = SettingsProfileCatalogSchema.parse({
+    const catalog = SettingsProfileCatalogSchema.parse({
       ...this.settingsProfileCatalog,
       profiles: this.settingsProfileCatalog.profiles.filter((candidate) => candidate.profileId !== payload.profileId),
       activeProfileByBrowserType: Object.fromEntries(Object.entries(this.settingsProfileCatalog.activeProfileByBrowserType).map(([browserName, profileId]) => [
@@ -769,7 +794,7 @@ export class BrokerCore {
         profileId === payload.profileId ? fallbackProfileId : profileId
       ]))
     });
-    this.persistSettingsProfileCatalog();
+    this.commitSettingsProfileCatalog(catalog);
     await this.alignSettingsProfileCatalogAfterDelete(payload.profileId, activeBeforeByBrowserName);
     return {
       settingsProfiles: this.createSettingsProfileState(payload.browserName)
@@ -781,19 +806,17 @@ export class BrokerCore {
     const migrated = migrateLegacySettingsProfileCatalog(payload.catalog);
     const catalog = this.normalizeSettingsProfileCatalog(SettingsProfileCatalogSchema.parse(migrated));
     this.validateSettingsProfileCatalog(catalog);
-    this.settingsProfileCatalog = catalog;
-    this.persistSettingsProfileCatalog();
+    this.replaceSettingsProfileCatalog(catalog);
     await this.alignAllActiveSettingsProfiles();
     return { catalog: this.settingsProfileCatalog };
   }
 
   private maybeInitializeSettingsProfilesFromRegistration(content: SettingsProfileContent | undefined): void {
-    if (this.settingsProfileCatalogLoadedFromDisk || content === undefined) return;
+    if (this.settingsProfileBootstrapState !== "pending" || content === undefined) return;
     const initialProfile = this.initialCustomSettingsProfile();
     if (!initialProfile) return;
-    this.updateSettingsProfileContent(initialProfile.profileId, content);
-    this.persistSettingsProfileCatalog();
-    this.settingsProfileCatalogLoadedFromDisk = true;
+    const catalog = this.withUpdatedSettingsProfileContent(this.settingsProfileCatalog, initialProfile.profileId, content);
+    this.commitSettingsProfileCatalog(catalog);
   }
 
   private createSettingsProfileState(browserName: BrowserName): SettingsProfileState {
@@ -837,16 +860,20 @@ export class BrokerCore {
     return profile;
   }
 
-  private updateSettingsProfileContent(profileId: string, content: SettingsProfileContent): void {
+  private withUpdatedSettingsProfileContent(
+    catalog: SettingsProfileCatalog,
+    profileId: string,
+    content: SettingsProfileContent
+  ): SettingsProfileCatalog {
     const parsedContent = SettingsProfileContentSchema.parse({
       ...content,
       terminalPreferences: TerminalConfigSchema.parse(content.terminalPreferences)
     });
     let found = false;
     const now = this.now().toISOString();
-    this.settingsProfileCatalog = SettingsProfileCatalogSchema.parse({
-      ...this.settingsProfileCatalog,
-      profiles: this.settingsProfileCatalog.profiles.map((profile) => {
+    const updated = SettingsProfileCatalogSchema.parse({
+      ...catalog,
+      profiles: catalog.profiles.map((profile) => {
         if (profile.profileId !== profileId) return profile;
         found = true;
         return SettingsProfileSchema.parse({
@@ -857,14 +884,15 @@ export class BrokerCore {
       })
     });
     if (!found) throw brokerError("CONFIG_INVALID", "Settings profile was not found.", false);
+    return updated;
   }
 
-  private updateSettingsProfileName(profileId: string, name: string): void {
+  private withUpdatedSettingsProfileName(catalog: SettingsProfileCatalog, profileId: string, name: string): SettingsProfileCatalog {
     let found = false;
     const now = this.now().toISOString();
-    this.settingsProfileCatalog = SettingsProfileCatalogSchema.parse({
-      ...this.settingsProfileCatalog,
-      profiles: this.settingsProfileCatalog.profiles.map((profile) => {
+    const updated = SettingsProfileCatalogSchema.parse({
+      ...catalog,
+      profiles: catalog.profiles.map((profile) => {
         if (profile.profileId !== profileId) return profile;
         found = true;
         return SettingsProfileSchema.parse({
@@ -875,6 +903,7 @@ export class BrokerCore {
       })
     });
     if (!found) throw brokerError("CONFIG_INVALID", "Settings profile was not found.", false);
+    return updated;
   }
 
   private async alignBrowserTypeToActiveProfile(browserName: BrowserName, type: string): Promise<void> {
@@ -969,30 +998,124 @@ export class BrokerCore {
     }
   }
 
-  private loadSettingsProfileCatalog(): SettingsProfileCatalog {
-    if (this.settingsProfilesPath === null) return this.defaultSettingsProfileCatalog();
-    if (!existsSync(this.settingsProfilesPath)) return this.defaultSettingsProfileCatalog();
+  private loadSettingsProfileCatalog(): SettingsProfileCatalogLoadResult {
+    const fallback = this.defaultSettingsProfileCatalog();
+    if (this.settingsProfilesPath === null) {
+      return { catalog: fallback, state: "disabled", error: null };
+    }
+    if (!existsSync(this.settingsProfilesPath)) {
+      return { catalog: fallback, state: "missing", error: null };
+    }
 
+    let stage = "read";
     try {
       const raw = readFileSync(this.settingsProfilesPath, "utf8");
+      stage = "json";
       const input = JSON.parse(raw);
+      stage = "validation";
       const migrated = migrateLegacySettingsProfileCatalog(input);
       const parsed = this.normalizeSettingsProfileCatalog(SettingsProfileCatalogSchema.parse(migrated));
       this.validateSettingsProfileCatalog(parsed);
       if (migrated !== input) {
-        writeFileSync(this.settingsProfilesPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+        stage = "migration-write";
+        this.writeSettingsProfileCatalogAtomically(parsed);
       }
-      this.settingsProfileCatalogLoadedFromDisk = true;
-      return parsed;
-    } catch {
-      return this.defaultSettingsProfileCatalog();
+      return { catalog: parsed, state: "loaded", error: null };
+    } catch (error) {
+      return {
+        catalog: fallback,
+        state: "corrupt",
+        error: this.createSettingsProfileCatalogRecoveryError(stage, error)
+      };
     }
   }
 
-  private persistSettingsProfileCatalog(): void {
+  private requireHealthySettingsProfileCatalog(): void {
+    if (this.settingsProfilePersistenceState !== "corrupt") return;
+    throw this.settingsProfilePersistenceError ?? this.createSettingsProfileCatalogRecoveryError("validation");
+  }
+
+  private requireSettingsProfilePersistenceWritable(): void {
+    this.requireHealthySettingsProfileCatalog();
+  }
+
+  private commitSettingsProfileCatalog(catalog: SettingsProfileCatalog): void {
+    this.requireSettingsProfilePersistenceWritable();
+    if (this.settingsProfilesPath !== null) {
+      this.writeSettingsProfileCatalogAtomically(catalog);
+      this.settingsProfilePersistenceState = "loaded";
+    }
+    this.settingsProfileCatalog = catalog;
+    this.settingsProfilePersistenceError = null;
+    this.settingsProfileBootstrapState = "complete";
+  }
+
+  private replaceSettingsProfileCatalog(catalog: SettingsProfileCatalog): void {
+    if (this.settingsProfilesPath !== null) {
+      this.writeSettingsProfileCatalogAtomically(catalog);
+      this.settingsProfilePersistenceState = "loaded";
+    } else {
+      this.settingsProfilePersistenceState = "disabled";
+    }
+    this.settingsProfileCatalog = catalog;
+    this.settingsProfilePersistenceError = null;
+    this.settingsProfileBootstrapState = "complete";
+  }
+
+  private writeSettingsProfileCatalogAtomically(catalog: SettingsProfileCatalog): void {
     if (this.settingsProfilesPath === null) return;
     mkdirSync(dirname(this.settingsProfilesPath), { recursive: true });
-    writeFileSync(this.settingsProfilesPath, `${JSON.stringify(this.settingsProfileCatalog, null, 2)}\n`, "utf8");
+    const temporaryPath = `${this.settingsProfilesPath}.tmp-${process.pid}-${this.nextSettingsProfileWriteNumber++}`;
+    let descriptor: number | undefined;
+    let temporaryCreated = false;
+    try {
+      descriptor = openSync(temporaryPath, "wx", 0o600);
+      temporaryCreated = true;
+      writeFileSync(descriptor, `${JSON.stringify(catalog, null, 2)}\n`, "utf8");
+      fsyncSync(descriptor);
+      closeSync(descriptor);
+      descriptor = undefined;
+      renameSync(temporaryPath, this.settingsProfilesPath);
+    } catch (error) {
+      if (descriptor !== undefined) {
+        try {
+          closeSync(descriptor);
+        } catch {
+          // Preserve the primary persistence error.
+        }
+      }
+      if (temporaryCreated) {
+        try {
+          unlinkSync(temporaryPath);
+        } catch (cleanupError) {
+          if (!isMissingFileError(cleanupError)) {
+            // Preserve the primary persistence error.
+          }
+        }
+      }
+      throw createPortusError({
+        code: "CONFIG_INVALID",
+        message: "The settings profile catalog could not be persisted atomically.",
+        retryable: false,
+        details: {
+          path: this.settingsProfilesPath,
+          reason: error instanceof Error ? error.message : "write failed"
+        }
+      });
+    }
+  }
+
+  private createSettingsProfileCatalogRecoveryError(stage: string, error?: unknown): PortusError {
+    return createPortusError({
+      code: "CONFIG_INVALID",
+      message: "The persisted settings profile catalog could not be loaded. The original file has been preserved; import a valid catalog to recover profile persistence.",
+      retryable: false,
+      details: {
+        ...(this.settingsProfilesPath === null ? {} : { path: this.settingsProfilesPath }),
+        stage,
+        ...(error === undefined ? {} : { reason: error instanceof Error ? error.message : "catalog load failed" })
+      }
+    });
   }
 
   private defaultSettingsProfileCatalog(): SettingsProfileCatalog {
