@@ -16,7 +16,7 @@ Portus Browser lets an agent:
 - observe, wait for, and act on controls in regular DOM, scriptable iframes, and recursively nested open/closed Shadow DOM while keeping those details transparent to CLI callers
 - inspect console and network data
 - use saved browser recipes
-- work across multiple Chrome, Edge, and Chromium windows at the same time.
+- work across multiple Chrome, Edge, Brave, and Chromium windows at the same time.
 
 Portus Browser is local first and the Broker runs on the user's machine.
 
@@ -25,6 +25,31 @@ Portus Browser is local first and the Broker runs on the user's machine.
 The Extension permanently requests Chrome host access for normal web pages through `"<all_urls>"`; there is no site-by-site Chrome permission request or revoke workflow. While the Bridge is connected, Portus navigation policy and command policy are the authorization boundary for agent actions.
 
 Navigation rules can match a URL by scheme, authority, wildcard host, exact URL, or URL prefix. Portus does not impose a built-in scheme restriction: users decide which browser-supported URLs to allow or block. A denied URL returns `NAVIGATION_BLOCKED`; protected pages and other targets the browser cannot expose return `BROWSER_ACCESS_DENIED`.
+
+## Snapshots And Screenshots
+
+Snapshots are structural by default. A normal `snapshot` command returns targeting data without capturing an image and without activating or focusing the target tab.
+
+```powershell
+portus-browser snapshot --browser 1 --tab-id <tabId> --json
+```
+
+Capture a screenshot only when visual information is needed:
+
+```powershell
+portus-browser screenshot --browser 1 --tab-id <tabId> --json
+```
+
+A snapshot can include an image explicitly:
+
+```powershell
+portus-browser snapshot --browser 1 --tab-id <tabId> --screenshot --json
+portus-browser snapshot --browser 1 --tab-id <tabId> --screenshot --debugger --json
+```
+
+On `snapshot`, `--debugger` is valid only together with `--screenshot`; it selects the screenshot backend and does not control structural page collection. Normal screenshots of an inactive tab may temporarily activate that tab in its existing window, never focus the window, and restore the previous active tab when it is still safe to do so. Debugger screenshots target the tab without activation. Screenshot failures are returned as errors; Portus does not fabricate placeholder images.
+
+Structural snapshots and element actions cover regular DOM, scriptable iframes, and recursively nested open/closed Shadow DOM. Agents continue to target returned elements only through `snapshotId` + `elementId`; Portus keeps frame, document, and Shadow DOM identity internal and rejects actions with `SNAPSHOT_STALE` when the captured document has been replaced.
 
 ## Quick Start
 
@@ -51,7 +76,7 @@ pnpm --filter @portus/broker exec node dist/index.js
 pnpm --filter @portus/dev-installer exec node dist/index.js apply --browser chrome --extension-id <extension-id>
 ```
 
-5. Reload the extension (or restart browser), open the extension popup, and click Connect Bridge.
+5. Reload the extension (or restart the browser). On a fresh install the Bridge is set to connect automatically and retries if the local connection is temporarily unavailable. Open the extension popup to verify its state; use **Connect** only if the Bridge was previously disconnected or is not currently set to connect.
 
 6. In a second terminal, verify connection:
 
@@ -59,7 +84,7 @@ pnpm --filter @portus/dev-installer exec node dist/index.js apply --browser chro
 pnpm --filter @portus/browser-cli exec portus-browser browsers --json
 ```
 
-If the list is empty, the Bridge is not connected yet in the extension popup.
+If the list is empty, check the Bridge state in the extension popup and the native-host/Broker setup.
 
 ## Main Parts
 

@@ -2,7 +2,7 @@
 
 Settings profiles are central to multi-browser and multi-window use.
 
-They let the user keep different security and terminal settings without deleting values every time they change tasks.
+They let the user keep different security, interaction, panel, and terminal settings without deleting values every time they change tasks.
 
 ## What A Profile Contains
 
@@ -17,6 +17,7 @@ A settings profile's content contains the user-modifiable values in the Settings
 - allowed navigation rules
 - blocked navigation rules
 - command policy settings
+- Advanced Debugger Backend preference
 - retention settings
 - panel and extension-icon preferences
 
@@ -113,6 +114,16 @@ Portus does not impose a built-in HTTP(S)-only or scheme allowlist. The user con
 The popup and Settings view report `Agent Access` for the current URL as `allowed`, `blocked`, `disabled`, or `unsupported`.
 
 `Clear Rules` clears the currently selected allow or block rule list after confirmation. These settings are part of the active settings profile.
+
+## Advanced Debugger Backend
+
+The Settings view includes **Advanced Debugger Backend** with the **Prefer Debugger/CDP Backend** preference. It is off by default and is stored in the active settings profile.
+
+When enabled, Portus prefers browser-level CDP input for supported top-level actions such as click, hover, targeted key presses, text entry, scrolling, and same-document drag. This can provide interaction behavior closer to real browser input.
+
+The preference does not force every action through CDP. Portus deliberately keeps child-frame actions and cases that require exact DOM semantics on the Shadow-aware DOM backend. Inaccessible closed Shadow DOM can use the debugger as a specialized reachability fallback when normal closed-root access is unavailable. Explicit debugger operations, such as debugger-backed screenshots and native browser-dialog handling, do not depend on this preference.
+
+Chrome may show debugger-style warnings while CDP is attached. Turning the preference off returns eligible ordinary actions to their normal DOM behavior; it does not disable Portus snapshots, regular actions, or explicit debugger commands.
 
 ## Rename And Delete
 

@@ -155,10 +155,12 @@ After applying native host registration, reload the extension or restart the bro
 
 ## Connect The Browser
 
+On a fresh install, the Extension is set to connect the Bridge automatically and retries if the local connection is temporarily unavailable. If the user explicitly disconnects the Bridge, that preference is remembered and Portus will not reconnect until the user chooses **Connect** again.
+
 In the browser:
 
 1. Click the Portus Browser extension icon.
-2. Connect the Bridge.
+2. Verify the Bridge state. Use **Connect** only if it is disconnected and not currently set to connect.
 3. Open the panel if you want to use Settings or Terminal.
 
 From the terminal, check connected browsers:
@@ -167,7 +169,32 @@ From the terminal, check connected browsers:
 node apps/portus-browser-cli/dist/index.js browsers --json
 ```
 
-If the CLI reports no browsers, the Bridge is not connected in the extension.
+If the CLI reports no browsers, check the Bridge state, native host registration, and Broker availability. The popup exposes the current Bridge/native-host state.
+
+## Observe Pages Without Unnecessary Screenshots
+
+Structural snapshots do not capture an image by default and do not activate or focus the target tab:
+
+```powershell
+node apps/portus-browser-cli/dist/index.js snapshot --browser 1 --tab-id <tabId> --json
+```
+
+Use a standalone screenshot only when visual information is needed:
+
+```powershell
+node apps/portus-browser-cli/dist/index.js screenshot --browser 1 --tab-id <tabId> --json
+```
+
+Or request an image together with a structural snapshot:
+
+```powershell
+node apps/portus-browser-cli/dist/index.js snapshot --browser 1 --tab-id <tabId> --screenshot --json
+node apps/portus-browser-cli/dist/index.js snapshot --browser 1 --tab-id <tabId> --screenshot --debugger --json
+```
+
+For `snapshot`, `--debugger` requires `--screenshot` and selects only the screenshot backend. Normal screenshots of an inactive tab may temporarily activate that tab within its current window; Portus does not focus the window and restores the previously active tab when it is still safe to do so. Debugger screenshots capture the requested tab without activation. Screenshot capture failures are returned as errors rather than placeholder images.
+
+Snapshots expose actionable elements from regular DOM, scriptable iframes, and nested open/closed Shadow DOM through ordinary `snapshotId` and `elementId` values. Frame, document, and Shadow DOM identity are handled internally.
 
 ## Run The CLI
 
