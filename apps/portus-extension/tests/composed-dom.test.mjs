@@ -47,13 +47,16 @@ test("walks nested open shadow roots in deterministic order and records host cha
   assert.equal(new Set(entries.map((entry) => entry.element)).size, entries.length);
   assert.equal(byId.get("light-child").shadowPath, undefined);
   assert.equal(byId.get("shadow-button").selectorHint, "#shadow-button");
-  assert.deepEqual(byId.get("shadow-button").shadowPath, [
+  assert.deepEqual(shadowPathShape(byId.get("shadow-button").shadowPath), [
     { hostSelectorHint: "#app", rootType: "open" }
   ]);
-  assert.deepEqual(byId.get("nested-input").shadowPath, [
+  assert.deepEqual(shadowPathShape(byId.get("nested-input").shadowPath), [
     { hostSelectorHint: "#app", rootType: "open" },
     { hostSelectorHint: "#nested", rootType: "open" }
   ]);
+  assert.match(byId.get("shadow-button").shadowPath[0].hostInstanceId, /^sh_\d{6}$/);
+  assert.equal(byId.get("nested-input").shadowPath[0].hostInstanceId, byId.get("shadow-button").shadowPath[0].hostInstanceId);
+  assert.match(byId.get("nested-input").shadowPath[1].hostInstanceId, /^sh_\d{6}$/);
   assert.equal(byId.get("nested-input").root, nestedRoot);
 });
 
@@ -94,7 +97,8 @@ test("traverses closed shadow roots through chrome.dom and degrades to open-only
   assert.equal(closedRuntime.shadowRootForElement(host), closedRoot);
   assert.equal(closedEntry.root, closedRoot);
   assert.equal(closedEntry.selectorHint, "#closed-action");
-  assert.deepEqual(closedEntry.shadowPath, [{ hostSelectorHint: "#secure", rootType: "closed" }]);
+  assert.deepEqual(shadowPathShape(closedEntry.shadowPath), [{ hostSelectorHint: "#secure", rootType: "closed" }]);
+  assert.match(closedEntry.shadowPath[0].hostInstanceId, /^sh_\d{6}$/);
 });
 
 test("builds selectors relative to the current document or shadow root", () => {
@@ -121,5 +125,21 @@ test("installs one reusable composed-DOM runtime on the target global", () => {
 
   assert.equal(target.__portusComposedDom, runtime);
   const inside = runtime.collect(document).find((entry) => entry.element.id === "inside");
-  assert.deepEqual(inside.shadowPath, [{ hostSelectorHint: "#host", rootType: "open" }]);
+  assert.deepEqual(shadowPathShape(inside.shadowPath), [{ hostSelectorHint: "#host", rootType: "open" }]);
+  const firstHostInstanceId = inside.shadowPath[0].hostInstanceId;
+  assert.match(firstHostInstanceId, /^sh_\d{6}$/);
+
+  const reinstalled = installPortusComposedDomRuntime(target);
+  assert.equal(reinstalled.hostInstanceIdForElement(host), firstHostInstanceId);
+  host.remove();
+  const replacement = document.createElement("x-host");
+  replacement.id = "host";
+  replacement.attachShadow({ mode: "open" }).innerHTML = `<button id="inside">Inside</button>`;
+  document.body.append(replacement);
+  const replacementInside = reinstalled.collect(document).find((entry) => entry.element.id === "inside");
+  assert.notEqual(replacementInside.shadowPath[0].hostInstanceId, firstHostInstanceId);
 });
+
+function shadowPathShape(path) {
+  return path?.map(({ hostSelectorHint, rootType }) => ({ hostSelectorHint, rootType }));
+}

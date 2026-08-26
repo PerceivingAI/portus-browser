@@ -1365,9 +1365,10 @@ test("page wait evaluator matches text and elements inside nested Shadow DOM", (
     assert.equal(textWait.matched, true);
     assert.equal(textWait.details.match, "text");
     assert.equal(textWait.details.shadowDepth, 1);
-    assert.deepEqual(textWait.details.shadowPath, [
+    assert.deepEqual(shadowPathShape(textWait.details.shadowPath), [
       { hostSelectorHint: "#app", rootType: "open" }
     ]);
+    assert.match(textWait.details.shadowPath[0].hostInstanceId, /^sh_\d{6}$/);
 
     const elementWait = evaluatePortusPageWait({ elementQuery: "deep shadow action", role: "button" });
     assert.equal(elementWait.matched, true);
@@ -1375,10 +1376,12 @@ test("page wait evaluator matches text and elements inside nested Shadow DOM", (
     assert.equal(elementWait.details.label, "Deep shadow action");
     assert.equal(elementWait.details.selectorHint, "#deep-action");
     assert.equal(elementWait.details.shadowDepth, 2);
-    assert.deepEqual(elementWait.details.shadowPath, [
+    assert.deepEqual(shadowPathShape(elementWait.details.shadowPath), [
       { hostSelectorHint: "#app", rootType: "open" },
       { hostSelectorHint: "#nested", rootType: "open" }
     ]);
+    assert.equal(elementWait.details.shadowPath[0].hostInstanceId, textWait.details.shadowPath[0].hostInstanceId);
+    assert.match(elementWait.details.shadowPath[1].hostInstanceId, /^sh_\d{6}$/);
   } finally {
     for (const [key, descriptor] of descriptors) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor);
@@ -1596,10 +1599,12 @@ test("snapshot collection traverses nested Shadow DOM and preserves filtering me
     assert.deepEqual(all.elements.map((element) => element.label), ["Light action", "Shadow action", "Deep search"]);
     const deep = all.elements[2];
     assert.equal(deep.selectorHint, "#deep-input");
-    assert.deepEqual(deep.shadowPath, [
+    assert.deepEqual(shadowPathShape(deep.shadowPath), [
       { hostSelectorHint: "#app", rootType: "open" },
       { hostSelectorHint: "#nested", rootType: "open" }
     ]);
+    assert.match(deep.shadowPath[0].hostInstanceId, /^sh_\d{6}$/);
+    assert.match(deep.shadowPath[1].hostInstanceId, /^sh_\d{6}$/);
 
     const filtered = capturePortusSnapshotPayload({
       query: "deep search",
@@ -1697,14 +1702,17 @@ test("closed Shadow DOM participates in snapshots waits and actions through chro
     const input = snapshot.elements.find((element) => element.selectorHint === "#closed-input");
     assert.ok(button);
     assert.ok(input);
-    assert.deepEqual(button.shadowPath, [{ hostSelectorHint: "#secure", rootType: "closed" }]);
-    assert.deepEqual(input.shadowPath, [{ hostSelectorHint: "#secure", rootType: "closed" }]);
+    assert.deepEqual(shadowPathShape(button.shadowPath), [{ hostSelectorHint: "#secure", rootType: "closed" }]);
+    assert.deepEqual(shadowPathShape(input.shadowPath), [{ hostSelectorHint: "#secure", rootType: "closed" }]);
+    assert.match(button.shadowPath[0].hostInstanceId, /^sh_\d{6}$/);
+    assert.equal(input.shadowPath[0].hostInstanceId, button.shadowPath[0].hostInstanceId);
     assert.equal(input.label, "Secret name");
 
     const wait = evaluatePortusPageWait({ elementQuery: "closed action", role: "button" });
     assert.equal(wait.matched, true);
     assert.equal(wait.details.shadowDepth, 1);
-    assert.deepEqual(wait.details.shadowPath, [{ hostSelectorHint: "#secure", rootType: "closed" }]);
+    assert.deepEqual(shadowPathShape(wait.details.shadowPath), [{ hostSelectorHint: "#secure", rootType: "closed" }]);
+    assert.equal(wait.details.shadowPath[0].hostInstanceId, button.shadowPath[0].hostInstanceId);
 
     const click = performPortusDomAction({ action: "click", target: button });
     assert.equal(click.ok, true);
@@ -1794,10 +1802,13 @@ test("live DOM actions resolve nested Shadow DOM without crossing the captured r
     toJSON() { return this; }
   });
 
-  const shadowPath = [
-    { hostSelectorHint: "#app", rootType: "open" },
-    { hostSelectorHint: "#nested", rootType: "open" }
-  ];
+  const runtime = globalThis.__portusComposedDom;
+  const capturedButton = runtime.collect(document).find((entry) => entry.element === shadowButton);
+  const capturedInput = runtime.collect(document).find((entry) => entry.element === shadowInput);
+  assert.ok(capturedButton?.shadowPath);
+  assert.ok(capturedInput?.shadowPath);
+  assert.deepEqual(capturedInput.shadowPath, capturedButton.shadowPath);
+  const shadowPath = capturedButton.shadowPath;
   const buttonTarget = {
     shadowPath,
     selectorHint: "#shadow-save",
@@ -1853,11 +1864,32 @@ test("live DOM actions resolve nested Shadow DOM without crossing the captured r
     assert.equal(filled.ok, true);
     assert.equal(shadowInput.value, "Lovelace");
 
+    let scrollRequest = null;
+    shadowButton.scrollBy = (options) => { scrollRequest = options; };
+    const scrolled = performPortusDomAction({ action: "scroll", target: buttonTarget, deltaX: 7, deltaY: 90 });
+    assert.equal(scrolled.ok, true);
+    assert.deepEqual(scrollRequest, { left: 7, top: 90, behavior: "instant" });
+
     nested.remove();
-    const stale = performPortusDomAction({ action: "click", target: buttonTarget });
-    assert.equal(stale.ok, false);
-    assert.equal(stale.error.code, "SNAPSHOT_STALE");
+    const removedStale = performPortusDomAction({ action: "click", target: buttonTarget });
+    assert.equal(removedStale.ok, false);
+    assert.equal(removedStale.error.code, "SNAPSHOT_STALE");
     assert.equal(lightClicks, 0);
+
+    const replacementNested = document.createElement("nested-panel");
+    replacementNested.id = "nested";
+    appRoot.append(replacementNested);
+    const replacementRoot = replacementNested.attachShadow({ mode: "open" });
+    replacementRoot.innerHTML = `<button id="shadow-save">Save</button>`;
+    const replacementButton = replacementRoot.querySelector("#shadow-save");
+    let replacementClicks = 0;
+    replacementButton.addEventListener("click", () => replacementClicks += 1);
+    const replacementStale = performPortusDomAction({ action: "click", target: buttonTarget });
+    assert.equal(replacementStale.ok, false);
+    assert.equal(replacementStale.error.code, "SNAPSHOT_STALE");
+    assert.equal(replacementClicks, 0);
+    const replacementEntry = runtime.collect(document).find((entry) => entry.element === replacementButton);
+    assert.notEqual(replacementEntry.shadowPath[1].hostInstanceId, shadowPath[1].hostInstanceId);
   } finally {
     for (const [key, descriptor] of descriptors) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor);
@@ -1967,6 +1999,21 @@ test("atomic fill-form validates fields across sibling Shadow DOM roots before m
     assert.equal(stale.ok, false);
     assert.equal(stale.error.code, "SNAPSHOT_STALE");
     assert.equal(first.value, "");
+
+    const partial = performPortusDomAction({
+      action: "fillForm",
+      partial: true,
+      fields: [
+        { elementId: "el_first", value: "Grace", target: firstTarget },
+        { elementId: "el_last", value: "Hopper", target: lastTarget }
+      ]
+    });
+    assert.equal(partial.ok, true);
+    assert.equal(first.value, "Grace");
+    assert.deepEqual(partial.details.fields.map((field) => [field.elementId, field.ok, field.error?.code]), [
+      ["el_first", true, undefined],
+      ["el_last", false, "SNAPSHOT_STALE"]
+    ]);
   } finally {
     for (const [key, descriptor] of descriptors) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor);
@@ -3389,6 +3436,10 @@ test("disabling terminal kills terminal transport without touching bridge", asyn
   assert.equal((await bridge.getStatus()).bridgeState, "connected");
   assert.equal((await bridge.getStatus()).terminalNativeHostState, "disconnected");
 });
+
+function shadowPathShape(path) {
+  return path?.map(({ hostSelectorHint, rootType }) => ({ hostSelectorHint, rootType }));
+}
 
 function isActionInjection(injection) {
   const payload = Array.isArray(injection.args) ? injection.args[0] : undefined;

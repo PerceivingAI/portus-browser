@@ -349,7 +349,7 @@ function performPortusHistoryNavigation(direction: "back" | "forward"): Record<s
 }
 
 export function evaluatePortusPageWait(condition: Record<string, unknown>): Record<string, unknown> {
-  type WaitShadowPath = Array<{ hostSelectorHint: string; rootType: "open" | "closed" }>;
+  type WaitShadowPath = Array<{ hostSelectorHint: string; rootType: "open" | "closed"; hostInstanceId?: string }>;
   type WaitComposedEntry = {
     element: Element;
     root: Document | ShadowRoot;
@@ -4692,7 +4692,7 @@ export function capturePortusSnapshotPayload(
         element: Element;
         root: Document | ShadowRoot;
         selectorHint: string;
-        shadowPath?: Array<{ hostSelectorHint: string; rootType: "open" | "closed" }>;
+        shadowPath?: Array<{ hostSelectorHint: string; rootType: "open" | "closed"; hostInstanceId?: string }>;
       }>;
       closedShadowRootAccessAvailable?(): boolean;
     };
@@ -4878,9 +4878,10 @@ export function performPortusDomAction(payload: Record<string, unknown>): Record
   type ActionComposedDomRuntime = {
     collect(root?: Document | ShadowRoot): Array<{
       element: Element;
-      shadowPath?: Array<{ hostSelectorHint: string; rootType: "open" | "closed" }>;
+      shadowPath?: Array<{ hostSelectorHint: string; rootType: "open" | "closed"; hostInstanceId?: string }>;
     }>;
     shadowRootForElement(element: Element): ShadowRoot | null;
+    hostInstanceIdForElement?(element: Element): string;
   };
   try {
     const action = typeof payload.action === "string" ? payload.action : "";
@@ -5278,23 +5279,24 @@ export function performPortusDomAction(payload: Record<string, unknown>): Record
 
   function readActionShadowPath(value: unknown): {
     valid: boolean;
-    path?: Array<{ hostSelectorHint: string; rootType: "open" | "closed" }>;
+    path?: Array<{ hostSelectorHint: string; rootType: "open" | "closed"; hostInstanceId?: string }>;
   } {
     if (value === undefined) return { valid: true };
     if (!Array.isArray(value) || value.length === 0) return { valid: false };
-    const path: Array<{ hostSelectorHint: string; rootType: "open" | "closed" }> = [];
+    const path: Array<{ hostSelectorHint: string; rootType: "open" | "closed"; hostInstanceId?: string }> = [];
     for (const segment of value) {
       if (!isPlainRecord(segment)) return { valid: false };
       const hostSelectorHint = typeof segment.hostSelectorHint === "string" ? segment.hostSelectorHint.trim() : "";
       const rootType = segment.rootType === "open" || segment.rootType === "closed" ? segment.rootType : null;
-      if (!hostSelectorHint || !rootType) return { valid: false };
-      path.push({ hostSelectorHint, rootType });
+      const hostInstanceId = typeof segment.hostInstanceId === "string" ? segment.hostInstanceId.trim() : undefined;
+      if (!hostSelectorHint || !rootType || (segment.hostInstanceId !== undefined && !hostInstanceId)) return { valid: false };
+      path.push({ hostSelectorHint, rootType, ...(hostInstanceId ? { hostInstanceId } : {}) });
     }
     return { valid: true, path };
   }
 
   function resolveActionTargetRoot(
-    shadowPath: Array<{ hostSelectorHint: string; rootType: "open" | "closed" }> | undefined
+    shadowPath: Array<{ hostSelectorHint: string; rootType: "open" | "closed"; hostInstanceId?: string }> | undefined
   ): Document | ShadowRoot | null {
     if (shadowPath === undefined) return document;
     let root: Document | ShadowRoot = document;
@@ -5306,6 +5308,17 @@ export function performPortusDomAction(payload: Record<string, unknown>): Record
         return null;
       }
       if (!host) return null;
+      if (segment.hostInstanceId !== undefined) {
+        const runtime = readActionComposedDomRuntime();
+        if (!runtime || typeof runtime.hostInstanceIdForElement !== "function") return null;
+        let liveHostInstanceId: string;
+        try {
+          liveHostInstanceId = runtime.hostInstanceIdForElement(host);
+        } catch {
+          return null;
+        }
+        if (liveHostInstanceId !== segment.hostInstanceId) return null;
+      }
       const shadowRoot = readActionShadowRoot(host);
       if (!shadowRoot || shadowRoot.mode !== segment.rootType) return null;
       root = shadowRoot;
@@ -5314,8 +5327,8 @@ export function performPortusDomAction(payload: Record<string, unknown>): Record
   }
 
   function shadowPathsEqual(
-    left: Array<{ hostSelectorHint: string; rootType: "open" | "closed" }> | undefined,
-    right: Array<{ hostSelectorHint: string; rootType: "open" | "closed" }> | undefined
+    left: Array<{ hostSelectorHint: string; rootType: "open" | "closed"; hostInstanceId?: string }> | undefined,
+    right: Array<{ hostSelectorHint: string; rootType: "open" | "closed"; hostInstanceId?: string }> | undefined
   ): boolean {
     if (left === undefined || right === undefined) return left === right;
     if (left.length !== right.length) return false;
@@ -5323,7 +5336,8 @@ export function performPortusDomAction(payload: Record<string, unknown>): Record
       const expected = right[index];
       return expected !== undefined
         && segment.hostSelectorHint === expected.hostSelectorHint
-        && segment.rootType === expected.rootType;
+        && segment.rootType === expected.rootType
+        && (expected.hostInstanceId === undefined || segment.hostInstanceId === expected.hostInstanceId);
     });
   }
 

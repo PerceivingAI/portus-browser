@@ -650,7 +650,8 @@ export const ShadowRootTypeSchema = z.enum(["open", "closed"]);
 
 export const ShadowPathSegmentSchema = z.object({
   hostSelectorHint: z.string().min(1),
-  rootType: ShadowRootTypeSchema
+  rootType: ShadowRootTypeSchema,
+  hostInstanceId: z.string().min(1).optional()
 }).strict();
 
 export const ShadowPathSchema = z.array(ShadowPathSegmentSchema).min(1);

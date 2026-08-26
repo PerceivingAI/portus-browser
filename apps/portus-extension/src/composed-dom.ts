@@ -11,8 +11,18 @@ export interface PortusComposedDomRuntime {
   collect(root?: Document | ShadowRoot): PortusComposedDomEntry[];
   selectorForElement(element: Element, root: Document | ShadowRoot): string;
   shadowRootForElement(element: Element): ShadowRoot | null;
+  hostInstanceIdForElement(element: Element): string;
   closedShadowRootAccessAvailable(): boolean;
 }
+
+type PortusShadowHostIdentityState = {
+  hostIds: WeakMap<Element, string>;
+  nextHostId: number;
+};
+
+type PortusShadowIdentityGlobal = typeof globalThis & {
+  __portusShadowHostIdentityState?: PortusShadowHostIdentityState;
+};
 
 type PortusChromeDomGlobal = typeof globalThis & {
   chrome?: {
@@ -56,7 +66,8 @@ export function collectPortusComposedDomElements(
     if (accessibleShadowRoot) {
       const hostSegment: ShadowPathSegment = {
         hostSelectorHint: selectorForPortusComposedElement(element, currentRoot),
-        rootType: accessibleShadowRoot.mode
+        rootType: accessibleShadowRoot.mode,
+        hostInstanceId: hostInstanceIdForPortusElement(element, environment)
       };
       walkRoot(accessibleShadowRoot, [...shadowPath, hostSegment]);
     }
@@ -101,6 +112,28 @@ export function selectorForPortusComposedElement(
   return parts.join(" > ");
 }
 
+export function hostInstanceIdForPortusElement(
+  element: Element,
+  environment: typeof globalThis = globalThis
+): string {
+  const identityGlobal = environment as PortusShadowIdentityGlobal;
+  let state = identityGlobal.__portusShadowHostIdentityState;
+  if (!state) {
+    state = { hostIds: new WeakMap<Element, string>(), nextHostId: 1 };
+    Object.defineProperty(identityGlobal, "__portusShadowHostIdentityState", {
+      configurable: true,
+      writable: true,
+      value: state
+    });
+  }
+  let id = state.hostIds.get(element);
+  if (!id) {
+    id = `sh_${String(state.nextHostId++).padStart(6, "0")}`;
+    state.hostIds.set(element, id);
+  }
+  return id;
+}
+
 export function shadowRootForPortusElement(
   element: Element,
   environment: typeof globalThis = globalThis
@@ -130,6 +163,7 @@ export function createPortusComposedDomRuntime(
     collect: (root = document) => collectPortusComposedDomElements(root, environment),
     selectorForElement: selectorForPortusComposedElement,
     shadowRootForElement: (element) => shadowRootForPortusElement(element, environment),
+    hostInstanceIdForElement: (element) => hostInstanceIdForPortusElement(element, environment),
     closedShadowRootAccessAvailable: () => {
       const chromeDom = (environment as PortusChromeDomGlobal).chrome?.dom;
       const accessor = chromeDom?.openOrClosedShadowRoot;

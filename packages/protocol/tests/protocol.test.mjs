@@ -336,8 +336,8 @@ test("validates browser session, snapshot, and action shapes", () => {
       bounds: { x: 0, y: 0, width: 80, height: 30 },
       state: {},
       shadowPath: [
-        { hostSelectorHint: "app-shell:nth-of-type(1)", rootType: "open" },
-        { hostSelectorHint: "login-panel:nth-of-type(1)", rootType: "closed" }
+        { hostSelectorHint: "app-shell:nth-of-type(1)", rootType: "open", hostInstanceId: "sh_000001" },
+        { hostSelectorHint: "login-panel:nth-of-type(1)", rootType: "closed", hostInstanceId: "sh_000002" }
       ]
     }],
     capturedAt: now,
@@ -355,8 +355,8 @@ test("validates browser session, snapshot, and action shapes", () => {
   assert.equal(snapshot.elements[0].elementId, "el_001");
   assert.equal(snapshot.elements[0].frameId, 0);
   assert.equal(snapshot.elements[0].documentId, "doc_main");  assert.deepEqual(snapshot.elements[0].shadowPath, [
-    { hostSelectorHint: "app-shell:nth-of-type(1)", rootType: "open" },
-    { hostSelectorHint: "login-panel:nth-of-type(1)", rootType: "closed" }
+    { hostSelectorHint: "app-shell:nth-of-type(1)", rootType: "open", hostInstanceId: "sh_000001" },
+    { hostSelectorHint: "login-panel:nth-of-type(1)", rootType: "closed", hostInstanceId: "sh_000002" }
   ]);
 
   assert.equal(snapshot.filtered, true);
@@ -371,6 +371,13 @@ test("validates browser session, snapshot, and action shapes", () => {
   assert.throws(() => SnapshotFilterSchema.parse({ query: "", maxElements: 0 }));  assert.throws(() => SnapshotSchema.parse({
     ...snapshot,
     elements: [{ ...snapshot.elements[0], shadowPath: [] }]
+  }));
+  assert.throws(() => SnapshotSchema.parse({
+    ...snapshot,
+    elements: [{
+      ...snapshot.elements[0],
+      shadowPath: [{ hostSelectorHint: "#app", rootType: "open", hostInstanceId: "" }]
+    }]
   }));
 
 
