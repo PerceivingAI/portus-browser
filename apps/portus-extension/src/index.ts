@@ -486,6 +486,17 @@ function formatConsoleArgument(value: unknown): string {
   }
 }
 
+interface DebuggerSnapshotTarget {
+  backendNodeId: number;
+}
+
+interface PiercedClosedShadowSupplement {
+  candidates: Array<{ candidate: SnapshotElementCandidate; backendNodeId: number }>;
+  candidateCount: number;
+  matchedElementCount: number;
+  truncated: boolean;
+}
+
 export class PortusExtensionBridge {
   readonly nativeHostName: string;
   readonly terminalNativeHostName: string;
@@ -524,6 +535,7 @@ export class PortusExtensionBridge {
   private networkCaptureStartedAt: string | undefined;
   private intentionalDisconnect = false;
   private readonly snapshots = new Map<string, SnapshotStoreEntry>();
+  private readonly debuggerSnapshotTargets = new Map<string, Map<string, DebuggerSnapshotTarget>>();
   private readonly networkRecords = new Map<string, Record<string, unknown>>();
 
   bridgeState: BridgeState = "disconnected";
@@ -946,6 +958,24 @@ export class PortusExtensionBridge {
       };
     }
     const page = await this.executeSnapshotScript(targetTabId, filter);
+    const normalCandidates = readElementCandidates(page.elements);
+    const requestedLimit = Math.min(filter?.maxElements ?? SNAPSHOT_COLLECTION_LIMIT, SNAPSHOT_COLLECTION_LIMIT);
+    const remainingLimit = Math.max(0, requestedLimit - normalCandidates.length);
+    const shouldUsePiercedFallback = this.shouldUseDebuggerBackend()
+      && page.closedShadowRootAccessAvailable !== true
+      && remainingLimit > 0;
+    const supplement = shouldUsePiercedFallback
+      ? await this.capturePiercedClosedShadowSupplement(
+          targetTabId,
+          readString(page, "mainDocumentId"),
+          readViewport(page.viewport),
+          filter,
+          remainingLimit
+        )
+      : { candidates: [], candidateCount: 0, matchedElementCount: 0, truncated: false } satisfies PiercedClosedShadowSupplement;
+    const supplementalCandidates = supplement.candidates.map((entry) => entry.candidate);
+    const candidateCount = (readNonnegativeInteger(page.candidateCount) ?? normalCandidates.length) + supplement.candidateCount;
+    const matchedElementCount = (readNonnegativeInteger(page.matchedElementCount) ?? normalCandidates.length) + supplement.matchedElementCount;
     const snapshotInput = {
       snapshotId: createSnapshotId(this.snapshotCounter++),
       browserId: this.requireBrowserId(),
@@ -955,21 +985,28 @@ export class PortusExtensionBridge {
       viewport: readViewport(page.viewport),
       screenshot,
       visibleText: typeof page.visibleText === "string" ? page.visibleText : "",
-      elements: readElementCandidates(page.elements),
+      elements: [...normalCandidates, ...supplementalCandidates],
       capturedAt: this.now().toISOString(),
-      ...(typeof page.candidateCount === "number" && Number.isInteger(page.candidateCount) && page.candidateCount >= 0
-        ? { candidateCount: page.candidateCount }
-        : {}),
-      ...(typeof page.matchedElementCount === "number" && Number.isInteger(page.matchedElementCount) && page.matchedElementCount >= 0
-        ? { matchedElementCount: page.matchedElementCount }
-        : {}),
-      ...(typeof page.truncated === "boolean" ? { truncated: page.truncated } : {})
+      candidateCount,
+      matchedElementCount,
+      truncated: page.truncated === true || supplement.truncated || matchedElementCount > requestedLimit
     };
     const snapshot = buildSnapshot(typeof page.cleanedDom === "string"
       ? { ...snapshotInput, cleanedDom: page.cleanedDom }
       : snapshotInput);
     const result = filter === undefined ? snapshot : filterSnapshot(snapshot, filter);
     this.snapshots.set(result.snapshotId, { snapshot: result, stale: false });
+    if (supplement.candidates.length > 0) {
+      const debuggerTargets = new Map<string, DebuggerSnapshotTarget>();
+      const resultIds = new Set(result.elements.map((element) => element.elementId));
+      for (let index = 0; index < supplement.candidates.length; index += 1) {
+        const snapshotElement = snapshot.elements[normalCandidates.length + index];
+        const cdpTarget = supplement.candidates[index];
+        if (!snapshotElement || !cdpTarget || !resultIds.has(snapshotElement.elementId)) continue;
+        debuggerTargets.set(snapshotElement.elementId, { backendNodeId: cdpTarget.backendNodeId });
+      }
+      if (debuggerTargets.size > 0) this.debuggerSnapshotTargets.set(result.snapshotId, debuggerTargets);
+    }
     return result;
   }
 
@@ -1003,6 +1040,16 @@ export class PortusExtensionBridge {
     const targetElement = action === "drag"
       ? resolveActionElement({ ...actionRequest, elementId: actionRequest.targetElementId }, this.snapshots)
       : null;
+    const debuggerElementTarget = action === "drag"
+      ? undefined
+      : this.lookupDebuggerSnapshotTarget(actionRequest.snapshotId, actionRequest.elementId);
+    const debuggerSourceTarget = action === "drag"
+      ? this.lookupDebuggerSnapshotTarget(actionRequest.snapshotId, actionRequest.sourceElementId)
+      : undefined;
+    const debuggerDropTarget = action === "drag"
+      ? this.lookupDebuggerSnapshotTarget(actionRequest.snapshotId, actionRequest.targetElementId)
+      : undefined;
+
     const domPayload: Record<string, unknown> = {
       action,
       target: element ? createDomActionTarget(element) : undefined,
@@ -1013,6 +1060,20 @@ export class PortusExtensionBridge {
       deltaX: typeof payload.deltaX === "number" ? payload.deltaX : 0,
       deltaY: typeof payload.deltaY === "number" ? payload.deltaY : 600
     };
+
+    if (action === "drag" && (debuggerSourceTarget || debuggerDropTarget)) {
+      throw createPortusError({
+        code: "ACTION_UNSUPPORTED",
+        message: "Drag involving a CDP-only pierced Shadow DOM target is deferred to S9."
+      });
+    }
+
+    if (debuggerElementTarget && element && action !== "drag") {
+      const debuggerResult = await this.executeDebuggerSnapshotElementAction(tabId, action, element, debuggerElementTarget, payload);
+      const invalidated = markSnapshotsStaleForTab(this.snapshots, browserId, tabId);
+      this.clearDebuggerTargetsForSnapshots(invalidated);
+      return debuggerResult;
+    }
 
     if (action === "drag" && sourceElement && targetElement && sourceElement.documentId !== targetElement.documentId) {
       throw createPortusError({
@@ -1029,7 +1090,8 @@ export class PortusExtensionBridge {
 
     if (action === "drag" && this.shouldUseDebuggerBackend() && sourceElement?.frameId === 0 && targetElement?.frameId === 0) {
       const debuggerResult = await this.executeDebuggerDragAction(tabId, sourceElement, targetElement);
-      markSnapshotsStaleForTab(this.snapshots, browserId, tabId);
+      const invalidated = markSnapshotsStaleForTab(this.snapshots, browserId, tabId);
+      this.clearDebuggerTargetsForSnapshots(invalidated);
       return debuggerResult;
     }
 
@@ -1037,7 +1099,8 @@ export class PortusExtensionBridge {
     const executionTarget = executionElement ? snapshotElementExecutionTarget(executionElement) : undefined;
     const result = await this.executeActionScript(tabId, domPayload, executionTarget);
     if (!result.ok) throw createPortusError(result.error);
-    markSnapshotsStaleForTab(this.snapshots, browserId, tabId);
+    const invalidated = markSnapshotsStaleForTab(this.snapshots, browserId, tabId);
+    this.clearDebuggerTargetsForSnapshots(invalidated);
     return ActionResultSchema.parse(createDomActionResult(this.now().toISOString(), result.details ?? { action }));
   }
 
@@ -1057,6 +1120,14 @@ export class PortusExtensionBridge {
     });
 
     const partial = request.partial === true;
+    const debuggerFields = request.fields.filter((field) => this.lookupDebuggerSnapshotTarget(request.snapshotId, field.elementId) !== undefined);
+    if (debuggerFields.length > 0) {
+      throw createPortusError({
+        code: "ACTION_UNSUPPORTED",
+        message: "Fill-form for CDP-only pierced Shadow DOM targets is deferred to S8.",
+        details: { elementIds: debuggerFields.map((field) => field.elementId) }
+      });
+    }
     type ResolvedFillTarget = {
       index: number;
       elementId: string;
@@ -1205,7 +1276,10 @@ export class PortusExtensionBridge {
         partial
       }
     });
-    if (fillFormResult.snapshotInvalidated) markSnapshotsStaleForTab(this.snapshots, browserId, tabId);
+    if (fillFormResult.snapshotInvalidated) {
+      const invalidated = markSnapshotsStaleForTab(this.snapshots, browserId, tabId);
+      this.clearDebuggerTargetsForSnapshots(invalidated);
+    }
     return fillFormResult;
   }
 
@@ -3016,7 +3090,9 @@ export class PortusExtensionBridge {
       elements: elements.slice(0, SNAPSHOT_COLLECTION_LIMIT),
       candidateCount,
       matchedElementCount,
-      truncated
+      truncated,
+      mainDocumentId: mainFrame.documentId,
+      closedShadowRootAccessAvailable: mainFrame.page.closedShadowRootAccessAvailable === true
     };
   }
 
@@ -3196,6 +3272,169 @@ export class PortusExtensionBridge {
         message: "Chrome debugger API is unavailable."
       });
     }
+  }
+
+  private async capturePiercedClosedShadowSupplement(
+    tabId: number,
+    documentId: string,
+    viewport: { width: number; height: number; deviceScaleFactor: number },
+    filter: SnapshotFilter | undefined,
+    limit: number
+  ): Promise<PiercedClosedShadowSupplement> {
+    if (limit <= 0) return { candidates: [], candidateCount: 0, matchedElementCount: 0, truncated: false };
+    return await this.withDebuggerSession(tabId, async (debuggerTarget) => {
+      const documentResult = await this.sendDebuggerCommand(debuggerTarget, "DOM.getDocument", { depth: -1, pierce: true });
+      if (!isRecord(documentResult) || !isRecord(documentResult.root)) {
+        throw createPortusError({
+          code: "ACTION_FAILED",
+          message: "CDP pierced DOM lookup did not return a valid document root."
+        });
+      }
+
+      const eligibleNodes: Record<string, unknown>[] = [];
+      const visited = new Set<number>();
+      const walk = (node: Record<string, unknown>, insideClosedRoot: boolean): void => {
+        const backendNodeId = readNonnegativeInteger(node.backendNodeId);
+        if (backendNodeId !== null) {
+          if (visited.has(backendNodeId)) return;
+          visited.add(backendNodeId);
+        }
+
+        const nodeType = readNonnegativeInteger(node.nodeType);
+        if (insideClosedRoot && nodeType === 1 && isPiercedInteractiveCandidate(node)) {
+          eligibleNodes.push(node);
+        }
+
+        const shadowRoots = Array.isArray(node.shadowRoots) ? node.shadowRoots.filter(isRecord) : [];
+        for (const shadowRoot of shadowRoots) {
+          const shadowType = typeof shadowRoot.shadowRootType === "string" ? shadowRoot.shadowRootType : "";
+          walk(shadowRoot, insideClosedRoot || shadowType === "closed");
+        }
+        const children = Array.isArray(node.children) ? node.children.filter(isRecord) : [];
+        for (const child of children) walk(child, insideClosedRoot);
+        // Deliberately do not traverse contentDocument here. Normal frame snapshots already
+        // preserve Chrome frameId/documentId identity; S7 only supplements inaccessible
+        // closed roots in the main document rather than inventing a CDP frame identity model.
+      };
+      walk(documentResult.root, false);
+
+      const visibleCandidates: Array<{ candidate: SnapshotElementCandidate; backendNodeId: number }> = [];
+      for (const node of eligibleNodes.slice(0, SNAPSHOT_COLLECTION_LIMIT)) {
+        const backendNodeId = readNonnegativeInteger(node.backendNodeId);
+        if (backendNodeId === null || backendNodeId === 0) continue;
+        let boxResult: unknown;
+        try {
+          boxResult = await this.sendDebuggerCommand(debuggerTarget, "DOM.getBoxModel", { backendNodeId });
+        } catch {
+          continue;
+        }
+        const bounds = readCdpBoxBounds(boxResult);
+        if (!bounds || bounds.width <= 0 || bounds.height <= 0) continue;
+        if (bounds.x + bounds.width < 0 || bounds.y + bounds.height < 0 || bounds.x > viewport.width || bounds.y > viewport.height) continue;
+        visibleCandidates.push({
+          backendNodeId,
+          candidate: createPiercedSnapshotCandidate(node, bounds, documentId)
+        });
+      }
+
+      const candidateCount = visibleCandidates.length;
+      let matched = visibleCandidates;
+      const query = filter?.query?.trim().toLowerCase();
+      const role = filter?.role?.trim().toLowerCase();
+      if (query) matched = matched.filter((entry) => piercedCandidateMatchesQuery(entry.candidate, query));
+      if (role) matched = matched.filter((entry) => entry.candidate.role.toLowerCase() === role);
+      if (filter?.interactiveOnly === true) matched = matched.filter((entry) => isPiercedCandidateInteractive(entry.candidate));
+      const matchedElementCount = matched.length;
+      const candidates = matched.slice(0, Math.min(limit, SNAPSHOT_COLLECTION_LIMIT));
+      return {
+        candidates,
+        candidateCount,
+        matchedElementCount,
+        truncated: matchedElementCount > candidates.length
+      };
+    }, "snapshot.pierced-closed-shadow");
+  }
+
+  private lookupDebuggerSnapshotTarget(snapshotId: string | undefined, elementId: string | undefined): DebuggerSnapshotTarget | undefined {
+    if (!snapshotId || !elementId) return undefined;
+    return this.debuggerSnapshotTargets.get(snapshotId)?.get(elementId);
+  }
+
+  private clearDebuggerTargetsForSnapshots(snapshotIds: Iterable<string>): void {
+    for (const snapshotId of snapshotIds) this.debuggerSnapshotTargets.delete(snapshotId);
+  }
+
+  private async executeDebuggerSnapshotElementAction(
+    tabId: number,
+    action: "click" | "hover" | "type" | "press" | "scroll",
+    element: SnapshotElement,
+    target: DebuggerSnapshotTarget,
+    payload: Record<string, unknown>
+  ): Promise<ActionResult> {
+    if (!this.shouldUseDebuggerBackend()) {
+      throw createPortusError({
+        code: "CAPABILITY_UNAVAILABLE",
+        message: "Advanced debugger backend is required for this snapshot element."
+      });
+    }
+
+    const details = await this.withDebuggerSession(tabId, async (debuggerTarget) => {
+      let resolved: unknown;
+      try {
+        resolved = await this.sendDebuggerCommand(debuggerTarget, "DOM.resolveNode", { backendNodeId: target.backendNodeId });
+      } catch {
+        throw createPortusError({
+          code: "SNAPSHOT_STALE",
+          message: "CDP snapshot element is no longer available."
+        });
+      }
+      if (!isRecord(resolved) || !isRecord(resolved.object) || typeof resolved.object.objectId !== "string") {
+        throw createPortusError({
+          code: "SNAPSHOT_STALE",
+          message: "CDP snapshot element could not be resolved to a live object."
+        });
+      }
+      const objectId = resolved.object.objectId;
+      let functionDeclaration: string;
+      let args: Array<{ value: unknown }> = [];
+      if (action === "click") {
+        functionDeclaration = "function(){ if (this.focus) this.focus(); if (this.click) this.click(); return true; }";
+      } else if (action === "hover") {
+        functionDeclaration = "function(){ this.dispatchEvent(new MouseEvent('mousemove',{bubbles:true,composed:true})); return true; }";
+      } else if (action === "type") {
+        functionDeclaration = "function(value){ if (this.focus) this.focus(); if ('value' in this) this.value=String(value); else if (this.isContentEditable) this.textContent=String(value); this.dispatchEvent(new InputEvent('input',{bubbles:true,composed:true,inputType:'insertText',data:String(value)})); this.dispatchEvent(new Event('change',{bubbles:true,composed:true})); return true; }";
+        args = [{ value: typeof payload.text === "string" ? payload.text : "" }];
+      } else if (action === "press") {
+        functionDeclaration = "function(key){ if (this.focus) this.focus(); this.dispatchEvent(new KeyboardEvent('keydown',{key:String(key),bubbles:true,composed:true})); this.dispatchEvent(new KeyboardEvent('keyup',{key:String(key),bubbles:true,composed:true})); return true; }";
+        args = [{ value: typeof payload.key === "string" ? payload.key : "" }];
+      } else {
+        functionDeclaration = "function(dx,dy){ if (this.scrollBy) this.scrollBy(Number(dx),Number(dy)); else this.scrollIntoView({block:'center',inline:'center'}); return true; }";
+        args = [
+          { value: typeof payload.deltaX === "number" ? payload.deltaX : 0 },
+          { value: typeof payload.deltaY === "number" ? payload.deltaY : 600 }
+        ];
+      }
+      await this.sendDebuggerCommand(debuggerTarget, "Runtime.callFunctionOn", {
+        objectId,
+        functionDeclaration,
+        arguments: args,
+        returnByValue: true,
+        awaitPromise: false
+      });
+      return {
+        action,
+        elementId: element.elementId,
+        targetValidated: true,
+        piercedClosedShadowFallback: true
+      };
+    }, `action.${action}.pierced-closed-shadow`);
+
+    return ActionResultSchema.parse({
+      backend: "debugger-cdp",
+      completedAt: this.now().toISOString(),
+      snapshotInvalidated: true,
+      details
+    });
   }
 
   private async executeDebuggerDragAction(
@@ -4099,6 +4338,149 @@ function readBounds(value: unknown): { x: number; y: number; width: number; heig
   };
 }
 
+function readCdpAttributes(node: Record<string, unknown>): Map<string, string> {
+  const attributes = Array.isArray(node.attributes) ? node.attributes : [];
+  const result = new Map<string, string>();
+  for (let index = 0; index + 1 < attributes.length; index += 2) {
+    const name = attributes[index];
+    const value = attributes[index + 1];
+    if (typeof name === "string" && typeof value === "string") result.set(name.toLowerCase(), value);
+  }
+  return result;
+}
+
+function cdpNodeTagName(node: Record<string, unknown>): string {
+  const localName = typeof node.localName === "string" ? node.localName : "";
+  if (localName) return localName.toLowerCase();
+  const nodeName = typeof node.nodeName === "string" ? node.nodeName : "";
+  return nodeName.toLowerCase();
+}
+
+function cdpNodeText(node: Record<string, unknown>, limit = 500): string {
+  let text = typeof node.nodeValue === "string" ? node.nodeValue : "";
+  const children = Array.isArray(node.children) ? node.children.filter(isRecord) : [];
+  for (const child of children) {
+    if (text.length >= limit) break;
+    text += " " + cdpNodeText(child, limit - text.length);
+  }
+  return text.trim().replace(/\s+/g, " ").slice(0, limit);
+}
+
+function isPiercedInteractiveCandidate(node: Record<string, unknown>): boolean {
+  const tagName = cdpNodeTagName(node);
+  const attributes = readCdpAttributes(node);
+  if (["button", "input", "textarea", "select"].includes(tagName)) return true;
+  if (tagName === "a" && attributes.has("href")) return true;
+  if (attributes.has("role") || attributes.has("contenteditable") || attributes.has("onclick")) return true;
+  if (attributes.has("tabindex")) {
+    const value = attributes.get("tabindex") ?? "";
+    return !value.trim().startsWith("-");
+  }
+  return false;
+}
+
+function inferPiercedRole(tagName: string, attributes: Map<string, string>): string {
+  const explicit = attributes.get("role")?.trim();
+  if (explicit) return explicit;
+  if (tagName === "a") return "link";
+  if (tagName === "button") return "button";
+  if (tagName === "textarea") return "textbox";
+  if (tagName === "select") return "combobox";
+  if (tagName === "input") {
+    const type = (attributes.get("type") ?? "text").toLowerCase();
+    if (type === "checkbox") return "checkbox";
+    if (type === "radio") return "radio";
+    if (type === "button" || type === "submit") return "button";
+    return "textbox";
+  }
+  return "generic";
+}
+
+function createPiercedSnapshotCandidate(
+  node: Record<string, unknown>,
+  bounds: { x: number; y: number; width: number; height: number },
+  documentId: string
+): SnapshotElementCandidate {
+  const attributes = readCdpAttributes(node);
+  const tagName = cdpNodeTagName(node);
+  const inputType = tagName === "input" ? (attributes.get("type") ?? "text") : undefined;
+  const editable = tagName === "textarea"
+    || tagName === "select"
+    || attributes.has("contenteditable")
+    || (tagName === "input" && !["button", "submit", "checkbox", "radio"].includes((inputType ?? "text").toLowerCase()));
+  const text = tagName === "input"
+    ? (attributes.get("value") || attributes.get("placeholder") || "")
+    : cdpNodeText(node);
+  const label = attributes.get("aria-label")?.trim()
+    || attributes.get("title")?.trim()
+    || text;
+  const id = attributes.get("id")?.trim();
+  const href = attributes.get("href");
+  const name = attributes.get("name");
+  const placeholder = attributes.get("placeholder");
+  return {
+    frameId: 0,
+    documentId,
+    role: inferPiercedRole(tagName, attributes),
+    label,
+    text,
+    bounds,
+    state: {
+      ...(editable ? { value: attributes.get("value") ?? "" } : {}),
+      ...(tagName === "input" && ["checkbox", "radio"].includes((inputType ?? "").toLowerCase())
+        ? { checked: attributes.has("checked") }
+        : {})
+    },
+    ...(id ? { selectorHint: `#${id}` } : {}),
+    tagName,
+    disabled: attributes.has("disabled"),
+    editable,
+    ...(href !== undefined ? { href } : {}),
+    ...(inputType !== undefined ? { inputType } : {}),
+    ...(name ? { name } : {}),
+    ...(placeholder ? { placeholder } : {})
+  };
+}
+
+function readCdpBoxBounds(value: unknown): { x: number; y: number; width: number; height: number } | null {
+  if (!isRecord(value) || !isRecord(value.model)) return null;
+  const quad = Array.isArray(value.model.border)
+    ? value.model.border
+    : Array.isArray(value.model.content)
+      ? value.model.content
+      : null;
+  if (!quad || quad.length < 8 || !quad.every((coordinate) => typeof coordinate === "number" && Number.isFinite(coordinate))) return null;
+  const xs = [quad[0], quad[2], quad[4], quad[6]] as number[];
+  const ys = [quad[1], quad[3], quad[5], quad[7]] as number[];
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+function piercedCandidateMatchesQuery(candidate: SnapshotElementCandidate, query: string): boolean {
+  const haystack = [
+    candidate.label ?? "",
+    candidate.text ?? "",
+    candidate.role,
+    candidate.href ?? "",
+    candidate.inputType ?? "",
+    candidate.name ?? "",
+    candidate.placeholder ?? "",
+    candidate.selectorHint ?? "",
+    candidate.tagName ?? ""
+  ].join(" ").toLowerCase().replace(/\s+/g, " ").trim();
+  return haystack.includes(query);
+}
+
+function isPiercedCandidateInteractive(candidate: SnapshotElementCandidate): boolean {
+  if (candidate.disabled === true) return false;
+  if (candidate.editable === true) return true;
+  return ["button", "link", "textbox", "searchbox", "combobox", "checkbox", "radio", "switch", "tab", "menuitem", "option", "slider", "spinbutton"]
+    .includes(candidate.role.toLowerCase());
+}
+
 export function capturePortusSnapshotPayload(
   filterInput: Record<string, unknown> | null = null,
   collectionLimit = 10000
@@ -4111,6 +4493,7 @@ export function capturePortusSnapshotPayload(
         selectorHint: string;
         shadowPath?: Array<{ hostSelectorHint: string; rootType: "open" | "closed" }>;
       }>;
+      closedShadowRootAccessAvailable?(): boolean;
     };
   }).__portusComposedDom;
   if (!runtime || typeof runtime.collect !== "function") {
@@ -4199,7 +4582,8 @@ export function capturePortusSnapshotPayload(
     elements,
     candidateCount,
     matchedElementCount,
-    truncated
+    truncated,
+    closedShadowRootAccessAvailable: runtime.closedShadowRootAccessAvailable?.() === true
   };
 
   function roleForElement(element: HTMLElement): string {

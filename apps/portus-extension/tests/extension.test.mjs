@@ -2266,6 +2266,7 @@ test("uses debugger input for drag when advanced backend is enabled", async () =
           title: "Drag",
           viewport: { width: 1200, height: 800, deviceScaleFactor: 1 },
           visibleText: "Drag Drop",
+          closedShadowRootAccessAvailable: true,
           elements: [
             {
               role: "button",
@@ -2312,6 +2313,131 @@ test("uses debugger input for drag when advanced backend is enabled", async () =
   ]);
   assert.equal(fixture.actions.length, 0);
   assert.deepEqual(fixture.debuggerDetaches, [{ target: { tabId: 1 } }]);
+});
+
+test("uses pierced CDP only for inaccessible closed roots when advanced backend is enabled", async () => {
+  const fixture = createChromeFixture({
+    executeScript(injection) {
+      if (injection.files) return Promise.resolve([{ result: undefined }]);
+      if (injection.target?.allFrames === true) {
+        return Promise.resolve([{
+          frameId: 0,
+          documentId: "doc_main",
+          result: {
+            url: "https://example.com/secure",
+            title: "Secure",
+            viewport: { width: 1200, height: 800, deviceScaleFactor: 1 },
+            visibleText: "",
+            elements: [],
+            candidateCount: 0,
+            matchedElementCount: 0,
+            truncated: false,
+            closedShadowRootAccessAvailable: false
+          }
+        }]);
+      }
+      return Promise.resolve([{
+        frameId: 0,
+        documentId: "doc_main",
+        result: { width: 1200, height: 800 }
+      }]);
+    },
+    sendDebuggerCommand(_target, method, params) {
+      if (method === "DOM.getDocument") {
+        assert.deepEqual(params, { depth: -1, pierce: true });
+        return Promise.resolve({
+          root: {
+            nodeType: 9,
+            nodeName: "#document",
+            backendNodeId: 1,
+            children: [{
+              nodeType: 1,
+              nodeName: "SECURE-SHELL",
+              localName: "secure-shell",
+              backendNodeId: 2,
+              attributes: ["id", "secure"],
+              shadowRoots: [{
+                nodeType: 11,
+                nodeName: "#document-fragment",
+                backendNodeId: 3,
+                shadowRootType: "closed",
+                children: [{
+                  nodeType: 1,
+                  nodeName: "BUTTON",
+                  localName: "button",
+                  backendNodeId: 4,
+                  attributes: ["id", "closed-action", "aria-label", "Secret action"],
+                  children: [{
+                    nodeType: 3,
+                    nodeName: "#text",
+                    backendNodeId: 5,
+                    nodeValue: "Secret action"
+                  }]
+                }]
+              }]
+            }]
+          }
+        });
+      }
+      if (method === "DOM.getBoxModel") {
+        assert.deepEqual(params, { backendNodeId: 4 });
+        return Promise.resolve({
+          model: {
+            border: [10, 20, 110, 20, 110, 60, 10, 60],
+            content: [10, 20, 110, 20, 110, 60, 10, 60]
+          }
+        });
+      }
+      if (method === "DOM.resolveNode") {
+        assert.deepEqual(params, { backendNodeId: 4 });
+        return Promise.resolve({ object: { objectId: "remote_closed_action" } });
+      }
+      if (method === "Runtime.callFunctionOn") {
+        assert.equal(params.objectId, "remote_closed_action");
+        assert.match(params.functionDeclaration, /\.click\(\)/);
+        return Promise.resolve({ result: { value: true } });
+      }
+      return Promise.resolve({});
+    }
+  });
+  const bridge = createConnectedBridge(fixture);
+
+  const normal = await bridge.captureSnapshot(1, { query: "secret action" });
+  assert.equal(normal.elements.length, 0);
+  assert.equal(fixture.debuggerAttaches.length, 0);
+
+  await bridge.setAdvancedBackendEnabled(true, false);
+  const pierced = await bridge.captureSnapshot(1, { query: "secret action" });
+  assert.equal(pierced.elements.length, 1);
+  assert.equal(pierced.elements[0].elementId, "el_000001");
+  assert.equal(pierced.elements[0].frameId, 0);
+  assert.equal(pierced.elements[0].documentId, "doc_main");
+  assert.equal(pierced.elements[0].role, "button");
+  assert.equal(pierced.elements[0].label, "Secret action");
+  assert.equal("backendNodeId" in pierced.elements[0], false);
+  assert.equal(JSON.stringify(pierced).includes("backendNodeId"), false);
+  assert.deepEqual(fixture.debuggerCommands.map((command) => command.method), [
+    "DOM.getDocument",
+    "DOM.getBoxModel"
+  ]);
+
+  const action = await bridge.performAction("click", {
+    tabId: 1,
+    snapshotId: pierced.snapshotId,
+    elementId: pierced.elements[0].elementId
+  });
+  assert.equal(action.backend, "debugger-cdp");
+  assert.equal(action.snapshotInvalidated, true);
+  assert.equal(action.details.piercedClosedShadowFallback, true);
+  assert.deepEqual(fixture.debuggerCommands.map((command) => command.method), [
+    "DOM.getDocument",
+    "DOM.getBoxModel",
+    "DOM.resolveNode",
+    "Runtime.callFunctionOn"
+  ]);
+  assert.equal(fixture.actions.length, 0);
+  assert.equal(fixture.debuggerAttaches.length, 2);
+  assert.equal(fixture.debuggerDetaches.length, 2);
 });
 
 test("detaches debugger sessions when a debugger command fails after attach", async () => {
@@ -3006,6 +3132,7 @@ function defaultSnapshotScriptResult() {
       title: "Example",
       viewport: { width: 1200, height: 800, deviceScaleFactor: 1 },
       visibleText: "Submit Name",
+      closedShadowRootAccessAvailable: true,
       elements: [
         {
           role: "button",

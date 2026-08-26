@@ -66,16 +66,20 @@ test("traverses closed shadow roots through chrome.dom and degrades to open-only
 
   assert.equal(host.shadowRoot, null);
 
-  const openOnlyRuntime = installPortusComposedDomRuntime({});
+  const openOnlyRuntime = installPortusComposedDomRuntime({ document });
+  assert.equal(openOnlyRuntime.closedShadowRootAccessAvailable(), false);
   assert.equal(openOnlyRuntime.shadowRootForElement(host), null);
   assert.equal(openOnlyRuntime.collect(document).some((entry) => entry.element.id === "closed-action"), false);
 
   const throwingRuntime = installPortusComposedDomRuntime({
+    document,
     chrome: { dom: { openOrClosedShadowRoot() { throw new Error("unsupported"); } } }
   });
+  assert.equal(throwingRuntime.closedShadowRootAccessAvailable(), false);
   assert.equal(throwingRuntime.shadowRootForElement(host), null);
 
   const closedRuntime = installPortusComposedDomRuntime({
+    document,
     chrome: {
       dom: {
         openOrClosedShadowRoot(element) {
@@ -86,6 +90,7 @@ test("traverses closed shadow roots through chrome.dom and degrades to open-only
   });
   const closedEntry = closedRuntime.collect(document).find((entry) => entry.element.id === "closed-action");
 
+  assert.equal(closedRuntime.closedShadowRootAccessAvailable(), true);
   assert.equal(closedRuntime.shadowRootForElement(host), closedRoot);
   assert.equal(closedEntry.root, closedRoot);
   assert.equal(closedEntry.selectorHint, "#closed-action");

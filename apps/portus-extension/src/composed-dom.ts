@@ -11,6 +11,7 @@ export interface PortusComposedDomRuntime {
   collect(root?: Document | ShadowRoot): PortusComposedDomEntry[];
   selectorForElement(element: Element, root: Document | ShadowRoot): string;
   shadowRootForElement(element: Element): ShadowRoot | null;
+  closedShadowRootAccessAvailable(): boolean;
 }
 
 type PortusChromeDomGlobal = typeof globalThis & {
@@ -128,7 +129,20 @@ export function createPortusComposedDomRuntime(
   return {
     collect: (root = document) => collectPortusComposedDomElements(root, environment),
     selectorForElement: selectorForPortusComposedElement,
-    shadowRootForElement: (element) => shadowRootForPortusElement(element, environment)
+    shadowRootForElement: (element) => shadowRootForPortusElement(element, environment),
+    closedShadowRootAccessAvailable: () => {
+      const chromeDom = (environment as PortusChromeDomGlobal).chrome?.dom;
+      const accessor = chromeDom?.openOrClosedShadowRoot;
+      if (typeof accessor !== "function") return false;
+      const probe = (environment as typeof globalThis & { document?: Document }).document?.documentElement;
+      if (!probe) return true;
+      try {
+        accessor.call(chromeDom, probe);
+        return true;
+      } catch {
+        return false;
+      }
+    }
   };
 }
 
