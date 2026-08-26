@@ -8,7 +8,8 @@ import { encodeNativeMessage, tryReadNativeMessageFrame } from "@portus/native-m
 import { DEFAULT_COMMAND_POLICY } from "@portus/protocol";
 import { deserializeTransportFrame, serializeTransportFrame } from "@portus/transport";
 import { createNativeHostRelay } from "@portus/native-host";
-import { capturePortusSnapshotPayload, createPortusExtensionBridge, detectBrowserName } from "../dist/index.js";
+import { capturePortusSnapshotPayload, createPortusExtensionBridge, detectBrowserName, evaluatePortusPageWait } from "../dist/index.js";
+import { installPortusComposedDomRuntime } from "../dist/composed-dom.js";
 import { JSDOM } from "jsdom";
 
 const TEST_BROKER_TOKEN = "test-broker-token";
@@ -1014,6 +1015,10 @@ test("captures snapshots with actionable elements", async () => {
 
   assert.equal(snapshot.snapshotId, "snap_000001");
   assert.equal(snapshot.visibleText, "Submit Name");
+  assert.deepEqual(fixture.scriptInjections[0].files, ["dist/composed-dom-runtime.js"]);
+  assert.equal(fixture.scriptInjections[0].target.allFrames, true);
+  assert.equal(typeof fixture.scriptInjections[1].func, "function");
+  assert.equal(fixture.scriptInjections[1].target.allFrames, true);
   assert.equal(snapshot.elements[0].elementId, "el_000001");
   assert.equal(snapshot.elements[0].selectorHint, "button:nth-of-type(1)");
 });
@@ -1126,7 +1131,8 @@ test("captures filtered snapshots and allows actions with returned element ids",
   assert.equal(snapshot.filtered, true);
   assert.equal(snapshot.snapshotId, "snap_000001");
   assert.deepEqual(snapshot.elements.map((element) => element.elementId), ["el_000001"]);
-  assert.equal(snapshot.elements[0].href, "https://example.com/reviews");  assert.deepEqual(snapshot.elements[0].shadowPath, [
+  assert.equal(snapshot.elements[0].href, "https://example.com/reviews");
+  assert.deepEqual(snapshot.elements[0].shadowPath, [
     { hostSelectorHint: "app-shell:nth-of-type(1)", rootType: "open" }
   ]);
 
@@ -1189,6 +1195,9 @@ test("captures iframe elements and routes actions to the originating document", 
               bounds: { x: 20, y: 30, width: 120, height: 40 },
               state: {},
               selectorHint: "#child-action",
+              shadowPath: [
+                { hostSelectorHint: "#child-shell", rootType: "open" }
+              ],
               tagName: "button"
             }]
           }
@@ -1205,6 +1214,9 @@ test("captures iframe elements and routes actions to the originating document", 
   assert.equal(snapshot.elements.length, 1);
   assert.equal(snapshot.elements[0].frameId, 7);
   assert.equal(snapshot.elements[0].documentId, "doc_child");
+  assert.deepEqual(snapshot.elements[0].shadowPath, [
+    { hostSelectorHint: "#child-shell", rootType: "open" }
+  ]);
 
   await bridge.performAction("click", {
     tabId: 1,
@@ -1262,27 +1274,118 @@ test("document-targeted actions fail stale after the captured iframe document di
   }), { code: "SNAPSHOT_STALE" });
 });
 
-test("page wait matches conditions inside child frames and returns frame identity", async () => {
+test("page wait preserves Shadow DOM diagnostics inside child frames", async () => {
   const fixture = createChromeFixture({
     executeScript(injection) {
       assert.equal(injection.target.allFrames, true);
+      if (Array.isArray(injection.files)) {
+        assert.deepEqual(injection.files, ["dist/composed-dom-runtime.js"]);
+        return Promise.resolve([
+          { frameId: 0, documentId: "doc_main" },
+          { frameId: 11, documentId: "doc_wait_child" }
+        ]);
+      }
+      assert.equal(typeof injection.func, "function");
       return Promise.resolve([
         { frameId: 0, documentId: "doc_main", result: { matched: false } },
         {
           frameId: 11,
           documentId: "doc_wait_child",
-          result: { matched: true, details: { match: "text", text: "Inside frame" } }
+          result: {
+            matched: true,
+            details: {
+              match: "element",
+              label: "Inside frame shadow",
+              shadowDepth: 1,
+              shadowPath: [{ hostSelectorHint: "#child-shell", rootType: "open" }]
+            }
+          }
         }
       ]);
     }
   });
   const bridge = createConnectedBridge(fixture);
 
-  const wait = await bridge.waitForPage({ tabId: 1, text: "Inside frame", timeoutMs: 500 });
+  const wait = await bridge.waitForPage({ tabId: 1, elementQuery: "Inside frame shadow", timeoutMs: 500 });
 
   assert.equal(wait.matched, true);
   assert.equal(wait.details.frameId, 11);
   assert.equal(wait.details.documentId, "doc_wait_child");
+  assert.equal(wait.details.shadowDepth, 1);
+  assert.deepEqual(wait.details.shadowPath, [
+    { hostSelectorHint: "#child-shell", rootType: "open" }
+  ]);
+  assert.deepEqual(fixture.scriptInjections[0].files, ["dist/composed-dom-runtime.js"]);
+  assert.equal(typeof fixture.scriptInjections[1].func, "function");
+});
+
+test("page wait evaluator matches text and elements inside nested Shadow DOM", () => {
+  const dom = new JSDOM(`<!doctype html><html><body>
+    <div>Light content</div>
+    <app-shell id="app"></app-shell>
+  </body></html>`, { url: "https://example.com/" });
+  const document = dom.window.document;
+  const app = document.querySelector("#app");
+  const appRoot = app.attachShadow({ mode: "open" });
+  appRoot.innerHTML = `<span>Shadow text marker</span><nested-panel id="nested"></nested-panel>`;
+  const nested = appRoot.querySelector("#nested");
+  const nestedRoot = nested.attachShadow({ mode: "open" });
+  nestedRoot.innerHTML = `<button id="deep-action" aria-label="Deep shadow action">Go</button>`;
+
+  const descriptors = new Map();
+  const globals = {
+    window: dom.window,
+    document,
+    ShadowRoot: dom.window.ShadowRoot,
+    HTMLInputElement: dom.window.HTMLInputElement,
+    HTMLTextAreaElement: dom.window.HTMLTextAreaElement
+  };
+  for (const [key, value] of Object.entries(globals)) {
+    descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  }
+  descriptors.set("__portusComposedDom", Object.getOwnPropertyDescriptor(globalThis, "__portusComposedDom"));
+  installPortusComposedDomRuntime(globalThis);
+  dom.window.HTMLElement.prototype.getBoundingClientRect = () => ({
+    x: 0,
+    y: 0,
+    left: 0,
+    top: 0,
+    right: 100,
+    bottom: 24,
+    width: 100,
+    height: 24,
+    toJSON() { return this; }
+  });
+
+  try {
+    assert.doesNotMatch(document.body.textContent, /Shadow text marker/);
+
+    const textWait = evaluatePortusPageWait({ text: "shadow text marker" });
+    assert.equal(textWait.matched, true);
+    assert.equal(textWait.details.match, "text");
+    assert.equal(textWait.details.shadowDepth, 1);
+    assert.deepEqual(textWait.details.shadowPath, [
+      { hostSelectorHint: "#app", rootType: "open" }
+    ]);
+
+    const elementWait = evaluatePortusPageWait({ elementQuery: "deep shadow action", role: "button" });
+    assert.equal(elementWait.matched, true);
+    assert.equal(elementWait.details.match, "element");
+    assert.equal(elementWait.details.label, "Deep shadow action");
+    assert.equal(elementWait.details.selectorHint, "#deep-action");
+    assert.equal(elementWait.details.shadowDepth, 2);
+    assert.deepEqual(elementWait.details.shadowPath, [
+      { hostSelectorHint: "#app", rootType: "open" },
+      { hostSelectorHint: "#nested", rootType: "open" }
+    ]);
+  } finally {
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    }
+    dom.window.close();
+  }
 });
 
 test("partial fill-form spans frame documents while atomic mode rejects cross-document fills", async () => {
@@ -1400,6 +1503,8 @@ test("snapshot collection filters beyond the first 100 candidates before applyin
     descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
     Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
   }
+  descriptors.set("__portusComposedDom", Object.getOwnPropertyDescriptor(globalThis, "__portusComposedDom"));
+  installPortusComposedDomRuntime(globalThis);
   Object.defineProperty(dom.window.HTMLElement.prototype, "offsetWidth", { configurable: true, get: () => 100 });
   Object.defineProperty(dom.window.HTMLElement.prototype, "offsetHeight", { configurable: true, get: () => 20 });
   dom.window.HTMLElement.prototype.getBoundingClientRect = () => ({
@@ -1430,6 +1535,89 @@ test("snapshot collection filters beyond the first 100 candidates before applyin
     assert.equal(capped.candidateCount, 150);
     assert.equal(capped.matchedElementCount, 150);
     assert.equal(capped.elements.length, 120);
+    assert.equal(capped.truncated, true);
+  } finally {
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    }
+    dom.window.close();
+  }
+});
+
+test("snapshot collection traverses nested Shadow DOM and preserves filtering metadata", () => {
+  const dom = new JSDOM(`<!doctype html><html><body>
+    <button id="light">Light action</button>
+    <app-shell id="app"></app-shell>
+  </body></html>`, { url: "https://example.com/" });
+  const document = dom.window.document;
+  const app = document.querySelector("#app");
+  const appRoot = app.attachShadow({ mode: "open" });
+  appRoot.innerHTML = `<button id="shadow-action">Shadow action</button><nested-panel id="nested"></nested-panel>`;
+  const nested = appRoot.querySelector("#nested");
+  const nestedRoot = nested.attachShadow({ mode: "open" });
+  nestedRoot.innerHTML = `<span id="deep-label">Deep search</span><input id="deep-input" aria-labelledby="deep-label" />`;
+
+  const descriptors = new Map();
+  const globals = {
+    window: dom.window,
+    document,
+    location: dom.window.location,
+    HTMLElement: dom.window.HTMLElement,
+    HTMLInputElement: dom.window.HTMLInputElement,
+    HTMLAnchorElement: dom.window.HTMLAnchorElement,
+    getComputedStyle: dom.window.getComputedStyle.bind(dom.window)
+  };
+  for (const [key, value] of Object.entries(globals)) {
+    descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  }
+  descriptors.set("__portusComposedDom", Object.getOwnPropertyDescriptor(globalThis, "__portusComposedDom"));
+  installPortusComposedDomRuntime(globalThis);
+  Object.defineProperty(dom.window.HTMLElement.prototype, "offsetWidth", { configurable: true, get: () => 100 });
+  Object.defineProperty(dom.window.HTMLElement.prototype, "offsetHeight", { configurable: true, get: () => 20 });
+  dom.window.HTMLElement.prototype.getBoundingClientRect = () => ({
+    x: 0,
+    y: 0,
+    left: 0,
+    top: 0,
+    right: 100,
+    bottom: 20,
+    width: 100,
+    height: 20,
+    toJSON() { return this; }
+  });
+
+  try {
+    const all = capturePortusSnapshotPayload(null, 10000);
+    assert.equal(all.candidateCount, 3);
+    assert.equal(all.matchedElementCount, 3);
+    assert.equal(all.truncated, false);
+    assert.deepEqual(all.elements.map((element) => element.label), ["Light action", "Shadow action", "Deep search"]);
+    const deep = all.elements[2];
+    assert.equal(deep.selectorHint, "#deep-input");
+    assert.deepEqual(deep.shadowPath, [
+      { hostSelectorHint: "#app", rootType: "open" },
+      { hostSelectorHint: "#nested", rootType: "open" }
+    ]);
+
+    const filtered = capturePortusSnapshotPayload({
+      query: "deep search",
+      role: "textbox",
+      interactiveOnly: true,
+      maxElements: 1
+    }, 10000);
+    assert.equal(filtered.candidateCount, 3);
+    assert.equal(filtered.matchedElementCount, 1);
+    assert.equal(filtered.truncated, false);
+    assert.equal(filtered.elements.length, 1);
+    assert.equal(filtered.elements[0].selectorHint, "#deep-input");
+    assert.deepEqual(filtered.elements[0].shadowPath, deep.shadowPath);
+
+    const capped = capturePortusSnapshotPayload({ interactiveOnly: true, maxElements: 2 }, 10000);
+    assert.equal(capped.candidateCount, 3);
+    assert.equal(capped.matchedElementCount, 3);
+    assert.equal(capped.elements.length, 2);
     assert.equal(capped.truncated, true);
   } finally {
     for (const [key, descriptor] of descriptors) {

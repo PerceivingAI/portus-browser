@@ -190,7 +190,8 @@ export interface PortusChromeApi {
         frameIds?: number[];
         documentIds?: string[];
       };
-      func: (...args: never[]) => unknown;
+      func?: (...args: never[]) => unknown;
+      files?: string[];
       args?: unknown[];
       world?: "ISOLATED" | "MAIN";
     }): Promise<ChromeScriptInjectionResult[]> | void;
@@ -309,6 +310,7 @@ const DEFAULT_SETTINGS_PROFILE_CONTENT: SettingsProfileContent = SettingsProfile
 const DEFAULT_NATIVE_REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_TERMINAL_REQUEST_TIMEOUT_MS = 15000;
 const SNAPSHOT_COLLECTION_LIMIT = 10000;
+const COMPOSED_DOM_RUNTIME_FILE = "dist/composed-dom-runtime.js";
 
 function createDefaultSettingsProfileState(): SettingsProfileState {
   return SettingsProfileStateSchema.parse({
@@ -346,29 +348,67 @@ function performPortusHistoryNavigation(direction: "back" | "forward"): Record<s
   return { ok: true, direction };
 }
 
-function evaluatePortusPageWait(condition: Record<string, unknown>): Record<string, unknown> {
+export function evaluatePortusPageWait(condition: Record<string, unknown>): Record<string, unknown> {
+  type WaitShadowPath = Array<{ hostSelectorHint: string; rootType: "open" | "closed" }>;
+  type WaitComposedEntry = {
+    element: Element;
+    root: Document | ShadowRoot;
+    selectorHint: string;
+    shadowPath?: WaitShadowPath;
+  };
+
   const normalize = (value: unknown): string => typeof value === "string" ? value.trim().toLowerCase() : "";
   const text = normalize(condition.text);
   const elementQuery = normalize(condition.elementQuery);
   const role = normalize(condition.role);
-  const visibleText = document.body?.textContent ?? "";
-
-  if (text && visibleText.toLowerCase().includes(text)) {
-    return {
-      matched: true,
-      details: {
-        match: "text",
-        text: condition.text
-      }
+  const runtime = (globalThis as typeof globalThis & {
+    __portusComposedDom?: {
+      collect(root?: Document | ShadowRoot): WaitComposedEntry[];
     };
+  }).__portusComposedDom;
+  if (!runtime || typeof runtime.collect !== "function") {
+    throw new Error("Portus composed-DOM runtime is unavailable.");
+  }
+
+  const entries = runtime.collect(document);
+  if (text) {
+    const lightText = document.body?.textContent ?? "";
+    if (lightText.toLowerCase().includes(text)) {
+      return {
+        matched: true,
+        details: {
+          match: "text",
+          text: condition.text
+        }
+      };
+    }
+
+    const seenRoots = new Set<ShadowRoot>();
+    for (const entry of entries) {
+      if (!(entry.root instanceof ShadowRoot) || seenRoots.has(entry.root)) continue;
+      seenRoots.add(entry.root);
+      const shadowText = entry.root.textContent ?? "";
+      if (!shadowText.toLowerCase().includes(text)) continue;
+      return {
+        matched: true,
+        details: {
+          match: "text",
+          text: condition.text,
+          shadowDepth: entry.shadowPath?.length ?? 0,
+          ...(entry.shadowPath === undefined ? {} : { shadowPath: entry.shadowPath })
+        }
+      };
+    }
   }
 
   if (!elementQuery && !role) {
     return { matched: false };
   }
 
-  const candidates = Array.from(document.querySelectorAll("a, button, input, textarea, select, [role], [aria-label], [title]"));
-  for (const element of candidates) {
+  const candidateSelector = "a, button, input, textarea, select, [role], [aria-label], [title]";
+  for (const entry of entries) {
+    const element = entry.element;
+    if (!element.matches(candidateSelector)) continue;
     const rect = element.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) continue;
     const ariaLabel = element.getAttribute("aria-label") ?? "";
@@ -392,7 +432,10 @@ function evaluatePortusPageWait(condition: Record<string, unknown>): Record<stri
         role: candidateRole || tagName,
         tagName,
         text: (element.textContent ?? "").trim().slice(0, 200),
-        label: (ariaLabel || title || placeholder || (element.textContent ?? "")).trim().slice(0, 200)
+        label: (ariaLabel || title || placeholder || (element.textContent ?? "")).trim().slice(0, 200),
+        selectorHint: entry.selectorHint,
+        shadowDepth: entry.shadowPath?.length ?? 0,
+        ...(entry.shadowPath === undefined ? {} : { shadowPath: entry.shadowPath })
       }
     };
   }
@@ -2877,6 +2920,22 @@ export class PortusExtensionBridge {
     });
   }
 
+  private async installComposedDomRuntime(tabId: number): Promise<void> {
+    if (!this.chromeApi.scripting) {
+      throw createPortusError({
+        code: "CAPABILITY_UNAVAILABLE",
+        message: "Chrome scripting API is unavailable."
+      });
+    }
+    await mapChromeAccessOperation("install composed DOM runtime", promisifyChromeCall<ChromeScriptInjectionResult[]>((done) => {
+      const result = this.chromeApi.scripting?.executeScript({
+        target: { tabId, allFrames: true },
+        files: [COMPOSED_DOM_RUNTIME_FILE]
+      });
+      done(result as Promise<ChromeScriptInjectionResult[]> | ChromeScriptInjectionResult[] | undefined);
+    }));
+  }
+
   private async executeSnapshotScript(tabId: number, filter?: SnapshotFilter): Promise<Record<string, unknown>> {
     if (!this.chromeApi.scripting) {
       throw createPortusError({
@@ -2886,6 +2945,8 @@ export class PortusExtensionBridge {
     }
 
     const collectionFilter = createSnapshotCollectionFilter(filter);
+    await this.installComposedDomRuntime(tabId);
+
     const results = await mapChromeAccessOperation("execute snapshot script", promisifyChromeCall<ChromeScriptInjectionResult[]>((done) => {
       const result = this.chromeApi.scripting?.executeScript({
         target: { tabId, allFrames: true },
@@ -2964,6 +3025,7 @@ export class PortusExtensionBridge {
         message: "Chrome scripting API is unavailable."
       });
     }
+    await this.installComposedDomRuntime(tabId);
     const results = await mapChromeAccessOperation("execute page wait script", promisifyChromeCall<ChromeScriptInjectionResult[]>((done) => {
       const result = this.chromeApi.scripting?.executeScript({
         target: { tabId, allFrames: true },
@@ -3841,7 +3903,8 @@ function readElementCandidates(value: unknown): SnapshotElementCandidate[] {
       bounds: readBounds(element.bounds),
       state: isRecord(element.state) ? element.state : {}
     };
-    if (typeof element.selectorHint === "string") candidate.selectorHint = element.selectorHint;    if (element.shadowPath !== undefined) {
+    if (typeof element.selectorHint === "string") candidate.selectorHint = element.selectorHint;
+    if (element.shadowPath !== undefined) {
       const shadowPath = ShadowPathSchema.safeParse(element.shadowPath);
       if (!shadowPath.success) {
         throw createPortusError({
@@ -3876,7 +3939,8 @@ function createDomActionTarget(element: SnapshotElement): Record<string, unknown
     bounds: element.bounds,
     state: element.state
   };
-  if (element.selectorHint !== undefined) target.selectorHint = element.selectorHint;  if (element.shadowPath !== undefined) target.shadowPath = element.shadowPath;
+  if (element.selectorHint !== undefined) target.selectorHint = element.selectorHint;
+  if (element.shadowPath !== undefined) target.shadowPath = element.shadowPath;
 
   if (element.tagName !== undefined) target.tagName = element.tagName;
   if (element.disabled !== undefined) target.disabled = element.disabled;
@@ -4036,9 +4100,25 @@ export function capturePortusSnapshotPayload(
   filterInput: Record<string, unknown> | null = null,
   collectionLimit = 10000
 ): Record<string, unknown> {
-  const candidates = Array.from(document.querySelectorAll("button,a[href],input,textarea,select,[role],[contenteditable],[tabindex]:not([tabindex^=\"-\"]),[onclick]"))
-    .filter((node): node is HTMLElement => node instanceof HTMLElement)
-    .filter((element) => {
+  const runtime = (globalThis as typeof globalThis & {
+    __portusComposedDom?: {
+      collect(root?: Document | ShadowRoot): Array<{
+        element: Element;
+        root: Document | ShadowRoot;
+        selectorHint: string;
+        shadowPath?: Array<{ hostSelectorHint: string; rootType: "open" | "closed" }>;
+      }>;
+    };
+  }).__portusComposedDom;
+  if (!runtime || typeof runtime.collect !== "function") {
+    throw new Error("Portus composed-DOM runtime is unavailable.");
+  }
+
+  const candidateSelector = "button,a[href],input,textarea,select,[role],[contenteditable],[tabindex]:not([tabindex^=\"-\"]),[onclick]";
+  const candidates = runtime.collect(document)
+    .filter((entry) => entry.element instanceof HTMLElement && entry.element.matches(candidateSelector))
+    .filter((entry) => {
+      const element = entry.element as HTMLElement;
       if (element.offsetWidth === 0 || element.offsetHeight === 0) return false;
       const style = getComputedStyle(element);
       if (style.display === "none" || style.visibility === "hidden") return false;
@@ -4050,7 +4130,8 @@ export function capturePortusSnapshotPayload(
     });
 
   const candidateCount = candidates.length;
-  let elements = candidates.map((element) => {
+  let elements = candidates.map((entry) => {
+    const element = entry.element as HTMLElement;
     const bounds = element.getBoundingClientRect();
     const tagName = element.tagName.toLowerCase();
     const input = element instanceof HTMLInputElement ? element : null;
@@ -4073,7 +4154,8 @@ export function capturePortusSnapshotPayload(
         checked: input?.checked ?? undefined,
         value: editable ? (input?.value ?? "") : undefined
       },
-      selectorHint: selectorForElement(element),
+      selectorHint: entry.selectorHint,
+      ...(entry.shadowPath === undefined ? {} : { shadowPath: entry.shadowPath }),
       tagName,
       disabled: "disabled" in element ? Boolean((element as HTMLButtonElement).disabled) : false,
       editable,
@@ -4138,7 +4220,11 @@ export function capturePortusSnapshotPayload(
     if (aria) return aria.trim();
     const labelledBy = element.getAttribute("aria-labelledby");
     if (labelledBy) {
-      const text = labelledBy.split(/\s+/).map((id) => document.getElementById(id)?.textContent?.trim() ?? "").filter(Boolean).join(" ");
+      const root = element.getRootNode() as Node & { getElementById?: (id: string) => Element | null };
+      const getById = typeof root.getElementById === "function"
+        ? (id: string) => root.getElementById?.(id) ?? null
+        : (id: string) => document.getElementById(id);
+      const text = labelledBy.split(/\s+/).map((id) => getById(id)?.textContent?.trim() ?? "").filter(Boolean).join(" ");
       if (text) return text;
     }
     if (element instanceof HTMLInputElement && element.labels && element.labels.length > 0) {
@@ -4152,20 +4238,6 @@ export function capturePortusSnapshotPayload(
     if (element instanceof HTMLInputElement) return element.value || element.placeholder || "";
     const rawText = (element.textContent || "").slice(0, 1000);
     return rawText.trim().replace(/\s+/g, " ").slice(0, 500);
-  }
-
-  function selectorForElement(element: HTMLElement): string {
-    if (element.id) return `#${CSS.escape(element.id)}`;
-    const parts: string[] = [];
-    let current: HTMLElement | null = element;
-    while (current && current !== document.body && parts.length < 5) {
-      const tagName = current.tagName.toLowerCase();
-      const siblings = Array.from(current.parentElement?.children ?? []).filter((sibling) => sibling.tagName === current?.tagName);
-      const index = siblings.indexOf(current) + 1;
-      parts.unshift(`${tagName}:nth-of-type(${Math.max(index, 1)})`);
-      current = current.parentElement;
-    }
-    return parts.join(" > ");
   }
 
   function elementMatchesQuery(element: typeof elements[number], normalizedQuery: string): boolean {
