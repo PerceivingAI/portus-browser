@@ -99,6 +99,19 @@ test("client messages validate by message type", () => {
   }).success, true);
 
   assert.equal(TerminalClientMessageSchema.safeParse({
+    type: "terminal.session.replace",
+    requestId: "treq_replace1",
+    terminalId: "term_abc123",
+    payload: { profileId: "powershell", cols: 100, rows: 30 }
+  }).success, true);
+
+  assert.equal(TerminalClientMessageSchema.safeParse({
+    type: "terminal.session.replace",
+    requestId: "treq_replace2",
+    payload: { profileId: "powershell", cols: 100, rows: 30 }
+  }).success, false);
+
+  assert.equal(TerminalClientMessageSchema.safeParse({
     type: "terminal.session.input",
     terminalId: "term_abc123",
     payload: { data: "dir\r" }
@@ -126,6 +139,16 @@ test("server messages validate output, sessions, and errors", () => {
   assert.equal(TerminalServerMessageSchema.safeParse({
     type: "terminal.sessions",
     payload: { sessions: [validSession()], activeTerminalId: "term_abc123" }
+  }).success, true);
+
+  assert.equal(TerminalServerMessageSchema.safeParse({
+    type: "terminal.session.replaced",
+    requestId: "treq_replace1",
+    terminalId: "term_def456",
+    payload: {
+      replacedTerminalId: "term_abc123",
+      session: validSession({ terminalId: "term_def456", profileId: "powershell", title: "Windows PowerShell" })
+    }
   }).success, true);
 
   assert.equal(TerminalServerMessageSchema.safeParse({

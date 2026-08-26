@@ -86,9 +86,14 @@ class FakePtyProcess {
 class FakePtyAdapter {
   constructor() {
     this.processes = [];
+    this.failNextSpawn = false;
   }
 
   spawn(options) {
+    if (this.failNextSpawn) {
+      this.failNextSpawn = false;
+      throw new Error("spawn failed");
+    }
     const pty = new FakePtyProcess(options);
     this.processes.push(pty);
     return pty;
@@ -218,6 +223,55 @@ test("enforces max sessions and profile availability", async () => {
   await assert.rejects(() => other.manager.createSession({ profileId: "missing", cols: 80, rows: 24 }), /Terminal profile is unavailable/);
 });
 
+test("replaces a terminal atomically at maxSessions", async () => {
+  const { manager, ptyAdapter } = windowsManager({ config: { maxSessions: 1 } });
+  const original = await manager.createSession({ profileId: "powershell", cols: 80, rows: 24 });
+
+  const replacement = await manager.replaceSession(original.terminalId, { profileId: "pwsh", cols: 100, rows: 30 });
+
+  assert.equal(replacement.profile.profileId, "pwsh");
+  assert.notEqual(replacement.terminalId, original.terminalId);
+  assert.equal(manager.activeTerminalId, replacement.terminalId);
+  assert.equal(manager.listSessions().length, 1);
+  assert.equal(manager.listSessions()[0].terminalId, replacement.terminalId);
+  assert.equal(ptyAdapter.processes.length, 2);
+  assert.equal(ptyAdapter.processes[0].killed, true);
+  assert.equal(ptyAdapter.processes[1].killed, false);
+});
+
+test("failed replacement preserves the original terminal session", async () => {
+  const { manager, ptyAdapter } = windowsManager({ config: { maxSessions: 1 } });
+  const original = await manager.createSession({ profileId: "powershell", cols: 80, rows: 24 });
+  ptyAdapter.failNextSpawn = true;
+
+  await assert.rejects(
+    () => manager.replaceSession(original.terminalId, { profileId: "pwsh", cols: 100, rows: 30 }),
+    /spawn failed/
+  );
+
+  assert.equal(manager.activeTerminalId, original.terminalId);
+  assert.equal(manager.listSessions().length, 1);
+  assert.equal(manager.listSessions()[0].terminalId, original.terminalId);
+  assert.equal(manager.listSessions()[0].status, "running");
+  assert.equal(ptyAdapter.processes.length, 1);
+  assert.equal(ptyAdapter.processes[0].killed, false);
+});
+
+test("rejects concurrent replacement of the same terminal session", async () => {
+  const { manager } = windowsManager({ config: { maxSessions: 1 } });
+  const original = await manager.createSession({ profileId: "powershell", cols: 80, rows: 24 });
+
+  const first = manager.replaceSession(original.terminalId, { profileId: "pwsh", cols: 100, rows: 30 });
+  await assert.rejects(
+    () => manager.replaceSession(original.terminalId, { profileId: "cmd", cols: 100, rows: 30 }),
+    /replacement is already in progress/
+  );
+  const replacement = await first;
+
+  assert.equal(manager.listSessions().length, 1);
+  assert.equal(manager.listSessions()[0].terminalId, replacement.terminalId);
+});
+
 test("disabling terminal kills sessions and enabling starts the default session", async () => {
   const { manager, ptyAdapter } = windowsManager();
   await manager.ensureReady();
@@ -342,6 +396,48 @@ test("terminal native host reusable create returns the same running default sess
   }
 });
 
+test("terminal native host replaces an attached session at maxSessions", async () => {
+  const { host, input, output, pty, ptys } = await startTerminalHostFixture({ config: { maxSessions: 1 } });
+  try {
+    await readNativeMessage(output);
+    input.write(encodeNativeMessage({
+      type: "terminal.session.create",
+      requestId: "treq_replace_create",
+      payload: { profileId: "powershell", cols: 100, rows: 30 }
+    }));
+    const created = await readNativeMessage(output);
+
+    input.write(encodeNativeMessage({
+      type: "terminal.session.replace",
+      requestId: "treq_replace",
+      terminalId: created.terminalId,
+      payload: { profileId: "pwsh", cols: 120, rows: 40 }
+    }));
+    const replaced = await readNativeMessage(output);
+
+    assert.equal(replaced.type, "terminal.session.replaced");
+    assert.equal(replaced.payload.replacedTerminalId, created.terminalId);
+    assert.equal(replaced.payload.session.profileId, "pwsh");
+    assert.notEqual(replaced.terminalId, created.terminalId);
+    assert.equal(host.manager.listSessions().length, 1);
+    assert.equal(host.manager.activeTerminalId, replaced.terminalId);
+    assert.equal(pty.killed, true);
+    assert.equal(ptys.length, 2);
+    assert.equal(ptys[1].killed, false);
+
+    input.write(encodeNativeMessage({
+      type: "terminal.session.input",
+      requestId: "treq_replace_input",
+      terminalId: replaced.terminalId,
+      payload: { data: "echo replacement\r" }
+    }));
+    await readNativeMessage(output);
+    assert.equal(ptys[1].writes.at(-1), "echo replacement\r");
+  } finally {
+    host.stop();
+  }
+});
+
 test("terminal native host returns stable errors for invalid terminal messages", async () => {
   const { host, input, output } = await startTerminalHostFixture();
   try {
@@ -397,6 +493,8 @@ async function startTerminalHostFixture(options = {}) {
   const input = new PassThrough();
   const output = new PassThrough();
   const pty = new FakePtyProcess();
+  const ptys = [pty];
+  let spawnCount = 0;
   const host = createTerminalNativeHost({
     input,
     output,
@@ -405,10 +503,20 @@ async function startTerminalHostFixture(options = {}) {
     cleanupIntervalMs: options.cleanupIntervalMs,
     setInterval: options.setInterval,
     clearInterval: options.clearInterval,
-    ptyAdapter: { spawn: () => pty },
+    ptyAdapter: {
+      spawn(options) {
+        if (spawnCount++ === 0) {
+          pty.options = options;
+          return pty;
+        }
+        const next = new FakePtyProcess(options);
+        ptys.push(next);
+        return next;
+      }
+    },
     shellDetector: new ShellDetector({
       platform: "win32",
-      probe: new FakeProbe(["powershell.exe"]),
+      probe: new FakeProbe(["powershell.exe", "pwsh.exe"]),
       env: { USERPROFILE: "C:/Users/test" }
     }),
     workingDirectoryResolver: new WorkingDirectoryResolver({
@@ -418,7 +526,7 @@ async function startTerminalHostFixture(options = {}) {
     })
   });
   await host.start();
-  return { host, input, output, pty };
+  return { host, input, output, pty, ptys };
 }
 
 function readNativeMessage(output) {

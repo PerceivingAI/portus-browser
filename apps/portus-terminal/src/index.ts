@@ -358,6 +358,7 @@ export class TerminalManager {
   private nextSessionNumber = 1;
   private activeTerminalIdValue: string | null = null;
   private defaultSessionPromise: Promise<TerminalSession> | null = null;
+  private readonly replacingTerminalIds = new Set<string>();
 
   constructor(options: TerminalManagerOptions) {
     this.settings = TerminalConfigSchema.parse({ ...DEFAULT_PORTUS_CONFIG.terminal, ...options.config });
@@ -439,30 +440,45 @@ export class TerminalManager {
     if (this.sessions.size >= this.settings.maxSessions) {
       throw terminalError("TERMINAL_UNAVAILABLE", "Maximum terminal session count reached.", { maxSessions: this.settings.maxSessions });
     }
-    const profiles = await this.listProfiles();
-    const profile = this.resolveSessionProfile(profiles, input.profileId);
-    const cwd = await this.workingDirectoryResolver.resolve(input.cwd ?? this.settings.defaultWorkingDirectory);
-    const pty = this.ptyAdapter.spawn({
-      command: profile.command,
-      args: profile.args,
-      cwd,
-      cols: input.cols,
-      rows: input.rows,
-      env: this.env
-    });
-    const session = new TerminalSession({
-      terminalId: this.createTerminalId(),
-      profile,
-      cwd,
-      cols: input.cols,
-      rows: input.rows,
-      now: this.now,
-      pty
-    });
+    const session = await this.prepareSession(input);
     this.sessions.set(session.terminalId, session);
     this.activeTerminalIdValue = session.terminalId;
-    if (this.settings.startupCommand) session.write(`${this.settings.startupCommand}\r`);
     return session;
+  }
+
+  async replaceSession(terminalId: string, input: { profileId?: TerminalProfileId; cwd?: string; cols: number; rows: number }): Promise<TerminalSession> {
+    if (!this.settings.enabled) throw terminalError("TERMINAL_UNAVAILABLE", "Terminal is disabled.", { enabled: false });
+    if (this.replacingTerminalIds.has(terminalId)) {
+      throw terminalError("TERMINAL_UNAVAILABLE", `Terminal session replacement is already in progress: ${terminalId}.`, { terminalId });
+    }
+    const previous = this.getSession(terminalId);
+    const wasActive = this.activeTerminalIdValue === terminalId;
+    this.replacingTerminalIds.add(terminalId);
+    let replacement: TerminalSession | undefined;
+    try {
+      replacement = await this.prepareSession(input);
+      if (this.sessions.get(terminalId) !== previous) {
+        replacement.close();
+        replacement = undefined;
+        throw terminalError("SESSION_NOT_FOUND", `Terminal session is unavailable: ${terminalId}.`, { terminalId });
+      }
+      previous.close();
+      this.sessions.delete(terminalId);
+      this.sessions.set(replacement.terminalId, replacement);
+      if (wasActive) this.activeTerminalIdValue = replacement.terminalId;
+      return replacement;
+    } catch (error) {
+      if (replacement && !this.sessions.has(replacement.terminalId)) {
+        try {
+          replacement.close();
+        } catch {
+          // Preserve the original replacement error.
+        }
+      }
+      throw error;
+    } finally {
+      this.replacingTerminalIds.delete(terminalId);
+    }
   }
 
   getSession(terminalId: string): TerminalSession {
@@ -507,6 +523,40 @@ export class TerminalManager {
 
   private createTerminalId(): string {
     return `term_${String(this.nextSessionNumber++).padStart(6, "0")}`;
+  }
+
+  private async prepareSession(input: { profileId?: TerminalProfileId; cwd?: string; cols: number; rows: number }): Promise<TerminalSession> {
+    const profiles = await this.listProfiles();
+    const profile = this.resolveSessionProfile(profiles, input.profileId);
+    const cwd = await this.workingDirectoryResolver.resolve(input.cwd ?? this.settings.defaultWorkingDirectory);
+    const pty = this.ptyAdapter.spawn({
+      command: profile.command,
+      args: profile.args,
+      cwd,
+      cols: input.cols,
+      rows: input.rows,
+      env: this.env
+    });
+    try {
+      const session = new TerminalSession({
+        terminalId: this.createTerminalId(),
+        profile,
+        cwd,
+        cols: input.cols,
+        rows: input.rows,
+        now: this.now,
+        pty
+      });
+      if (this.settings.startupCommand) session.write(`${this.settings.startupCommand}\r`);
+      return session;
+    } catch (error) {
+      try {
+        pty.kill();
+      } catch {
+        // Preserve the session preparation error.
+      }
+      throw error;
+    }
   }
 
   private findRunningSession(): TerminalSession | undefined {
@@ -689,6 +739,27 @@ export class TerminalNativeHost implements TerminalSessionClient {
           : await this.manager.createSession(createInput);
         this.attachSession(session);
         return { type: "terminal.session.created", requestId: message.requestId, terminalId: session.terminalId, payload: { session: session.metadata() } };
+      }
+      case "terminal.session.replace": {
+        const previous = this.manager.getSession(message.terminalId);
+        const wasAttached = this.attachedTerminalIds.has(message.terminalId);
+        const session = await this.manager.replaceSession(message.terminalId, {
+          cols: message.payload.cols,
+          rows: message.payload.rows,
+          ...(message.payload.profileId === undefined ? {} : { profileId: message.payload.profileId }),
+          ...(message.payload.cwd === undefined ? {} : { cwd: message.payload.cwd })
+        });
+        if (wasAttached) {
+          previous.detach(this);
+          this.attachedTerminalIds.delete(message.terminalId);
+        }
+        this.attachSession(session);
+        return {
+          type: "terminal.session.replaced",
+          requestId: message.requestId,
+          terminalId: session.terminalId,
+          payload: { replacedTerminalId: message.terminalId, session: session.metadata() }
+        };
       }
       case "terminal.session.attach": {
         const session = this.manager.getSession(message.terminalId);

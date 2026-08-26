@@ -1433,32 +1433,41 @@ function TerminalPanel({
 
   async function replaceActiveSessionProfile(profileId: string): Promise<void> {
     const next = TerminalSettingsSchema.parse({ ...settings, defaultProfileId: profileId });
-    setSettings(next);
     setOptionsOpen(false);
-    await sendRuntimeMessage({ type: "portus.terminal.settings.set", settings: next });
     if (!activeTerminalId) {
+      await sendRuntimeMessage({ type: "portus.terminal.settings.set", settings: next });
+      setSettings(next);
       onDiagnostic("Terminal settings saved.");
       return;
     }
     const oldTerminalId = activeTerminalId;
     setTerminalState("Switching");
-    const size = measureSize();
-    const created = await sendTerminal({ type: "terminal.session.create", requestId: nextRequestId(), payload: { profileId, cols: size.cols, rows: size.rows } });
-    if (created.type === "terminal.session.created") {
+    try {
+      const size = measureSize();
+      const replaced = await sendTerminal({
+        type: "terminal.session.replace",
+        requestId: nextRequestId(),
+        terminalId: oldTerminalId,
+        payload: { profileId, cols: size.cols, rows: size.rows }
+      });
+      if (replaced.type !== "terminal.session.replaced") {
+        throw new Error(`Unexpected terminal replacement response: ${replaced.type}.`);
+      }
       setSessions((current) => [
-        ...current.filter((session) => session.terminalId !== oldTerminalId && session.terminalId !== created.terminalId),
-        created.payload.session
+        ...current.filter((session) => session.terminalId !== oldTerminalId && session.terminalId !== replaced.terminalId),
+        replaced.payload.session
       ]);
-      setActiveTerminalId(created.terminalId);
+      setActiveTerminalId(replaced.terminalId);
+      termsRef.current.get(oldTerminalId)?.term.dispose();
+      termsRef.current.delete(oldTerminalId);
       setPlaceholder("");
+      await sendRuntimeMessage({ type: "portus.terminal.settings.set", settings: next });
+      setSettings(next);
       setTerminalState("Ready");
       onDiagnostic("");
-      void sendTerminal({ type: "terminal.session.close", requestId: nextRequestId(), terminalId: oldTerminalId, payload: {} })
-        .then(() => {
-          termsRef.current.get(oldTerminalId)?.term.dispose();
-          termsRef.current.delete(oldTerminalId);
-        })
-        .catch(onError);
+    } catch (error) {
+      setTerminalState("Ready");
+      throw error;
     }
   }
 
@@ -1599,7 +1608,7 @@ function TerminalPanel({
         <div className="flex items-center gap-1">
           <Tooltip>
             <TooltipTrigger asChild>
-              <Button aria-label="New Terminal Tab" disabled={disabled || !settings.enabled} onClick={() => void createSession().catch(onError)} size="icon" type="button" variant="ghost">
+              <Button aria-label="New Terminal Tab" disabled={disabled || !settings.enabled || terminalState === "Switching"} onClick={() => void createSession().catch(onError)} size="icon" type="button" variant="ghost">
                 <PlusIcon aria-hidden="true" />
               </Button>
             </TooltipTrigger>
@@ -1612,7 +1621,7 @@ function TerminalPanel({
                   aria-expanded={optionsOpen}
                   aria-haspopup="menu"
                   aria-label="Terminal Options"
-                  disabled={disabled || !settings.enabled}
+                  disabled={disabled || !settings.enabled || terminalState === "Switching"}
                   onClick={() => setOptionsOpen((current) => !current)}
                   size="icon"
                   type="button"
@@ -1629,6 +1638,7 @@ function TerminalPanel({
                 {(profiles.length === 0 ? [{ profileId: settings.defaultProfileId, label: settings.defaultProfileId }] : profiles).map((profile) => (
                   <button
                     className={`rounded-[var(--radius-sm)] px-2 py-1.5 text-left text-sm hover:bg-accent hover:text-accent-foreground ${profile.profileId === settings.defaultProfileId ? "bg-accent text-accent-foreground" : ""}`}
+                    disabled={terminalState === "Switching"}
                     key={profile.profileId}
                     onClick={() => {
                       void replaceActiveSessionProfile(profile.profileId).catch(onError);

@@ -108,6 +108,13 @@ export const TerminalCreateSessionPayloadSchema = z.object({
   reuseExisting: z.boolean().optional()
 }).strict();
 
+export const TerminalReplaceSessionPayloadSchema = z.object({
+  profileId: TerminalProfileIdSchema.optional(),
+  cwd: NonEmptyStringSchema.optional(),
+  cols: z.number().int().positive(),
+  rows: z.number().int().positive()
+}).strict();
+
 export const TerminalSettingsSetPayloadSchema = z.object({
   settings: TerminalSettingsSchema
 }).strict();
@@ -127,6 +134,7 @@ export const TerminalClientMessageTypeSchema = z.enum([
   "terminal.profiles.list",
   "terminal.sessions.list",
   "terminal.session.create",
+  "terminal.session.replace",
   "terminal.session.attach",
   "terminal.session.detach",
   "terminal.session.input",
@@ -139,6 +147,7 @@ export const TerminalServerMessageTypeSchema = z.enum([
   "terminal.profiles",
   "terminal.sessions",
   "terminal.session.created",
+  "terminal.session.replaced",
   "terminal.session.attached",
   "terminal.session.detached",
   "terminal.session.output",
@@ -171,6 +180,12 @@ export const TerminalClientMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("terminal.session.create"),
     requestId: TerminalRequestIdSchema.optional(),
     payload: TerminalCreateSessionPayloadSchema
+  }).strict(),
+  z.object({
+    type: z.literal("terminal.session.replace"),
+    requestId: TerminalRequestIdSchema.optional(),
+    terminalId: TerminalIdSchema,
+    payload: TerminalReplaceSessionPayloadSchema
   }).strict(),
   z.object({
     type: z.literal("terminal.session.attach"),
@@ -227,6 +242,15 @@ export const TerminalServerMessageSchema = z.discriminatedUnion("type", [
     payload: z.object({ session: TerminalSessionMetadataSchema }).strict()
   }).strict(),
   z.object({
+    type: z.literal("terminal.session.replaced"),
+    requestId: TerminalRequestIdSchema.optional(),
+    terminalId: TerminalIdSchema,
+    payload: z.object({
+      replacedTerminalId: TerminalIdSchema,
+      session: TerminalSessionMetadataSchema
+    }).strict()
+  }).strict(),
+  z.object({
     type: z.literal("terminal.session.attached"),
     requestId: TerminalRequestIdSchema.optional(),
     terminalId: TerminalIdSchema,
@@ -265,6 +289,7 @@ export type TerminalProfile = z.infer<typeof TerminalProfileSchema>;
 export type TerminalSettings = z.infer<typeof TerminalSettingsSchema>;
 export type TerminalSessionMetadata = z.infer<typeof TerminalSessionMetadataSchema>;
 export type TerminalResizePayload = z.infer<typeof TerminalResizePayloadSchema>;
+export type TerminalReplaceSessionPayload = z.infer<typeof TerminalReplaceSessionPayloadSchema>;
 export type TerminalOutputChunk = z.infer<typeof TerminalOutputChunkSchema>;
 export type TerminalErrorPayload = z.infer<typeof TerminalErrorPayloadSchema>;
 export type TerminalClientMessageType = z.infer<typeof TerminalClientMessageTypeSchema>;
