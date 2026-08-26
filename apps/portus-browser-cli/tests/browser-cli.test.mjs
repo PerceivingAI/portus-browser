@@ -540,6 +540,58 @@ test("recipes manages local recipe records", async () => {
   assert.deepEqual(broker.requests.map((request) => request.type), ["recipe.list", "recipe.search", "recipe.get", "recipe.resolve"]);
 });
 
+test("recipes structured input preserves the command id and applies explicit modifiers", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "portus-cli-recipes-"));
+  const broker = createMockBroker({});
+  const sourceRecipe = {
+    id: "structured",
+    name: "Original Name",
+    kind: "original-kind",
+    description: "Original description",
+    content: "Original content."
+  };
+
+  const created = await runPortusBrowserCli([
+    "recipes", "create", "structured", "Positional Name",
+    "--json-input", JSON.stringify(sourceRecipe),
+    "--name", "Flag Name",
+    "--kind", "overridden-kind",
+    "--description", "Overridden description",
+    "--directory", directory,
+    "--json"
+  ], { brokerClient: broker });
+
+  assert.equal(created.exitCode, 0);
+  const createdRecipe = JSON.parse(created.stdout).recipe;
+  assert.equal(createdRecipe.id, "structured");
+  assert.equal(createdRecipe.name, "Flag Name");
+  assert.equal(createdRecipe.kind, "overridden-kind");
+  assert.equal(createdRecipe.description, "Overridden description");
+
+  const positionalOnly = await runPortusBrowserCli([
+    "recipes", "create", "structured-positional", "Positional Override",
+    "--json-input", JSON.stringify({ ...sourceRecipe, id: "structured-positional" }),
+    "--directory", directory,
+    "--json"
+  ], { brokerClient: broker });
+  assert.equal(positionalOnly.exitCode, 0);
+  assert.equal(JSON.parse(positionalOnly.stdout).recipe.name, "Positional Override");
+
+  const mismatched = await runPortusBrowserCli([
+    "recipes", "create", "expected-id",
+    "--json-input", JSON.stringify({ ...sourceRecipe, id: "different-id" }),
+    "--directory", directory,
+    "--json"
+  ], { brokerClient: broker });
+  assert.equal(mismatched.exitCode, 1);
+  const mismatchError = JSON.parse(mismatched.stderr).error;
+  assert.equal(mismatchError.code, "RECIPE_INVALID");
+  assert.equal(mismatchError.details.recipeId, "expected-id");
+  assert.equal(mismatchError.details.inputRecipeId, "different-id");
+  await assert.rejects(() => getRecipeFromLibrary("different-id", { directory }), { code: "RECIPE_INVALID" });
+  assert.deepEqual(broker.requests, []);
+});
+
 test("recipes imports exports and protects overwrites", async () => {
   const directory = await mkdtemp(join(tmpdir(), "portus-cli-recipes-"));
   const sourceDirectory = await mkdtemp(join(tmpdir(), "portus-cli-recipe-source-"));
@@ -811,6 +863,21 @@ test("watch subscribes to live events and renders ndjson for --json", async () =
   assert.equal(result.stdout, "");
   assert.match(chunks.join(""), /"eventId":"evt_000001"/);
   assert.deepEqual(broker.subscriptions[0].payload, { browserId: "br_000001" });
+});
+
+test("watch honors quiet output for streamed events", async () => {
+  const broker = createMockBroker({}, {}, [event("evt_000001", "tab.created", "br_000001")]);
+  const chunks = [];
+
+  const result = await runPortusBrowserCli(["watch", "--quiet"], {
+    brokerClient: broker,
+    stdout: (chunk) => chunks.push(chunk)
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout, "");
+  assert.equal(chunks.join(""), "");
+  assert.equal(broker.subscriptions.length, 1);
 });
 
 test("dialog, console, and network diagnostics route to broker commands", async () => {

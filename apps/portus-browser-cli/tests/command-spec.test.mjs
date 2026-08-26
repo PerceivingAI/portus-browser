@@ -41,14 +41,24 @@ test("CLI-3 registry references canonical flag definitions and keeps globals inh
 
 test("CLI-3 registry records positional shapes for declarative validation", () => {
   const byPath = (path) => CLI_INVOCATIONS.find((entry) => cliInvocationPath(entry) === path);
-  assert.deepEqual(byPath("open").positionals, [{ name: "url", required: true, variadic: false }]);
+  assert.deepEqual(byPath("open").positionals, [{
+    name: "url",
+    required: true,
+    variadic: false,
+    minLength: 1,
+    validationMessage: "open requires <url>."
+  }]);
   assert.deepEqual(byPath("recipes create").positionals, [
     { name: "recipe-id", required: true, variadic: false },
     { name: "name", required: false, variadic: false }
   ]);
-  assert.deepEqual(byPath("recipes search").positionals, [
-    { name: "query", required: true, variadic: true }
-  ]);
+  assert.deepEqual(byPath("recipes search").positionals, [{
+    name: "query",
+    required: true,
+    variadic: true,
+    minLength: 1,
+    validationMessage: "recipes search requires <query>."
+  }]);
 });
 
 test("CLI-4 resolves canonical, nested, aliased, and positional invocations", () => {
@@ -178,7 +188,8 @@ test("CLI-6 enforces repeatability after exact invocation resolution", () => {
 test("CLI-6 rejects duplicate non-repeatable flags before Broker dispatch", async () => {
   for (const argv of [
     ["browsers", "--json", "--json"],
-    ["open", "example.com", "--browser", "1", "--browser", "2", "--json"]
+    ["open", "example.com", "--browser", "1", "--browser", "2", "--json"],
+    ["browsers", "--output", "json", "--output", "quiet"]
   ]) {
     const broker = createRecordingBroker({});
     const result = await runPortusBrowserCli(argv, { brokerClient: broker });

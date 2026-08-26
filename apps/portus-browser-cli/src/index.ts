@@ -135,6 +135,9 @@ interface CliContext {
 
 type CliPayloadHandler = (context: CliContext, parsed: ParsedArgs) => Promise<Record<string, unknown>>;
 type CliDispatchHandler = (context: CliContext, parsed: ParsedArgs) => Promise<CliCommandResult>;
+type CliTabTarget =
+  | { kind: "tab-id"; value: number }
+  | { kind: "index"; value: number };
 
 type DialogCliAction = "accept" | "dismiss";
 type ConsoleCliAction = "list" | "clear";
@@ -484,8 +487,6 @@ export async function runPortusBrowserCli(
     if (!resolution.ok) throw usageError(resolution.message);
     const invocation = resolution.invocation;
     const invocationUsage = renderCliInvocationUsage(invocation.spec);
-    const output = resolveOutputMode(parsed, config, invocation.spec);
-    outputMode = output;
     const flagValidationError = validateCliInvocationFlags(invocation, parsed.flags.keys());
     if (flagValidationError) throw usageError(flagValidationError, invocationUsage);
     const repeatabilityValidationError = validateCliInvocationRepeatability(invocation, parsed.flags);
@@ -494,6 +495,8 @@ export async function runPortusBrowserCli(
     if (positionalValidationError) throw usageError(positionalValidationError, invocationUsage);
     const primitiveValidationError = validateCliInvocationPrimitiveValues(invocation, parsed.flags);
     if (primitiveValidationError) throw usageError(primitiveValidationError, invocationUsage);
+    const output = resolveOutputMode(parsed, config, invocation.spec);
+    outputMode = output;
     const timeoutMs = readOptionalIntegerFlag(parsed, CLI_TIMEOUT_FLAG.name) ?? config.commands.timeoutMs;
     broker = options.brokerClient ?? createDefaultBrokerClient(config);
     const context: CliContext = {
@@ -610,8 +613,9 @@ async function handleTabs(context: CliContext, parsed: ParsedArgs): Promise<Reco
 }
 
 async function handleTab(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
+  const target = readRequiredTabTarget(parsed);
   const browserId = await resolveRequiredBrowser(context, parsed);
-  const tabId = await resolveRequiredTabId(context, parsed, browserId);
+  const tabId = await resolveRequiredTabId(context, target, browserId);
   const result = TabResultSchema.parse(await context.broker.request("tab.get", { browserId, tabId }, context.timeoutMs));
   return {
     ok: true,
@@ -640,9 +644,8 @@ async function handleOpen(context: CliContext, parsed: ParsedArgs): Promise<Reco
 
 async function handleNavigate(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
   const urlInput = parsed.positionals[0] as string;
-
-  const browserId = await resolveRequiredBrowser(context, parsed);
   const tabId = readRequiredIntegerFlag(parsed, "tab-id");
+  const browserId = await resolveRequiredBrowser(context, parsed);
   const result = TabResultSchema.parse(await context.broker.request("tab.navigate", {
     browserId,
     tabId,
@@ -655,8 +658,8 @@ async function handleNavigate(context: CliContext, parsed: ParsedArgs): Promise<
 }
 
 async function handleHistory(context: CliContext, parsed: ParsedArgs, requestType: "tab.history.back" | "tab.history.forward"): Promise<Record<string, unknown>> {
-  const browserId = await resolveRequiredBrowser(context, parsed);
   const tabId = readRequiredIntegerFlag(parsed, "tab-id");
+  const browserId = await resolveRequiredBrowser(context, parsed);
   const result = TabResultSchema.parse(await context.broker.request(requestType, { browserId, tabId }, context.timeoutMs));
   return {
     ok: true,
@@ -665,8 +668,8 @@ async function handleHistory(context: CliContext, parsed: ParsedArgs, requestTyp
 }
 
 async function handleActivateTab(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
-  const browserId = await resolveRequiredBrowser(context, parsed);
   const tabId = readRequiredIntegerFlag(parsed, "tab-id");
+  const browserId = await resolveRequiredBrowser(context, parsed);
   const result = TabResultSchema.parse(await context.broker.request("tab.activate", { browserId, tabId }, context.timeoutMs));
   return {
     ok: true,
@@ -675,8 +678,8 @@ async function handleActivateTab(context: CliContext, parsed: ParsedArgs): Promi
 }
 
 async function handleCloseTab(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
-  const browserId = await resolveRequiredBrowser(context, parsed);
   const tabId = readRequiredIntegerFlag(parsed, "tab-id");
+  const browserId = await resolveRequiredBrowser(context, parsed);
   const result = await context.broker.request("tab.close", { browserId, tabId }, context.timeoutMs);
   return {
     ok: true,
@@ -720,6 +723,7 @@ async function handleNavigationPolicy(
   area: NavigationPolicyArea,
   action: NavigationPolicyAction
 ): Promise<Record<string, unknown>> {
+  const rule = action === "list" ? undefined : readNavigationRuleFlags(parsed);
   const browserId = await resolveRequiredBrowser(context, parsed);
   if (action === "list") {
     const result = PolicyResultSchema.parse(await context.broker.request("policy.get", { browserId }, context.timeoutMs));
@@ -730,7 +734,6 @@ async function handleNavigationPolicy(
     };
   }
 
-  const rule = readNavigationRuleFlags(parsed);
   const payload: Record<string, unknown> = {
     browserId,
     ...rule
@@ -777,15 +780,19 @@ async function handleWatch(context: CliContext, parsed: ParsedArgs): Promise<Rec
     });
   }
   const payload = await buildEventQueryPayload(context, parsed, false);
-  const output = hasFlag(parsed, "json") || context.output === "json" || context.output === "ndjson" ? "ndjson" : "table";
+  const output = context.output === "quiet"
+    ? "quiet"
+    : hasFlag(parsed, "json") || context.output === "json" || context.output === "ndjson"
+      ? "ndjson"
+      : "table";
   await context.broker.subscribeEvents(payload, (event) => {
-    context.writeStdout(renderEventStreamChunk(event, output));
+    const chunk = renderEventStreamChunk(event, output);
+    if (chunk.length > 0) context.writeStdout(chunk);
   }, context.timeoutMs);
   return { ok: true };
 }
 
 async function handleWait(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
-  const browserId = await resolveRequiredBrowser(context, parsed);
   const tabId = readRequiredIntegerFlag(parsed, "tab-id");
   const state = readOptionalStringFlag(parsed, "state");
   const urlContains = readOptionalStringFlag(parsed, "url-contains");
@@ -797,6 +804,7 @@ async function handleWait(context: CliContext, parsed: ParsedArgs): Promise<Reco
   if (!isPageWait && !isTabWait) throw usageError("wait requires --state, --url-contains, --text, --element-query, or --role.");
   if (isPageWait && isTabWait) throw usageError("Use either tab wait flags or page wait flags, not both.");
 
+  const browserId = await resolveRequiredBrowser(context, parsed);
   const payload: Record<string, unknown> = { browserId, tabId };
   if (state !== undefined) payload.state = state;
   if (urlContains !== undefined) payload.urlContains = urlContains;
@@ -860,38 +868,41 @@ async function handleAction(
   parsed: ParsedArgs,
   action: "click" | "hover" | "drag" | "type" | "press" | "scroll"
 ): Promise<Record<string, unknown>> {
-  const browserId = await resolveRequiredBrowser(context, parsed);
   const tabId = readRequiredIntegerFlag(parsed, "tab-id");
-  const payload: Record<string, unknown> = {
-    browserId,
-    tabId
-  };
-
   const elementId = readOptionalStringFlag(parsed, "element");
-  if (elementId !== undefined) payload.elementId = elementId;
   const snapshotId = readOptionalStringFlag(parsed, "snapshot");
-  if (snapshotId !== undefined) payload.snapshotId = snapshotId;
+  const actionPayload: Record<string, unknown> = {};
+  if (elementId !== undefined) actionPayload.elementId = elementId;
+  if (snapshotId !== undefined) actionPayload.snapshotId = snapshotId;
 
   if (action === "click" || action === "hover") {
-    if (!payload.elementId) throw usageError("--element is required.");
+    if (elementId === undefined) throw usageError("--element is required.");
+    if (snapshotId === undefined) throw usageError("--snapshot is required.");
   } else if (action === "drag") {
     const sourceElementId = readOptionalStringFlag(parsed, "from");
     const targetElementId = readOptionalStringFlag(parsed, "to");
     if (sourceElementId === undefined) throw usageError("--from is required.");
     if (targetElementId === undefined) throw usageError("--to is required.");
-    payload.sourceElementId = sourceElementId;
-    payload.targetElementId = targetElementId;
-    if (!payload.snapshotId) throw usageError("--snapshot is required.");
+    if (snapshotId === undefined) throw usageError("--snapshot is required.");
+    actionPayload.sourceElementId = sourceElementId;
+    actionPayload.targetElementId = targetElementId;
   } else if (action === "type") {
-    if (!payload.elementId) throw usageError("--element is required.");
-    payload.text = parsed.positionals[0] as string;
+    if (elementId === undefined) throw usageError("--element is required.");
+    if (snapshotId === undefined) throw usageError("--snapshot is required.");
+    actionPayload.text = parsed.positionals[0] as string;
   } else if (action === "press") {
-    payload.key = parsed.positionals[0] as string;
+    actionPayload.key = parsed.positionals[0] as string;
   } else {
-    payload.deltaX = readOptionalNumberFlag(parsed, "x") ?? 0;
-    payload.deltaY = readOptionalNumberFlag(parsed, "y") ?? 600;
+    actionPayload.deltaX = readOptionalNumberFlag(parsed, "x") ?? 0;
+    actionPayload.deltaY = readOptionalNumberFlag(parsed, "y") ?? 600;
   }
 
+  const browserId = await resolveRequiredBrowser(context, parsed);
+  const payload: Record<string, unknown> = {
+    browserId,
+    tabId,
+    ...actionPayload
+  };
   const result = ActionCommandResultSchema.parse(await context.broker.request(`action.${action}`, payload, context.timeoutMs));
   return {
     ok: true,
@@ -900,11 +911,11 @@ async function handleAction(
 }
 
 async function handleFillForm(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
-  const browserId = await resolveRequiredBrowser(context, parsed);
   const tabId = readRequiredIntegerFlag(parsed, "tab-id");
   const snapshotId = readOptionalStringFlag(parsed, "snapshot");
   if (!snapshotId) throw usageError("--snapshot is required.");
   const fields = await readFillFormFieldsFromCli(parsed);
+  const browserId = await resolveRequiredBrowser(context, parsed);
   const result = FillFormCommandResultSchema.parse(await context.broker.request("action.fillForm", {
     browserId,
     tabId,
@@ -919,8 +930,8 @@ async function handleFillForm(context: CliContext, parsed: ParsedArgs): Promise<
 }
 
 async function handleDismiss(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
-  const browserId = await resolveRequiredBrowser(context, parsed);
   const tabId = readRequiredIntegerFlag(parsed, "tab-id");
+  const browserId = await resolveRequiredBrowser(context, parsed);
   const payload: Record<string, unknown> = {
     browserId,
     tabId,
@@ -936,8 +947,8 @@ async function handleDismiss(context: CliContext, parsed: ParsedArgs): Promise<R
 }
 
 async function handleDialog(context: CliContext, parsed: ParsedArgs, action: DialogCliAction): Promise<Record<string, unknown>> {
-  const browserId = await resolveRequiredBrowser(context, parsed);
   const tabId = readRequiredIntegerFlag(parsed, "tab-id");
+  const browserId = await resolveRequiredBrowser(context, parsed);
   const payload: Record<string, unknown> = { browserId, tabId };
   const text = readOptionalStringFlag(parsed, "text");
   if (text !== undefined) payload.text = text;
@@ -949,8 +960,8 @@ async function handleDialog(context: CliContext, parsed: ParsedArgs, action: Dia
 }
 
 async function handleConsole(context: CliContext, parsed: ParsedArgs, action: ConsoleCliAction): Promise<Record<string, unknown>> {
-  const browserId = await resolveRequiredBrowser(context, parsed);
   const tabId = readRequiredIntegerFlag(parsed, "tab-id");
+  const browserId = await resolveRequiredBrowser(context, parsed);
   if (action === "clear") {
     const result = await context.broker.request("console.clear", { browserId, tabId }, context.timeoutMs);
     return { ok: true, cleared: result.cleared === true, tabId };
@@ -966,8 +977,8 @@ async function handleConsole(context: CliContext, parsed: ParsedArgs, action: Co
 }
 
 async function handleNetwork(context: CliContext, parsed: ParsedArgs, action: NetworkCliAction): Promise<Record<string, unknown>> {
-  const browserId = await resolveRequiredBrowser(context, parsed);
   const tabId = readRequiredIntegerFlag(parsed, "tab-id");
+  const browserId = await resolveRequiredBrowser(context, parsed);
   if (action === "get") {
     const requestId = parsed.positionals[1] as string;
     const result = NetworkGetCommandResultSchema.parse(await context.broker.request("network.get", { browserId, tabId, requestId }, context.timeoutMs));
@@ -1001,8 +1012,9 @@ async function handleRecipes(context: CliContext, parsed: ParsedArgs, action: Re
     }
     case "create": {
       const id = parsed.positionals[1] as string;
-      const name = parsed.positionals[2] ?? id;
-      const recipe = await readRecipeInput(parsed, id, name);
+      const positionalName = parsed.positionals[2];
+      const name = positionalName ?? id;
+      const recipe = await readRecipeInput(parsed, id, name, undefined, positionalName);
       const filePath = await saveRecipeRecordToDirectory(recipe, directory ?? defaultRecipeLibraryDirectory(), {
         overwrite: hasFlag(parsed, "force")
       });
@@ -1118,7 +1130,8 @@ async function readRecipeInput(
   parsed: ParsedArgs,
   fallbackId: string,
   fallbackName: string,
-  existing?: RecipeRecord
+  existing?: RecipeRecord,
+  positionalName?: string
 ): Promise<RecipeRecord> {
   const filePath = readOptionalStringFlag(parsed, "file");
   const jsonInput = readOptionalStringFlag(parsed, "json-input");
@@ -1126,12 +1139,32 @@ async function readRecipeInput(
   const sources = [filePath, jsonInput, content].filter((value) => value !== undefined).length;
   if (sources > 1) throw usageError("Use only one of --file, --json-input, or --content.");
 
-  if (filePath !== undefined) {
-    return parseRecipeRecord(parseRecipeJsonText(await readFile(filePath, "utf8"), filePath));
-  }
+  const nameOverride = readOptionalStringFlag(parsed, "name") ?? positionalName;
+  const kindOverride = readOptionalStringFlag(parsed, "kind");
+  const descriptionOverride = readOptionalStringFlag(parsed, "description");
+  const structuredSource = filePath !== undefined
+    ? parseRecipeRecord(parseRecipeJsonText(await readFile(filePath, "utf8"), filePath))
+    : jsonInput !== undefined
+      ? parseRecipeRecord(parseRecipeJsonText(jsonInput, "--json-input"))
+      : undefined;
 
-  if (jsonInput !== undefined) {
-    return parseRecipeRecord(parseRecipeJsonText(jsonInput, "--json-input"));
+  if (structuredSource !== undefined) {
+    if (structuredSource.id !== fallbackId) {
+      throw createPortusError({
+        code: "RECIPE_INVALID",
+        message: "Structured recipe id must match the command recipe id.",
+        details: {
+          recipeId: fallbackId,
+          inputRecipeId: structuredSource.id
+        }
+      });
+    }
+    return parseRecipeRecord({
+      ...structuredSource,
+      ...(nameOverride === undefined ? {} : { name: nameOverride }),
+      ...(kindOverride === undefined ? {} : { kind: kindOverride }),
+      ...(descriptionOverride === undefined ? {} : { description: descriptionOverride })
+    });
   }
 
   const base = existing ?? {
@@ -1142,9 +1175,9 @@ async function readRecipeInput(
   const record = {
     ...base,
     id: fallbackId,
-    name: readOptionalStringFlag(parsed, "name") ?? fallbackName,
-    ...(readOptionalStringFlag(parsed, "kind") === undefined ? {} : { kind: readOptionalStringFlag(parsed, "kind") }),
-    ...(readOptionalStringFlag(parsed, "description") === undefined ? {} : { description: readOptionalStringFlag(parsed, "description") }),
+    name: nameOverride ?? fallbackName,
+    ...(kindOverride === undefined ? {} : { kind: kindOverride }),
+    ...(descriptionOverride === undefined ? {} : { description: descriptionOverride }),
     ...(content === undefined ? {} : { content })
   };
 
@@ -1309,12 +1342,19 @@ async function resolveBrowserTarget(context: CliContext, target: string): Promis
   return selected.browserId;
 }
 
-async function resolveRequiredTabId(context: CliContext, parsed: ParsedArgs, browserId: string): Promise<number> {
+function readRequiredTabTarget(parsed: ParsedArgs): CliTabTarget {
   const tabId = readOptionalIntegerFlag(parsed, "tab-id");
   const index = readOptionalIntegerFlag(parsed, "index");
   if (tabId !== undefined && index !== undefined) throw usageError("Use either --tab-id or --index, not both.");
-  if (tabId !== undefined) return tabId;
-  if (index === undefined) throw usageError("--tab-id or --index is required.");
+  if (tabId === undefined && index === undefined) throw usageError("--tab-id or --index is required.");
+  return tabId !== undefined
+    ? { kind: "tab-id", value: tabId }
+    : { kind: "index", value: index as number };
+}
+
+async function resolveRequiredTabId(context: CliContext, target: CliTabTarget, browserId: string): Promise<number> {
+  if (target.kind === "tab-id") return target.value;
+  const index = target.value;
   const result = TabListResultSchema.parse(await context.broker.request("tab.list", { browserId }, context.timeoutMs));
   const selected = sortTabs(result.tabs)[index - 1];
   if (!selected) {
@@ -1584,7 +1624,8 @@ function renderBrokerTable(broker: Record<string, unknown>): string {
   }]);
 }
 
-function renderEventStreamChunk(event: EventEnvelope, output: "table" | "ndjson"): string {
+function renderEventStreamChunk(event: EventEnvelope, output: "table" | "ndjson" | "quiet"): string {
+  if (output === "quiet") return "";
   if (output === "ndjson") return `${JSON.stringify(event)}\n`;
   return renderEventTable([event]);
 }

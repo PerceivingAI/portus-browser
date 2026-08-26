@@ -15,6 +15,7 @@ export interface CliPositionalSpec {
   kind?: CliPositionalKind;
   min?: number;
   max?: number;
+  minLength?: number;
   validationMessage?: string;
 }
 
@@ -49,7 +50,7 @@ const arg = (
   name: string,
   required = true,
   variadic = false,
-  primitive: Pick<CliPositionalSpec, "kind" | "min" | "max" | "validationMessage"> = {}
+  primitive: Pick<CliPositionalSpec, "kind" | "min" | "max" | "minLength" | "validationMessage"> = {}
 ): CliPositionalSpec => ({ name, required, variadic, ...primitive });
 const brokerFlags = (...flags: CliFlagSpec[]): readonly CliFlagSpec[] => [CLI_OUTPUT_FLAG, CLI_TIMEOUT_FLAG, ...flags];
 const localFlags = (...flags: CliFlagSpec[]): readonly CliFlagSpec[] => [CLI_OUTPUT_FLAG, ...flags];
@@ -77,8 +78,16 @@ export const CLI_INVOCATIONS = [
   { path: ["browsers"], flags: brokerFlags(), positionals: noArgs },
   { path: ["tabs"], flags: brokerFlags(CLI_FLAGS.browser), positionals: noArgs },
   { path: ["tab"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.tabId, CLI_FLAGS.index), positionals: noArgs },
-  { path: ["open"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.background), positionals: [arg("url")] },
-  { path: ["navigate"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.tabId), positionals: [arg("url")] },
+  {
+    path: ["open"],
+    flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.background),
+    positionals: [arg("url", true, false, { minLength: 1, validationMessage: "open requires <url>." })]
+  },
+  {
+    path: ["navigate"],
+    flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.tabId),
+    positionals: [arg("url", true, false, { minLength: 1, validationMessage: "navigate requires <url>." })]
+  },
   { path: ["back"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.tabId), positionals: noArgs },
   { path: ["forward"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.tabId), positionals: noArgs },
   { path: ["activate-tab"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.tabId), positionals: noArgs },
@@ -150,7 +159,11 @@ export const CLI_INVOCATIONS = [
   { path: ["console", "clear"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.tabId), positionals: noArgs },
 
   { path: ["network", "list"], aliases: [["network"]], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.tabId, CLI_FLAGS.limit), positionals: noArgs },
-  { path: ["network", "get"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.tabId), positionals: [arg("request-id")] },
+  {
+    path: ["network", "get"],
+    flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.tabId),
+    positionals: [arg("request-id", true, false, { minLength: 1, validationMessage: "network get requires <request-id>." })]
+  },
 
   { path: ["events", "recent"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.type, CLI_FLAGS.limit), positionals: noArgs },
   { path: ["session", "steps"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.limit), positionals: noArgs },
@@ -172,6 +185,7 @@ export const CLI_INVOCATIONS = [
       kind: "integer",
       min: 0,
       max: 1000,
+      minLength: 1,
       validationMessage: "Retention limit must be an integer from 0 to 1000."
     })]
   },
@@ -192,9 +206,21 @@ export const CLI_INVOCATIONS = [
     positionals: [arg("recipe-id"), arg("name", false)]
   },
   { path: ["recipes", "show"], flags: brokerFlags(CLI_FLAGS.directory), positionals: [arg("recipe-id")] },
-  { path: ["recipes", "search"], flags: brokerFlags(CLI_FLAGS.directory), positionals: [arg("query", true, true)] },
-  { path: ["recipes", "use"], flags: brokerFlags(CLI_FLAGS.directory), positionals: [arg("query", true, true)] },
-  { path: ["recipes", "resolve"], flags: brokerFlags(CLI_FLAGS.directory), positionals: [arg("query", true, true)] },
+  {
+    path: ["recipes", "search"],
+    flags: brokerFlags(CLI_FLAGS.directory),
+    positionals: [arg("query", true, true, { minLength: 1, validationMessage: "recipes search requires <query>." })]
+  },
+  {
+    path: ["recipes", "use"],
+    flags: brokerFlags(CLI_FLAGS.directory),
+    positionals: [arg("query", true, true, { minLength: 1, validationMessage: "recipes use requires <query>." })]
+  },
+  {
+    path: ["recipes", "resolve"],
+    flags: brokerFlags(CLI_FLAGS.directory),
+    positionals: [arg("query", true, true, { minLength: 1, validationMessage: "recipes resolve requires <query>." })]
+  },
   {
     path: ["recipes", "update"],
     flags: localFlags(
@@ -440,12 +466,17 @@ export function validateCliInvocationPrimitiveValues(
 
   for (let index = 0; index < invocation.spec.positionals.length; index += 1) {
     const spec = invocation.spec.positionals[index] as CliPositionalSpec;
-    if (!spec.kind || spec.kind === "string") continue;
+    if ((!spec.kind || spec.kind === "string") && spec.minLength === undefined) continue;
     const values = spec.variadic
       ? invocation.argumentPositionals.slice(index)
       : invocation.argumentPositionals[index] === undefined
         ? []
         : [invocation.argumentPositionals[index] as string];
+    if (spec.variadic && spec.minLength !== undefined && (!spec.kind || spec.kind === "string")) {
+      const error = validateCliPositionalPrimitive(spec, values.join(" "));
+      if (error) return error;
+      continue;
+    }
     for (const value of values) {
       const error = validateCliPositionalPrimitive(spec, value);
       if (error) return error;
@@ -476,6 +507,11 @@ function validateCliFlagPrimitive(flag: CliFlagSpec, value: string | boolean): s
 }
 
 function validateCliPositionalPrimitive(spec: CliPositionalSpec, value: string): string | undefined {
+  if (spec.minLength !== undefined && value.trim().length < spec.minLength) {
+    return spec.validationMessage ?? `<${spec.name}> must not be empty.`;
+  }
+  if (!spec.kind || spec.kind === "string") return undefined;
+
   const parsedValue = Number(value);
   const validKind = spec.kind === "integer" ? Number.isInteger(parsedValue) : Number.isFinite(parsedValue);
   const validMin = spec.min === undefined || parsedValue >= spec.min;

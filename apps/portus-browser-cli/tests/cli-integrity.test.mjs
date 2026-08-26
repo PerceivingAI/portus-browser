@@ -92,6 +92,9 @@ test("CLI-13 enum and positional constraints are structurally valid", () => {
         assert.equal(positional.min, undefined, `${path}: string positional cannot have min`);
         assert.equal(positional.max, undefined, `${path}: string positional cannot have max`);
       }
+      if (positional.minLength !== undefined) {
+        assert.ok(Number.isInteger(positional.minLength) && positional.minLength > 0, `${path}: minLength must be a positive integer`);
+      }
     });
   }
 });

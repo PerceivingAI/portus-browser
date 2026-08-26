@@ -100,6 +100,47 @@ test("CLI-12 rejects the documented cross-command and nested-subcommand misuse m
   }
 });
 
+test("required non-empty network and recipe query positionals fail before Broker dispatch", async () => {
+  const invalidInvocations = [
+    ["navigate", "", "--browser", "br_000001", "--tab-id", "11", "--json"],
+    ["policy", "retention", "set", "", "--browser", "br_000001", "--json"],    ["network", "get", "", "--browser", "br_000001", "--tab-id", "11", "--json"],
+    ["recipes", "search", "", "--json"],
+    ["recipes", "use", "", "--json"],
+    ["recipes", "resolve", "", "--json"]
+  ];
+
+  for (const argv of invalidInvocations) {
+    const broker = createRecordingBroker();
+    const result = await runPortusBrowserCli(argv, { brokerClient: broker });
+    assert.equal(result.exitCode, 2, argv.join(" "));
+    const error = JSON.parse(result.stderr).error;
+    assert.match(error.message, /requires <(?:url|request-id|query)>|Retention limit must be an integer from 0 to 1000\./, argv.join(" "));
+    assert.deepEqual(broker.requests, [], argv.join(" "));
+  }
+});
+
+test("semantic usage errors fail before numeric browser resolution or Broker side effects", async () => {
+  const invalidInvocations = [
+    ["tab", "--browser", "1", "--json"],
+    ["navigate", "example.com", "--browser", "1", "--json"],
+    ["click", "--browser", "1", "--tab-id", "11", "--element", "el_000001", "--json"],
+    ["drag", "--browser", "1", "--tab-id", "11", "--snapshot", "snap_000001", "--from", "el_000001", "--json"],
+    ["fill-form", "--browser", "1", "--tab-id", "11", "--snapshot", "snap_000001", "--json"],
+    ["wait", "--browser", "1", "--tab-id", "11", "--json"],
+    ["dialog", "accept", "--browser", "1", "--json"],
+    ["console", "list", "--browser", "1", "--json"],
+    ["network", "get", "req_1", "--browser", "1", "--json"],
+    ["policy", "allow", "add", "--browser", "1", "--json"]
+  ];
+
+  for (const argv of invalidInvocations) {
+    const broker = createRecordingBroker();
+    const result = await runPortusBrowserCli(argv, { brokerClient: broker });
+    assert.equal(result.exitCode, 2, argv.join(" "));
+    assert.deepEqual(broker.requests, [], argv.join(" "));
+  }
+});
+
 test("CLI-12 invalid local syntax cannot mutate the recipe filesystem", async () => {
   const directory = await mkdtemp(join(tmpdir(), "portus-cli12-no-side-effect-"));
   const broker = createRecordingBroker();
