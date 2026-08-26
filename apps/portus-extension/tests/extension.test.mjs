@@ -1756,6 +1756,131 @@ test("live DOM actions resolve nested Shadow DOM without crossing the captured r
   }
 });
 
+test("bounds recovery recursively hit-tests nested Shadow DOM", () => {
+  const dom = new JSDOM(`<!doctype html><html><body>
+    <button id="light-duplicate">Shadow target</button>
+    <app-shell id="app"></app-shell>
+  </body></html>`, { url: "https://example.com/" });
+  const document = dom.window.document;
+  const app = document.querySelector("#app");
+  const appRoot = app.attachShadow({ mode: "open" });
+  appRoot.innerHTML = `<nested-panel id="nested"></nested-panel>`;
+  const nested = appRoot.querySelector("#nested");
+  const nestedRoot = nested.attachShadow({ mode: "open" });
+  nestedRoot.innerHTML = `
+    <button id="source-live">Shadow source</button>
+    <button id="target-live">Shadow target</button>
+  `;
+  const source = nestedRoot.querySelector("#source-live");
+  const target = nestedRoot.querySelector("#target-live");
+  const lightDuplicate = document.querySelector("#light-duplicate");
+
+  const descriptors = new Map();
+  const globals = {
+    window: dom.window,
+    document,
+    location: dom.window.location,
+    HTMLElement: dom.window.HTMLElement,
+    HTMLButtonElement: dom.window.HTMLButtonElement,
+    HTMLInputElement: dom.window.HTMLInputElement,
+    HTMLTextAreaElement: dom.window.HTMLTextAreaElement,
+    HTMLSelectElement: dom.window.HTMLSelectElement,
+    HTMLAnchorElement: dom.window.HTMLAnchorElement,
+    Event: dom.window.Event,
+    InputEvent: dom.window.InputEvent,
+    MouseEvent: dom.window.MouseEvent,
+    KeyboardEvent: dom.window.KeyboardEvent,
+    getComputedStyle: dom.window.getComputedStyle.bind(dom.window)
+  };
+  for (const [key, value] of Object.entries(globals)) {
+    descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  }
+  descriptors.set("__portusComposedDom", Object.getOwnPropertyDescriptor(globalThis, "__portusComposedDom"));
+  Object.defineProperty(globalThis, "__portusComposedDom", {
+    configurable: true,
+    writable: true,
+    value: { collect: () => [] }
+  });
+
+  dom.window.HTMLElement.prototype.scrollIntoView = () => {};
+  dom.window.HTMLElement.prototype.getBoundingClientRect = function () {
+    const x = this.id === "source-live" ? 10 : 210;
+    return {
+      x,
+      y: 20,
+      left: x,
+      top: 20,
+      right: x + 100,
+      bottom: 50,
+      width: 100,
+      height: 30,
+      toJSON() { return this; }
+    };
+  };
+  document.elementsFromPoint = () => [lightDuplicate, app];
+  appRoot.elementsFromPoint = () => [nested];
+  nestedRoot.elementsFromPoint = (x) => x < 150 ? [source] : [target];
+
+  const shadowPath = [
+    { hostSelectorHint: "#app", rootType: "open" },
+    { hostSelectorHint: "#nested", rootType: "open" }
+  ];
+  const sourceTarget = {
+    shadowPath,
+    selectorHint: "#stale-source",
+    tagName: "button",
+    role: "button",
+    label: "Shadow source",
+    text: "Shadow source",
+    bounds: { x: 10, y: 20, width: 100, height: 30 },
+    state: {},
+    disabled: false
+  };
+  const dropTarget = {
+    shadowPath,
+    selectorHint: "#stale-target",
+    tagName: "button",
+    role: "button",
+    label: "Shadow target",
+    text: "Shadow target",
+    bounds: { x: 210, y: 20, width: 100, height: 30 },
+    state: {},
+    disabled: false
+  };
+
+  let targetClicks = 0;
+  let lightClicks = 0;
+  let hoverMoves = 0;
+  let drops = 0;
+  target.addEventListener("click", () => targetClicks += 1);
+  lightDuplicate.addEventListener("click", () => lightClicks += 1);
+  target.addEventListener("mousemove", () => hoverMoves += 1);
+  target.addEventListener("drop", () => drops += 1);
+
+  try {
+    const clicked = performPortusDomAction({ action: "click", target: dropTarget });
+    assert.equal(clicked.ok, true);
+    assert.equal(targetClicks, 1);
+    assert.equal(lightClicks, 0);
+
+    const hovered = performPortusDomAction({ action: "hover", target: dropTarget });
+    assert.equal(hovered.ok, true);
+    assert.equal(hoverMoves, 1);
+
+    const dragged = performPortusDomAction({ action: "drag", sourceTarget, dropTarget });
+    assert.equal(dragged.ok, true);
+    assert.equal(drops, 1);
+    assert.equal(lightClicks, 0);
+  } finally {
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    }
+    dom.window.close();
+  }
+});
+
 test("performs DOM actions and rejects stale snapshot ids", async () => {
   const fixture = createChromeFixture();
   const bridge = createConnectedBridge(fixture);

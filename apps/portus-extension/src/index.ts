@@ -4592,24 +4592,20 @@ export function performPortusDomAction(payload: Record<string, unknown>): Record
     const candidates: HTMLElement[] = [];
     const seen = new Set<HTMLElement>();
 
-    // Preserve the existing light-DOM spatial recovery path. Recursive shadow hit
-    // testing is intentionally deferred to S5.
-    if (targetRoot === document) {
-      const bounds = readTargetBounds(target.bounds);
-      if (bounds) {
-        const points: Array<[number, number]> = [
-          [bounds.x + bounds.width / 2, bounds.y + bounds.height / 2],
-          [bounds.x + Math.min(8, bounds.width / 2), bounds.y + Math.min(8, bounds.height / 2)],
-          [bounds.x + Math.max(bounds.width - 8, bounds.width / 2), bounds.y + Math.min(8, bounds.height / 2)]
-        ];
-        for (const [x, y] of points) {
-          if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) continue;
-          for (const element of document.elementsFromPoint(x, y)) {
-            let current: Element | null = element;
-            while (current && current !== document.body) {
-              addCandidate(current);
-              current = current.parentElement;
-            }
+    const bounds = readTargetBounds(target.bounds);
+    if (bounds) {
+      const points: Array<[number, number]> = [
+        [bounds.x + bounds.width / 2, bounds.y + bounds.height / 2],
+        [bounds.x + Math.min(8, bounds.width / 2), bounds.y + Math.min(8, bounds.height / 2)],
+        [bounds.x + Math.max(bounds.width - 8, bounds.width / 2), bounds.y + Math.min(8, bounds.height / 2)]
+      ];
+      for (const [x, y] of points) {
+        if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) continue;
+        for (const element of collectComposedElementsFromPoint(document, x, y)) {
+          let current: Element | null = element;
+          while (current && current !== document.body) {
+            addCandidate(current);
+            current = current.parentElement;
           }
         }
       }
@@ -4640,6 +4636,40 @@ export function performPortusDomAction(payload: Record<string, unknown>): Record
       if (expectedShadowPath !== undefined && targetRoot && element.getRootNode() !== targetRoot) return;
       seen.add(element);
       candidates.push(element);
+    }
+  }
+
+  function collectComposedElementsFromPoint(root: Document | ShadowRoot, x: number, y: number): Element[] {
+    const collected: Element[] = [];
+    const seenElements = new Set<Element>();
+    const visitedRoots = new Set<Document | ShadowRoot>();
+
+    visitRoot(root);
+    return collected;
+
+    function visitRoot(currentRoot: Document | ShadowRoot): void {
+      if (visitedRoots.has(currentRoot)) return;
+      visitedRoots.add(currentRoot);
+      const hitTest = (currentRoot as Document | ShadowRoot & {
+        elementsFromPoint?: (clientX: number, clientY: number) => Element[];
+      }).elementsFromPoint;
+      if (typeof hitTest !== "function") return;
+
+      let hits: Element[];
+      try {
+        hits = Array.from(hitTest.call(currentRoot, x, y));
+      } catch {
+        return;
+      }
+
+      for (const hit of hits) {
+        if (!seenElements.has(hit)) {
+          seenElements.add(hit);
+          collected.push(hit);
+        }
+        const shadowRoot: ShadowRoot | null = hit.shadowRoot;
+        if (shadowRoot) visitRoot(shadowRoot);
+      }
     }
   }
 
