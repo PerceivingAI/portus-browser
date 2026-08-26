@@ -123,8 +123,8 @@ export const CLI_INVOCATIONS = [
     positionals: noArgs
   },
   { path: ["type"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.tabId, CLI_FLAGS.snapshot, CLI_FLAGS.element), positionals: [arg("text")] },
-  { path: ["press"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.tabId), positionals: [arg("key")] },
-  { path: ["scroll"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.tabId, CLI_FLAGS.x, CLI_FLAGS.y), positionals: noArgs },
+  { path: ["press"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.tabId, CLI_FLAGS.snapshot, CLI_FLAGS.element), positionals: [arg("key")] },
+  { path: ["scroll"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.tabId, CLI_FLAGS.snapshot, CLI_FLAGS.element, CLI_FLAGS.x, CLI_FLAGS.y), positionals: noArgs },
   {
     path: ["dismiss"],
     flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.tabId, CLI_FLAGS.kind, CLI_FLAGS.strategy, CLI_FLAGS.dryRun),

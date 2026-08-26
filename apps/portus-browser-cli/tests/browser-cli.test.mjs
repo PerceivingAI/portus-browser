@@ -367,18 +367,38 @@ test("wait routes tab and page conditions to broker commands", async () => {
   assert.equal(JSON.parse(pageWait.stdout).wait.source, "page-script");
 });
 
-test("press and scroll send action payloads", async () => {
+test("press and scroll send action payloads including optional element targets", async () => {
   const broker = createMockBroker({
     "action.press": { action: actionResult("press") },
     "action.scroll": { action: actionResult("scroll") }
   });
 
-  const press = await runPortusBrowserCli(["press", "--browser", "br_000001", "--tab-id", "11", "Enter"], { brokerClient: broker });
-  const scroll = await runPortusBrowserCli(["scroll", "--browser", "br_000001", "--tab-id", "11", "--x", "4", "--y", "200", "--json"], { brokerClient: broker });
+  const press = await runPortusBrowserCli([
+    "press",
+    "--browser", "br_000001",
+    "--tab-id", "11",
+    "--snapshot", "snap_000001",
+    "--element", "el_000001",
+    "Enter"
+  ], { brokerClient: broker });
+  const scroll = await runPortusBrowserCli([
+    "scroll",
+    "--browser", "br_000001",
+    "--tab-id", "11",
+    "--snapshot", "snap_000001",
+    "--element", "el_000002",
+    "--x", "4",
+    "--y", "200",
+    "--json"
+  ], { brokerClient: broker });
 
   assert.equal(press.exitCode, 0);
   assert.equal(scroll.exitCode, 0);
   assert.equal(broker.requests[0].payload.key, "Enter");
+  assert.equal(broker.requests[0].payload.snapshotId, "snap_000001");
+  assert.equal(broker.requests[0].payload.elementId, "el_000001");
+  assert.equal(broker.requests[1].payload.snapshotId, "snap_000001");
+  assert.equal(broker.requests[1].payload.elementId, "el_000002");
   assert.equal(broker.requests[1].payload.deltaX, 4);
   assert.equal(broker.requests[1].payload.deltaY, 200);
 });
