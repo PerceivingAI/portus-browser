@@ -490,6 +490,21 @@ interface DebuggerSnapshotTarget {
   backendNodeId: number;
 }
 
+type ActionExecutionBackend = "content-script-dom" | "debugger-input" | "debugger-pierced";
+type DebuggerInputAction = "click" | "hover" | "type" | "press" | "scroll";
+type DomTargetPreparation = "pointer" | "focus" | "type" | "scroll" | "geometry";
+
+interface LiveDomTargetInspection {
+  bounds: { x: number; y: number; width: number; height: number };
+  inViewport: boolean;
+  editable: boolean;
+  inputType?: string;
+  canScrollX: boolean;
+  canScrollY: boolean;
+  canScrollDeltaX: boolean;
+  canScrollDeltaY: boolean;
+}
+
 interface PiercedClosedShadowSupplement {
   candidates: Array<{ candidate: SnapshotElementCandidate; backendNodeId: number }>;
   candidateCount: number;
@@ -1060,8 +1075,19 @@ export class PortusExtensionBridge {
       deltaY: typeof payload.deltaY === "number" ? payload.deltaY : 600
     };
 
-    if (debuggerElementTarget && element && action !== "drag") {
-      const debuggerResult = await this.executeDebuggerSnapshotElementAction(tabId, action, element, debuggerElementTarget, payload);
+    const elementBackend = action === "drag"
+      ? undefined
+      : this.selectActionExecutionBackend(action, element, debuggerElementTarget);
+
+    if (elementBackend === "debugger-pierced" && element && debuggerElementTarget) {
+      const debuggerResult = await this.executeDebuggerSnapshotElementAction(tabId, action as DebuggerInputAction, element, debuggerElementTarget, payload);
+      const invalidated = markSnapshotsStaleForTab(this.snapshots, browserId, tabId);
+      this.clearDebuggerTargetsForSnapshots(invalidated);
+      return debuggerResult;
+    }
+
+    if (elementBackend === "debugger-input" && element) {
+      const debuggerResult = await this.executeDebuggerInputAction(tabId, action as DebuggerInputAction, element, payload);
       const invalidated = markSnapshotsStaleForTab(this.snapshots, browserId, tabId);
       this.clearDebuggerTargetsForSnapshots(invalidated);
       return debuggerResult;
@@ -1080,14 +1106,25 @@ export class PortusExtensionBridge {
       });
     }
 
-    if (action === "drag" && (debuggerSourceTarget || debuggerDropTarget) && !this.shouldUseDebuggerBackend()) {
+    const sourceBackend = action === "drag"
+      ? this.selectActionExecutionBackend("drag", sourceElement, debuggerSourceTarget)
+      : undefined;
+    const targetBackend = action === "drag"
+      ? this.selectActionExecutionBackend("drag", targetElement, debuggerDropTarget)
+      : undefined;
+
+    if (action === "drag"
+      && (sourceBackend === "debugger-pierced" || targetBackend === "debugger-pierced")
+      && !this.shouldUseDebuggerBackend()) {
       throw createPortusError({
         code: "CAPABILITY_UNAVAILABLE",
         message: "Advanced debugger backend is required for this drag snapshot target."
       });
     }
 
-    if (action === "drag" && this.shouldUseDebuggerBackend() && sourceElement?.frameId === 0 && targetElement?.frameId === 0) {
+    const dragUsesDebugger = action === "drag"
+      && (sourceBackend !== "content-script-dom" || targetBackend !== "content-script-dom");
+    if (dragUsesDebugger && sourceElement?.frameId === 0 && targetElement?.frameId === 0) {
       const debuggerResult = await this.executeDebuggerDragAction(
         tabId,
         sourceElement,
@@ -3331,6 +3368,241 @@ export class PortusExtensionBridge {
     return this.policyPreferences.advancedBackendEnabled === true;
   }
 
+  private selectActionExecutionBackend(
+    action: string,
+    element: SnapshotElement | null,
+    debuggerTarget?: DebuggerSnapshotTarget
+  ): ActionExecutionBackend {
+    if (debuggerTarget) return "debugger-pierced";
+    if (!element || !this.shouldUseDebuggerBackend() || element.frameId !== 0 || !this.chromeApi.debugger) return "content-script-dom";
+    if (["click", "hover", "type", "press", "scroll", "drag"].includes(action)) return "debugger-input";
+    return "content-script-dom";
+  }
+
+  private async inspectLiveDomActionTarget(
+    tabId: number,
+    element: SnapshotElement,
+    preparation: DomTargetPreparation,
+    deltaX = 0,
+    deltaY = 0,
+    actionToken?: string
+  ): Promise<LiveDomTargetInspection> {
+    const result = await this.executeActionScript(tabId, {
+      action: "__portus.inspect-target",
+      target: createDomActionTarget(element),
+      preparation,
+      deltaX,
+      deltaY,
+      ...(actionToken ? { actionToken } : {})
+    }, snapshotElementExecutionTarget(element));
+    if (!result.ok) throw createPortusError(result.error);
+    const details = result.details ?? {};
+    const bounds = readBounds(details.bounds);
+    if (bounds.width <= 0 || bounds.height <= 0) {
+      throw createPortusError({
+        code: "SNAPSHOT_STALE",
+        message: "Snapshot target no longer has usable live bounds."
+      });
+    }
+    return {
+      bounds,
+      inViewport: details.inViewport === true,
+      editable: details.editable === true,
+      ...(typeof details.inputType === "string" ? { inputType: details.inputType } : {}),
+      canScrollX: details.canScrollX === true,
+      canScrollY: details.canScrollY === true,
+      canScrollDeltaX: details.canScrollDeltaX === true,
+      canScrollDeltaY: details.canScrollDeltaY === true
+    };
+  }
+
+  private async finalizeDebuggerTypeTarget(
+    tabId: number,
+    element: SnapshotElement,
+    actionToken: string,
+    dispatchChange: boolean
+  ): Promise<void> {
+    const result = await this.executeActionScript(tabId, {
+      action: "__portus.finalize-type",
+      actionToken,
+      dispatchChange
+    }, snapshotElementExecutionTarget(element));
+    if (!result.ok) throw createPortusError(result.error);
+  }
+
+  private async executeDebuggerInputAction(
+    tabId: number,
+    action: DebuggerInputAction,
+    element: SnapshotElement,
+    payload: Record<string, unknown>
+  ): Promise<ActionResult> {
+    this.ensureDebuggerApiAvailable();
+    const deltaX = typeof payload.deltaX === "number" ? payload.deltaX : 0;
+    const deltaY = typeof payload.deltaY === "number" ? payload.deltaY : 600;
+    const key = typeof payload.key === "string" ? payload.key : "";
+    const text = typeof payload.text === "string" ? payload.text : "";
+    if (action === "press" && !key) {
+      throw createPortusError({ code: "ACTION_FAILED", message: "Key is required." });
+    }
+
+    if (action === "type" && element.inputType && !supportsCdpTextInputType(element.inputType)) {
+      const domResult = await this.executeActionScript(tabId, {
+        action: "type",
+        target: createDomActionTarget(element),
+        text
+      }, snapshotElementExecutionTarget(element));
+      if (!domResult.ok) throw createPortusError(domResult.error);
+      return ActionResultSchema.parse(createDomActionResult(this.now().toISOString(), {
+        ...(domResult.details ?? { action: "type", textLength: text.length }),
+        advancedBackendFallback: "specialized-input-semantics"
+      }));
+    }
+
+    const preparation: DomTargetPreparation = action === "click" || action === "hover"
+      ? "pointer"
+      : action === "type"
+        ? "type"
+        : action === "press"
+          ? "focus"
+          : "scroll";
+    const typeActionToken = action === "type" ? this.createRequestId() : undefined;
+    const inspection = await this.inspectLiveDomActionTarget(tabId, element, preparation, deltaX, deltaY, typeActionToken);
+
+    if (action === "type" && inspection.inputType && !supportsCdpTextInputType(inspection.inputType)) {
+      if (typeActionToken) await this.finalizeDebuggerTypeTarget(tabId, element, typeActionToken, false);
+      const domResult = await this.executeActionScript(tabId, {
+        action: "type",
+        target: createDomActionTarget(element),
+        text
+      }, snapshotElementExecutionTarget(element));
+      if (!domResult.ok) throw createPortusError(domResult.error);
+      return ActionResultSchema.parse(createDomActionResult(this.now().toISOString(), {
+        ...(domResult.details ?? { action: "type", textLength: text.length }),
+        advancedBackendFallback: "specialized-input-semantics"
+      }));
+    }
+
+    if (action === "scroll") {
+      const cannotPreserveElementScroll = !inspection.inViewport
+        || (deltaX !== 0 && !inspection.canScrollDeltaX)
+        || (deltaY !== 0 && !inspection.canScrollDeltaY);
+      if (cannotPreserveElementScroll) {
+        const domResult = await this.executeActionScript(tabId, {
+          action: "scroll",
+          target: createDomActionTarget(element),
+          deltaX,
+          deltaY
+        }, snapshotElementExecutionTarget(element));
+        if (!domResult.ok) throw createPortusError(domResult.error);
+        return ActionResultSchema.parse(createDomActionResult(this.now().toISOString(), {
+          ...(domResult.details ?? { action: "scroll", deltaX, deltaY }),
+          advancedBackendFallback: "element-scroll-semantics"
+        }));
+      }
+    }
+
+    const point = centerOfBounds(inspection.bounds);
+    try {
+      await this.withDebuggerSession(tabId, async (debuggerTarget) => {
+        if (action === "hover") {
+          await this.sendDebuggerCommand(debuggerTarget, "Input.dispatchMouseEvent", {
+            type: "mouseMoved",
+            x: point.x,
+            y: point.y,
+            button: "none"
+          });
+          return;
+        }
+        if (action === "click") {
+          await this.sendDebuggerCommand(debuggerTarget, "Input.dispatchMouseEvent", {
+            type: "mouseMoved",
+            x: point.x,
+            y: point.y,
+            button: "none"
+          });
+          await this.sendDebuggerCommand(debuggerTarget, "Input.dispatchMouseEvent", {
+            type: "mousePressed",
+            x: point.x,
+            y: point.y,
+            button: "left",
+            buttons: 1,
+            clickCount: 1
+          });
+          await this.sendDebuggerCommand(debuggerTarget, "Input.dispatchMouseEvent", {
+            type: "mouseReleased",
+            x: point.x,
+            y: point.y,
+            button: "left",
+            buttons: 0,
+            clickCount: 1
+          });
+          return;
+        }
+        if (action === "press") {
+          const keyParams = createCdpKeyParameters(key);
+          await this.sendDebuggerCommand(debuggerTarget, "Input.dispatchKeyEvent", {
+            type: "keyDown",
+            ...keyParams
+          });
+          await this.sendDebuggerCommand(debuggerTarget, "Input.dispatchKeyEvent", {
+            type: "keyUp",
+            ...withoutCdpKeyText(keyParams)
+          });
+          return;
+        }
+        if (action === "type") {
+          if (!inspection.editable || inspection.inputType?.toLowerCase() === "file") {
+            throw createPortusError({ code: "ACTION_UNSUPPORTED", message: "Target is not editable." });
+          }
+          if (text.length === 0) {
+            const backspace = createCdpKeyParameters("Backspace");
+            await this.sendDebuggerCommand(debuggerTarget, "Input.dispatchKeyEvent", { type: "keyDown", ...backspace });
+            await this.sendDebuggerCommand(debuggerTarget, "Input.dispatchKeyEvent", { type: "keyUp", ...withoutCdpKeyText(backspace) });
+          } else {
+            await this.sendDebuggerCommand(debuggerTarget, "Input.insertText", { text });
+          }
+          return;
+        }
+        await this.sendDebuggerCommand(debuggerTarget, "Input.dispatchMouseEvent", {
+          type: "mouseWheel",
+          x: point.x,
+          y: point.y,
+          deltaX,
+          deltaY,
+          button: "none"
+        });
+      }, `action.${action}.input`);
+    } catch (error) {
+      if (typeActionToken) {
+        try {
+          await this.finalizeDebuggerTypeTarget(tabId, element, typeActionToken, false);
+        } catch {
+          // Preserve the debugger failure. The target registry is document-scoped and
+          // disappears with navigation even if cleanup itself is no longer possible.
+        }
+      }
+      throw error;
+    }
+
+    if (typeActionToken) await this.finalizeDebuggerTypeTarget(tabId, element, typeActionToken, true);
+
+    return ActionResultSchema.parse({
+      backend: "debugger-cdp",
+      completedAt: this.now().toISOString(),
+      snapshotInvalidated: true,
+      details: {
+        action,
+        elementId: element.elementId,
+        targetValidated: true,
+        interactionMode: "input",
+        ...(action === "click" || action === "hover" || action === "scroll" ? { point } : {}),
+        ...(action === "press" ? { key } : {}),
+        ...(action === "type" ? { textLength: text.length } : {}),
+        ...(action === "scroll" ? { deltaX, deltaY } : {})
+      }
+    });
+  }
+
   private ensureDebuggerApiAvailable(): void {
     if (!this.chromeApi.debugger) {
       throw createPortusError({
@@ -3617,14 +3889,18 @@ export class PortusExtensionBridge {
       });
     }
 
-    let source = centerOfBounds(sourceElement.bounds);
-    let target = centerOfBounds(targetElement.bounds);
+    let source = sourceDebuggerTarget
+      ? centerOfBounds(sourceElement.bounds)
+      : centerOfBounds((await this.inspectLiveDomActionTarget(tabId, sourceElement, "geometry")).bounds);
+    let target = targetDebuggerTarget
+      ? centerOfBounds(targetElement.bounds)
+      : centerOfBounds((await this.inspectLiveDomActionTarget(tabId, targetElement, "geometry")).bounds);
     await this.withDebuggerSession(tabId, async (debuggerTarget) => {
       if (sourceDebuggerTarget) {
-        source = await this.resolveDebuggerDragPoint(debuggerTarget, sourceDebuggerTarget, "source");
+        source = await this.resolveDebuggerInteractionPoint(debuggerTarget, sourceDebuggerTarget, "drag source");
       }
       if (targetDebuggerTarget) {
-        target = await this.resolveDebuggerDragPoint(debuggerTarget, targetDebuggerTarget, "target");
+        target = await this.resolveDebuggerInteractionPoint(debuggerTarget, targetDebuggerTarget, "drag target");
       }
 
       await this.sendDebuggerCommand(debuggerTarget, "Input.dispatchMouseEvent", {
@@ -3673,10 +3949,10 @@ export class PortusExtensionBridge {
     });
   }
 
-  private async resolveDebuggerDragPoint(
+  private async resolveDebuggerInteractionPoint(
     debuggerTarget: ChromeDebuggerTarget,
     target: DebuggerSnapshotTarget,
-    endpoint: "source" | "target"
+    description: string
   ): Promise<{ x: number; y: number }> {
     let boxResult: unknown;
     try {
@@ -3684,14 +3960,14 @@ export class PortusExtensionBridge {
     } catch {
       throw createPortusError({
         code: "SNAPSHOT_STALE",
-        message: `CDP drag ${endpoint} is no longer available.`
+        message: `CDP ${description} is no longer available.`
       });
     }
     const bounds = readCdpBoxBounds(boxResult);
     if (!bounds || bounds.width <= 0 || bounds.height <= 0) {
       throw createPortusError({
         code: "SNAPSHOT_STALE",
-        message: `CDP drag ${endpoint} no longer has usable bounds.`
+        message: `CDP ${description} no longer has usable bounds.`
       });
     }
     return centerOfBounds(bounds);
@@ -4042,6 +4318,60 @@ function centerOfBounds(bounds: { x: number; y: number; width: number; height: n
     x: bounds.x + bounds.width / 2,
     y: bounds.y + bounds.height / 2
   };
+}
+
+function createCdpKeyParameters(key: string): Record<string, unknown> {
+  const named: Record<string, { code: string; windowsVirtualKeyCode: number }> = {
+    Enter: { code: "Enter", windowsVirtualKeyCode: 13 },
+    Tab: { code: "Tab", windowsVirtualKeyCode: 9 },
+    Escape: { code: "Escape", windowsVirtualKeyCode: 27 },
+    Backspace: { code: "Backspace", windowsVirtualKeyCode: 8 },
+    Delete: { code: "Delete", windowsVirtualKeyCode: 46 },
+    ArrowLeft: { code: "ArrowLeft", windowsVirtualKeyCode: 37 },
+    ArrowUp: { code: "ArrowUp", windowsVirtualKeyCode: 38 },
+    ArrowRight: { code: "ArrowRight", windowsVirtualKeyCode: 39 },
+    ArrowDown: { code: "ArrowDown", windowsVirtualKeyCode: 40 },
+    Home: { code: "Home", windowsVirtualKeyCode: 36 },
+    End: { code: "End", windowsVirtualKeyCode: 35 },
+    PageUp: { code: "PageUp", windowsVirtualKeyCode: 33 },
+    PageDown: { code: "PageDown", windowsVirtualKeyCode: 34 },
+    Space: { code: "Space", windowsVirtualKeyCode: 32 }
+  };
+  const definition = named[key];
+  if (definition) {
+    return {
+      key: key === "Space" ? " " : key,
+      code: definition.code,
+      windowsVirtualKeyCode: definition.windowsVirtualKeyCode,
+      nativeVirtualKeyCode: definition.windowsVirtualKeyCode,
+      ...(key === "Space" ? { text: " ", unmodifiedText: " " } : {})
+    };
+  }
+  if (key.length === 1) {
+    const virtualKeyCode = key.toUpperCase().charCodeAt(0);
+    return {
+      key,
+      text: key,
+      unmodifiedText: key,
+      windowsVirtualKeyCode: virtualKeyCode,
+      nativeVirtualKeyCode: virtualKeyCode
+    };
+  }
+  return { key };
+}
+
+function withoutCdpKeyText(params: Record<string, unknown>): Record<string, unknown> {
+  const result = { ...params };
+  delete result.text;
+  delete result.unmodifiedText;
+  return result;
+}
+
+function supportsCdpTextInputType(inputType: string): boolean {
+  // Keep Advanced Backend replacement semantics exact: these input types support
+  // programmatic full-text selection before Input.insertText. Other specialized
+  // controls retain the existing DOM value path instead of risking append/partial edits.
+  return ["text", "search", "url", "tel", "password"].includes(inputType.toLowerCase());
 }
 
 function readGlobalChromeApi(): PortusChromeApi {
@@ -4873,6 +5203,9 @@ export function capturePortusSnapshotPayload(
 }
 
 export function performPortusDomAction(payload: Record<string, unknown>): Record<string, unknown> {
+  type ActionTargetRegistryRoot = typeof globalThis & {
+    __portusActionTargetRegistry?: Map<string, HTMLElement>;
+  };
   type ActionComposedDomRuntime = {
     collect(root?: Document | ShadowRoot): Array<{
       element: Element;
@@ -4883,12 +5216,86 @@ export function performPortusDomAction(payload: Record<string, unknown>): Record
   };
   try {
     const action = typeof payload.action === "string" ? payload.action : "";
+    if (action === "__portus.finalize-type") {
+      const actionToken = typeof payload.actionToken === "string" ? payload.actionToken : "";
+      if (!actionToken) return actionError("ACTION_FAILED", "Type target token is required.");
+      const registry = getPortusActionTargetRegistry();
+      const exactElement = registry.get(actionToken);
+      registry.delete(actionToken);
+      if (!exactElement) return actionError("SNAPSHOT_STALE", "Type target is no longer available.");
+      if (payload.dispatchChange !== false && (exactElement instanceof HTMLInputElement || exactElement instanceof HTMLTextAreaElement)) {
+        exactElement.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      return { ok: true, details: { action, targetValidated: true } };
+    }
     const target = isPlainRecord(payload.target) ? payload.target : null;
     const resolution = target ? resolveLiveActionElement(target) : { element: null, score: 0 };
     if (target && !resolution.element) {
       return actionError("SNAPSHOT_STALE", "Element target no longer matches the current DOM.");
     }
     const element = resolution.element;
+
+    if (action === "__portus.inspect-target") {
+      if (!element) return actionError("SNAPSHOT_STALE", "Target inspection requires an element target.");
+      const preparation = typeof payload.preparation === "string" ? payload.preparation : "geometry";
+      const deltaX = typeof payload.deltaX === "number" ? payload.deltaX : 0;
+      const deltaY = typeof payload.deltaY === "number" ? payload.deltaY : 0;
+      const editable = (element instanceof HTMLInputElement && element.type !== "file")
+        || element instanceof HTMLTextAreaElement
+        || element.isContentEditable;
+      if (preparation === "type" && !editable) {
+        return actionError("ACTION_UNSUPPORTED", "Target is not editable.");
+      }
+      if (preparation === "pointer") {
+        element.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+      }
+      if (preparation === "focus" || preparation === "type") element.focus();
+      if (preparation === "type") {
+        if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+          try {
+            element.select();
+          } catch {
+            // Specialized input controls may not expose a text selection. The caller
+            // falls back to exact DOM semantics for unsupported input types.
+          }
+        } else if (element.isContentEditable) {
+          const selection = window.getSelection();
+          if (selection) {
+            const range = document.createRange();
+            range.selectNodeContents(element);
+            selection.removeAllRanges();
+            selection.addRange(range);
+          }
+        }
+      }
+      const rect = element.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) {
+        return actionError("SNAPSHOT_STALE", "Target no longer has usable bounds.");
+      }
+      const viewportWidth = Math.max(document.documentElement?.clientWidth ?? 0, window.innerWidth || 0);
+      const viewportHeight = Math.max(document.documentElement?.clientHeight ?? 0, window.innerHeight || 0);
+      const maxScrollX = Math.max(0, element.scrollWidth - element.clientWidth);
+      const maxScrollY = Math.max(0, element.scrollHeight - element.clientHeight);
+      const canScrollDeltaX = deltaX > 0 ? element.scrollLeft < maxScrollX : deltaX < 0 ? element.scrollLeft > 0 : false;
+      const canScrollDeltaY = deltaY > 0 ? element.scrollTop < maxScrollY : deltaY < 0 ? element.scrollTop > 0 : false;
+      const actionToken = typeof payload.actionToken === "string" ? payload.actionToken : "";
+      if (preparation === "type" && actionToken) getPortusActionTargetRegistry().set(actionToken, element);
+      return {
+        ok: true,
+        details: {
+          action,
+          targetValidated: true,
+          bounds: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
+          inViewport: rect.right > 0 && rect.bottom > 0 && rect.left < viewportWidth && rect.top < viewportHeight,
+          editable,
+          ...(element instanceof HTMLInputElement ? { inputType: element.type } : {}),
+          canScrollX: maxScrollX > 0,
+          canScrollY: maxScrollY > 0,
+          canScrollDeltaX,
+          canScrollDeltaY
+        }
+      };
+    }
 
     if (action === "click") {
       if (!element) return actionError("SNAPSHOT_STALE", "Click requires an element target.");
@@ -5079,6 +5486,12 @@ export function performPortusDomAction(payload: Record<string, unknown>): Record
     return actionError("ACTION_UNSUPPORTED", `Unsupported action: ${action}.`);
   } catch (error) {
     return actionError("ACTION_FAILED", error instanceof Error ? error.message : "DOM action failed.");
+  }
+
+  function getPortusActionTargetRegistry(): Map<string, HTMLElement> {
+    const root = globalThis as ActionTargetRegistryRoot;
+    root.__portusActionTargetRegistry ??= new Map<string, HTMLElement>();
+    return root.__portusActionTargetRegistry;
   }
 
   function actionError(code: string, message: string): Record<string, unknown> {

@@ -828,7 +828,7 @@ function SettingsPanel({
           </label>
           <FieldDescription className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-[var(--portus-subsection-gap)] mb-[var(--portus-section-gap-large)]">
             <InfoIcon aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
-            <span className="leading-none">Uses CDP-backed input automatically when available. Explicit debugger commands do not depend on this preference. Chrome may show debugger-style warnings while CDP is used.</span>
+            <span className="leading-none">Prefers browser-level CDP input for supported top-level actions. Child-frame and exact-semantics fallback cases may remain on the DOM backend; inaccessible closed Shadow DOM uses the debugger fallback. Explicit debugger commands do not depend on this preference. Chrome may show debugger-style warnings while CDP is used.</span>
           </FieldDescription>
         </div>
       </Section>

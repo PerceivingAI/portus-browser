@@ -231,7 +231,7 @@ portus-browser dialog dismiss --browser 1 --tab-id <tabId> --json
 portus-browser dialog accept --browser 1 --tab-id <tabId> --text "value" --json
 ```
 
-Dialog commands require Chrome debugger API availability and command policy. The advanced debugger preference controls automatic backend selection; explicit debugger commands do not depend on it.
+Dialog commands require Chrome debugger API availability and command policy. The Advanced Debugger preference controls automatic interaction-backend selection: supported top-level `click`, `hover`, targeted `press`, `type`, `scroll`, and same-document `drag` prefer browser-level CDP input when enabled. Normal child-frame actions remain on the Shadow-aware DOM backend, and operations that cannot preserve their public semantics safely may deliberately stay on DOM. Inaccessible closed-Shadow-DOM targets use the debugger as a specialized reachability fallback. Explicit debugger commands do not depend on this preference.
 
 ## Console And Network Diagnostics
 

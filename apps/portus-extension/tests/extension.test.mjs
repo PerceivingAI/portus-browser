@@ -1877,6 +1877,28 @@ test("live DOM actions resolve nested Shadow DOM without crossing the captured r
     assert.equal(scrolled.ok, true);
     assert.deepEqual(scrollRequest, { left: 7, top: 90, behavior: "instant" });
 
+    let originalChanges = 0;
+    let replacementChanges = 0;
+    shadowInput.addEventListener("change", () => originalChanges += 1);
+    const inspectedTypeTarget = performPortusDomAction({
+      action: "__portus.inspect-target",
+      target: inputTarget,
+      preparation: "type",
+      actionToken: "type_exact_target"
+    });
+    assert.equal(inspectedTypeTarget.ok, true);
+    const replacementInput = shadowInput.cloneNode();
+    shadowInput.replaceWith(replacementInput);
+    replacementInput.addEventListener("change", () => replacementChanges += 1);
+    const finalizedTypeTarget = performPortusDomAction({
+      action: "__portus.finalize-type",
+      actionToken: "type_exact_target",
+      dispatchChange: true
+    });
+    assert.equal(finalizedTypeTarget.ok, true);
+    assert.equal(originalChanges, 1);
+    assert.equal(replacementChanges, 0);
+
     document.elementsFromPoint = () => [lightButton];
     nested.remove();
     const removedStale = performPortusDomAction({ action: "click", target: buttonTarget });
@@ -2466,6 +2488,248 @@ test("performs DOM hover actions", async () => {
   assert.equal(fixture.actions[0].target.elementId, "el_000001");
 });
 
+test("advanced backend keeps core target actions on DOM while disabled", async () => {
+  const element = {
+    role: "textbox",
+    label: "Name",
+    text: "",
+    bounds: { x: 10, y: 20, width: 180, height: 32 },
+    state: { value: "" },
+    selectorHint: "#name",
+    tagName: "input",
+    editable: true,
+    inputType: "text"
+  };
+  const scenarios = [
+    ["click", {}],
+    ["hover", {}],
+    ["press", { key: "Enter" }],
+    ["type", { text: "Ada" }],
+    ["scroll", { deltaY: 120 }]
+  ];
+
+  for (const [actionName, extra] of scenarios) {
+    const fixture = createAdvancedActionFixture({ element });
+    const bridge = createConnectedBridge(fixture);
+    const snapshot = await bridge.captureSnapshot(1);
+    const result = await bridge.performAction(actionName, {
+      tabId: 1,
+      snapshotId: snapshot.snapshotId,
+      elementId: snapshot.elements[0].elementId,
+      ...extra
+    });
+
+    assert.equal(result.backend, "content-script-dom", actionName);
+    assert.equal(fixture.actions.length, 1, actionName);
+    assert.equal(fixture.actions[0].action, actionName, actionName);
+    assert.equal(fixture.debuggerCommands.length, 0, actionName);
+  }
+});
+
+test("advanced backend uses real CDP input for normal top-level core actions", async () => {
+  const baseElement = {
+    role: "textbox",
+    label: "Name",
+    text: "",
+    bounds: { x: 10, y: 20, width: 180, height: 32 },
+    state: { value: "" },
+    selectorHint: "#name",
+    tagName: "input",
+    editable: true,
+    inputType: "text"
+  };
+  const scenarios = [
+    { action: "hover", extra: {}, methods: ["Input.dispatchMouseEvent"] },
+    { action: "click", extra: {}, methods: ["Input.dispatchMouseEvent", "Input.dispatchMouseEvent", "Input.dispatchMouseEvent"] },
+    { action: "press", extra: { key: "Enter" }, methods: ["Input.dispatchKeyEvent", "Input.dispatchKeyEvent"] },
+    { action: "type", extra: { text: "Ada" }, methods: ["Input.insertText"] },
+    {
+      action: "scroll",
+      extra: { deltaX: 0, deltaY: 120 },
+      methods: ["Input.dispatchMouseEvent"],
+      inspection: { canScrollY: true, canScrollDeltaY: true }
+    }
+  ];
+
+  for (const scenario of scenarios) {
+    const fixture = createAdvancedActionFixture({ element: baseElement, inspection: scenario.inspection ?? {} });
+    const bridge = createConnectedBridge(fixture);
+    const snapshot = await bridge.captureSnapshot(1);
+    await bridge.setAdvancedBackendEnabled(true, false);
+    const result = await bridge.performAction(scenario.action, {
+      tabId: 1,
+      snapshotId: snapshot.snapshotId,
+      elementId: snapshot.elements[0].elementId,
+      ...scenario.extra
+    });
+
+    assert.equal(result.backend, "debugger-cdp", scenario.action);
+    assert.equal(result.details.interactionMode, "input", scenario.action);
+    assert.equal(result.snapshotInvalidated, true, scenario.action);
+    assert.deepEqual(fixture.debuggerCommands.map((command) => command.method), scenario.methods, scenario.action);
+    assert.equal(fixture.actions.length, 0, scenario.action);
+  }
+});
+
+test("advanced click uses live resolved geometry instead of stale snapshot bounds", async () => {
+  const fixture = createAdvancedActionFixture({
+    inspection: { bounds: { x: 200, y: 300, width: 80, height: 20 } }
+  });
+  const bridge = createConnectedBridge(fixture);
+  await bridge.setAdvancedBackendEnabled(true, false);
+  const snapshot = await bridge.captureSnapshot(1);
+
+  const result = await bridge.performAction("click", {
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    elementId: snapshot.elements[0].elementId
+  });
+
+  assert.equal(result.backend, "debugger-cdp");
+  for (const command of fixture.debuggerCommands) {
+    assert.equal(command.params.x, 240);
+    assert.equal(command.params.y, 310);
+  }
+  assert.deepEqual(result.details.point, { x: 240, y: 310 });
+});
+
+test("advanced input fails stale before debugger input when live DOM identity no longer resolves", async () => {
+  const fixture = createAdvancedActionFixture({
+    inspectError: { code: "SNAPSHOT_STALE", message: "Element target no longer matches the current DOM." }
+  });
+  const bridge = createConnectedBridge(fixture);
+  await bridge.setAdvancedBackendEnabled(true, false);
+  const snapshot = await bridge.captureSnapshot(1);
+
+  await assert.rejects(() => bridge.performAction("click", {
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    elementId: snapshot.elements[0].elementId
+  }), { code: "SNAPSHOT_STALE" });
+
+  assert.equal(fixture.debuggerAttaches.length, 0);
+  assert.equal(fixture.debuggerCommands.length, 0);
+  assert.equal(fixture.actions.length, 0);
+});
+
+test("advanced backend deliberately keeps child-frame actions on the DOM backend", async () => {
+  const fixture = createAdvancedActionFixture({ frameId: 7, documentId: "doc_child" });
+  const bridge = createConnectedBridge(fixture);
+  await bridge.setAdvancedBackendEnabled(true, false);
+  const snapshot = await bridge.captureSnapshot(1);
+  assert.equal(snapshot.elements[0].frameId, 7);
+
+  const result = await bridge.performAction("click", {
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    elementId: snapshot.elements[0].elementId
+  });
+
+  assert.equal(result.backend, "content-script-dom");
+  assert.equal(fixture.actions.length, 1);
+  assert.equal(fixture.actions[0].action, "click");
+  assert.equal(fixture.debuggerCommands.length, 0);
+});
+
+test("advanced targeted scroll falls back before debugger input when wheel routing would change semantics", async () => {
+  const element = {
+    role: "region",
+    label: "Static region",
+    text: "",
+    bounds: { x: 10, y: 20, width: 180, height: 80 },
+    state: {},
+    selectorHint: "#static-region",
+    tagName: "div"
+  };
+  const fixture = createAdvancedActionFixture({ element });
+  const bridge = createConnectedBridge(fixture);
+  await bridge.setAdvancedBackendEnabled(true, false);
+  const snapshot = await bridge.captureSnapshot(1);
+
+  const result = await bridge.performAction("scroll", {
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    elementId: snapshot.elements[0].elementId,
+    deltaY: 120
+  });
+
+  assert.equal(result.backend, "content-script-dom");
+  assert.equal(result.details.advancedBackendFallback, "element-scroll-semantics");
+  assert.equal(fixture.debuggerCommands.length, 0);
+  assert.equal(fixture.actions.at(-1).action, "scroll");
+});
+
+test("advanced type keeps specialized input controls on exact DOM value semantics", async () => {
+  const element = {
+    role: "checkbox",
+    label: "Choice",
+    text: "",
+    bounds: { x: 10, y: 20, width: 20, height: 20 },
+    state: {},
+    selectorHint: "#choice",
+    tagName: "input",
+    editable: true,
+    inputType: "checkbox"
+  };
+  const fixture = createAdvancedActionFixture({ element });
+  const bridge = createConnectedBridge(fixture);
+  await bridge.setAdvancedBackendEnabled(true, false);
+  const snapshot = await bridge.captureSnapshot(1);
+
+  const result = await bridge.performAction("type", {
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    elementId: snapshot.elements[0].elementId,
+    text: "value"
+  });
+
+  assert.equal(result.backend, "content-script-dom");
+  assert.equal(result.details.advancedBackendFallback, "specialized-input-semantics");
+  assert.equal(fixture.debuggerCommands.length, 0);
+  assert.equal(fixture.actions.at(-1).action, "type");
+});
+
+test("normal advanced actions fall back to DOM when the debugger API is unavailable", async () => {
+  const fixture = createChromeFixture({ debugger: false });
+  const bridge = createConnectedBridge(fixture);
+  await bridge.setAdvancedBackendEnabled(true, false);
+  const snapshot = await bridge.captureSnapshot(1);
+
+  const result = await bridge.performAction("click", {
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    elementId: snapshot.elements[0].elementId
+  });
+
+  assert.equal(result.backend, "content-script-dom");
+  assert.equal(fixture.actions.length, 1);
+  assert.equal(fixture.actions[0].action, "click");
+  assert.equal(fixture.debuggerAttaches.length, 0);
+  assert.equal(fixture.debuggerCommands.length, 0);
+});
+
+test("advanced debugger failures never fall through to a DOM retry", async () => {
+  const fixture = createAdvancedActionFixture({
+    sendDebuggerCommand(_target, method) {
+      if (method === "Input.dispatchMouseEvent") return Promise.reject(new Error("input unavailable"));
+      return Promise.resolve({});
+    }
+  });
+  const bridge = createConnectedBridge(fixture);
+  await bridge.setAdvancedBackendEnabled(true, false);
+  const snapshot = await bridge.captureSnapshot(1);
+
+  await assert.rejects(() => bridge.performAction("hover", {
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    elementId: snapshot.elements[0].elementId
+  }), { code: "CAPABILITY_UNAVAILABLE" });
+
+  assert.equal(fixture.debuggerAttaches.length, 1);
+  assert.equal(fixture.debuggerDetaches.length, 1);
+  assert.equal(fixture.actions.length, 0);
+});
+
 test("waits for visible page text", async () => {
   const fixture = createChromeFixture({
     executeScript(injection) {
@@ -2546,7 +2810,16 @@ test("handles browser dialogs independently of the automatic backend preference"
 
 test("uses debugger input for drag when advanced backend is enabled", async () => {
   const fixture = createChromeFixture({
-    executeScript() {
+    executeScript(injection) {
+      if (injection.files) return Promise.resolve([{ result: undefined }]);
+      const payload = Array.isArray(injection.args) ? injection.args[0] : undefined;
+      if (payload && typeof payload === "object" && payload.action === "__portus.inspect-target") {
+        return Promise.resolve([{
+          frameId: 0,
+          documentId: "doc_frame_0",
+          result: defaultInternalActionResult(payload)
+        }]);
+      }
       return Promise.resolve([{
         result: {
           url: "https://example.com/drag",
@@ -2868,6 +3141,62 @@ test("uses pierced CDP only for inaccessible closed roots when advanced backend 
   assert.equal(fixture.actions.length, 0);
   assert.equal(fixture.debuggerAttaches.length, 2);
   assert.equal(fixture.debuggerDetaches.length, 2);
+});
+
+test("pierced closed-shadow core actions keep the specialized debugger reachability path", async () => {
+  const scenarios = [
+    ["click", {}],
+    ["hover", {}],
+    ["type", { text: "Ada" }],
+    ["press", { key: "Enter" }],
+    ["scroll", { deltaX: 5, deltaY: 120 }]
+  ];
+
+  for (const [actionName, extra] of scenarios) {
+    const fixture = createPiercedCoreActionFixture();
+    const bridge = createConnectedBridge(fixture);
+    await bridge.setAdvancedBackendEnabled(true, false);
+    const snapshot = await bridge.captureSnapshot(1, { query: "secret input" });
+    assert.equal(snapshot.elements.length, 1, actionName);
+    assert.equal(JSON.stringify(snapshot).includes("backendNodeId"), false, actionName);
+    const commandStart = fixture.debuggerCommands.length;
+
+    const result = await bridge.performAction(actionName, {
+      tabId: 1,
+      snapshotId: snapshot.snapshotId,
+      elementId: snapshot.elements[0].elementId,
+      ...extra
+    });
+
+    assert.equal(result.backend, "debugger-cdp", actionName);
+    assert.equal(result.details.piercedClosedShadowFallback, true, actionName);
+    assert.equal(result.details.action, actionName, actionName);
+    assert.deepEqual(
+      fixture.debuggerCommands.slice(commandStart).map((command) => command.method),
+      ["DOM.resolveNode", "Runtime.callFunctionOn"],
+      actionName
+    );
+    assert.equal(fixture.actions.length, 0, actionName);
+  }
+});
+
+test("pierced closed-shadow actions never fall through to DOM after Advanced Backend is disabled", async () => {
+  const fixture = createPiercedCoreActionFixture();
+  const bridge = createConnectedBridge(fixture);
+  await bridge.setAdvancedBackendEnabled(true, false);
+  const snapshot = await bridge.captureSnapshot(1, { query: "secret input" });
+  const commandCount = fixture.debuggerCommands.length;
+  await bridge.setAdvancedBackendEnabled(false, false);
+
+  await assert.rejects(() => bridge.performAction("type", {
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    elementId: snapshot.elements[0].elementId,
+    text: "Ada"
+  }), { code: "CAPABILITY_UNAVAILABLE" });
+
+  assert.equal(fixture.debuggerCommands.length, commandCount);
+  assert.equal(fixture.actions.length, 0);
 });
 
 test("pierced fallback still reports closed-root counts when normal results fill the requested limit", async () => {
@@ -3545,6 +3874,35 @@ function isActionInjection(injection) {
   return payload !== null && typeof payload === "object" && typeof payload.action === "string";
 }
 
+function isInternalAction(action) {
+  return action === "__portus.inspect-target" || action === "__portus.finalize-type";
+}
+
+function defaultInternalActionResult(payload) {
+  if (payload.action === "__portus.finalize-type") {
+    return { ok: true, details: { action: payload.action, targetValidated: true } };
+  }
+  const target = payload.target && typeof payload.target === "object" ? payload.target : {};
+  const bounds = target.bounds && typeof target.bounds === "object"
+    ? target.bounds
+    : { x: 10, y: 20, width: 100, height: 40 };
+  return {
+    ok: true,
+    details: {
+      action: payload.action,
+      targetValidated: true,
+      bounds,
+      inViewport: true,
+      editable: target.editable === true,
+      ...(typeof target.inputType === "string" ? { inputType: target.inputType } : {}),
+      canScrollX: false,
+      canScrollY: false,
+      canScrollDeltaX: false,
+      canScrollDeltaY: false
+    }
+  };
+}
+
 function isHistoryInjection(injection) {
   const direction = Array.isArray(injection.args) ? injection.args[0] : undefined;
   return direction === "back" || direction === "forward";
@@ -3683,6 +4041,14 @@ function createPiercedDragFixture({ staleBackendNodeId } = {}) {
   return createChromeFixture({
     executeScript(injection) {
       if (injection.files) return Promise.resolve([{ result: undefined }]);
+      const payload = Array.isArray(injection.args) ? injection.args[0] : undefined;
+      if (payload && typeof payload === "object" && payload.action === "__portus.inspect-target") {
+        return Promise.resolve([{
+          frameId: 0,
+          documentId: "doc_main",
+          result: defaultInternalActionResult(payload)
+        }]);
+      }
       if (injection.target?.allFrames === true) {
         return Promise.resolve([{
           frameId: 0,
@@ -3773,6 +4139,178 @@ function createPiercedDragFixture({ staleBackendNodeId } = {}) {
   });
 }
 
+function createPiercedCoreActionFixture() {
+  return createChromeFixture({
+    executeScript(injection) {
+      if (injection.files) return Promise.resolve([{ result: undefined }]);
+      if (injection.target?.allFrames === true) {
+        return Promise.resolve([{
+          frameId: 0,
+          documentId: "doc_main",
+          result: {
+            url: "https://example.com/pierced-core",
+            title: "Pierced core",
+            viewport: { width: 1200, height: 800, deviceScaleFactor: 1 },
+            visibleText: "",
+            closedShadowRootAccessAvailable: false,
+            candidateCount: 0,
+            matchedElementCount: 0,
+            truncated: false,
+            elements: []
+          }
+        }]);
+      }
+      return Promise.resolve([{ frameId: 0, documentId: "doc_main", result: {} }]);
+    },
+    sendDebuggerCommand(_target, method, params) {
+      if (method === "DOM.getDocument") {
+        return Promise.resolve({
+          root: {
+            nodeType: 9,
+            nodeName: "#document",
+            backendNodeId: 1,
+            children: [{
+              nodeType: 1,
+              nodeName: "SECURE-SHELL",
+              localName: "secure-shell",
+              backendNodeId: 2,
+              shadowRoots: [{
+                nodeType: 11,
+                nodeName: "#document-fragment",
+                backendNodeId: 3,
+                shadowRootType: "closed",
+                children: [{
+                  nodeType: 1,
+                  nodeName: "INPUT",
+                  localName: "input",
+                  backendNodeId: 4,
+                  attributes: ["id", "secret-input", "aria-label", "Secret input", "type", "text", "name", "secretInput"]
+                }]
+              }]
+            }]
+          }
+        });
+      }
+      if (method === "DOM.getBoxModel") {
+        assert.deepEqual(params, { backendNodeId: 4 });
+        return Promise.resolve({ model: { border: [20, 30, 220, 30, 220, 70, 20, 70] } });
+      }
+      if (method === "DOM.resolveNode") {
+        assert.deepEqual(params, { backendNodeId: 4 });
+        return Promise.resolve({ object: { objectId: "remote_pierced_core" } });
+      }
+      if (method === "Runtime.callFunctionOn") {
+        assert.equal(params.objectId, "remote_pierced_core");
+        return Promise.resolve({ result: { value: true } });
+      }
+      return Promise.resolve({});
+    }
+  });
+}
+
+function createAdvancedActionFixture({
+  element,
+  inspection = {},
+  inspectError = null,
+  frameId = 0,
+  documentId = frameId === 0 ? "doc_main" : "doc_child",
+  sendDebuggerCommand,
+  attachDebugger
+} = {}) {
+  const snapshotElement = element ?? {
+    role: "button",
+    label: "Submit",
+    text: "Submit",
+    bounds: { x: 10, y: 20, width: 100, height: 40 },
+    state: {},
+    selectorHint: "#submit",
+    tagName: "button"
+  };
+  const pageResult = {
+    url: "https://example.com/advanced-action",
+    title: "Advanced action",
+    viewport: { width: 1200, height: 800, deviceScaleFactor: 1 },
+    visibleText: snapshotElement.label ?? snapshotElement.text ?? "",
+    closedShadowRootAccessAvailable: true,
+    candidateCount: 1,
+    matchedElementCount: 1,
+    truncated: false,
+    elements: [snapshotElement]
+  };
+  return createChromeFixture({
+    executeScript(injection, actions) {
+      if (injection.files) return Promise.resolve([{ result: undefined }]);
+      if (isActionInjection(injection)) {
+        const payload = injection.args[0];
+        if (payload.action === "__portus.inspect-target") {
+          return Promise.resolve([{
+            frameId,
+            documentId,
+            result: inspectError
+              ? { ok: false, error: inspectError }
+              : {
+                  ok: true,
+                  details: {
+                    action: payload.action,
+                    targetValidated: true,
+                    bounds: inspection.bounds ?? payload.target.bounds,
+                    inViewport: inspection.inViewport ?? true,
+                    editable: inspection.editable ?? payload.target.editable === true,
+                    ...(inspection.inputType !== undefined
+                      ? { inputType: inspection.inputType }
+                      : typeof payload.target.inputType === "string"
+                        ? { inputType: payload.target.inputType }
+                        : {}),
+                    canScrollX: inspection.canScrollX ?? false,
+                    canScrollY: inspection.canScrollY ?? false,
+                    canScrollDeltaX: inspection.canScrollDeltaX ?? false,
+                    canScrollDeltaY: inspection.canScrollDeltaY ?? false
+                  }
+                }
+          }]);
+        }
+        if (payload.action === "__portus.finalize-type") {
+          return Promise.resolve([{
+            frameId,
+            documentId,
+            result: { ok: true, details: { action: payload.action, targetValidated: true } }
+          }]);
+        }
+        actions.push(payload);
+        return Promise.resolve([{
+          frameId,
+          documentId,
+          result: { ok: true, details: { action: payload.action, targetValidated: true } }
+        }]);
+      }
+      if (injection.target?.allFrames === true) {
+        if (frameId === 0) return Promise.resolve([{ frameId, documentId, result: pageResult }]);
+        return Promise.resolve([
+          {
+            frameId: 0,
+            documentId: "doc_main",
+            result: {
+              url: "https://example.com/advanced-action",
+              title: "Advanced action",
+              viewport: { width: 1200, height: 800, deviceScaleFactor: 1 },
+              visibleText: "",
+              closedShadowRootAccessAvailable: true,
+              candidateCount: 0,
+              matchedElementCount: 0,
+              truncated: false,
+              elements: []
+            }
+          },
+          { frameId, documentId, result: pageResult }
+        ]);
+      }
+      return Promise.resolve([{ frameId, documentId, result: {} }]);
+    },
+    ...(sendDebuggerCommand ? { sendDebuggerCommand } : {}),
+    ...(attachDebugger ? { attachDebugger } : {})
+  });
+}
+
 function createChromeFixture(overrides = {}) {
   const ports = [];
   const connectedHostNames = [];
@@ -3860,8 +4398,13 @@ function createChromeFixture(overrides = {}) {
           let result;
           if (overrides.executeScript) result = await overrides.executeScript(injection, actions);
           else if (isActionInjection(injection)) {
-            actions.push(injection.args[0]);
-            result = [{ result: { ok: true, details: { action: injection.args[0].action } } }];
+            const payload = injection.args[0];
+            if (isInternalAction(payload.action)) {
+              result = [{ result: defaultInternalActionResult(payload) }];
+            } else {
+              actions.push(payload);
+              result = [{ result: { ok: true, details: { action: payload.action } } }];
+            }
           } else if (isHistoryInjection(injection)) {
             actions.push(injection.args[0]);
             result = [{ result: { ok: true } }];
