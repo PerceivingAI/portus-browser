@@ -962,8 +962,7 @@ export class PortusExtensionBridge {
     const requestedLimit = Math.min(filter?.maxElements ?? SNAPSHOT_COLLECTION_LIMIT, SNAPSHOT_COLLECTION_LIMIT);
     const remainingLimit = Math.max(0, requestedLimit - normalCandidates.length);
     const shouldUsePiercedFallback = this.shouldUseDebuggerBackend()
-      && page.closedShadowRootAccessAvailable !== true
-      && remainingLimit > 0;
+      && page.closedShadowRootAccessAvailable !== true;
     const supplement = shouldUsePiercedFallback
       ? await this.capturePiercedClosedShadowSupplement(
           targetTabId,
@@ -3348,7 +3347,6 @@ export class PortusExtensionBridge {
     filter: SnapshotFilter | undefined,
     limit: number
   ): Promise<PiercedClosedShadowSupplement> {
-    if (limit <= 0) return { candidates: [], candidateCount: 0, matchedElementCount: 0, truncated: false };
     return await this.withDebuggerSession(tabId, async (debuggerTarget) => {
       const documentResult = await this.sendDebuggerCommand(debuggerTarget, "DOM.getDocument", { depth: -1, pierce: true });
       if (!isRecord(documentResult) || !isRecord(documentResult.root)) {
@@ -5183,11 +5181,17 @@ export function performPortusDomAction(payload: Record<string, unknown>): Record
 
   function collectActionCandidates(
     target: Record<string, unknown>,
-    expectedShadowPath: Array<{ hostSelectorHint: string; rootType: "open" | "closed" }> | undefined,
+    expectedShadowPath: Array<{ hostSelectorHint: string; rootType: "open" | "closed"; hostInstanceId?: string }> | undefined,
     targetRoot: Document | ShadowRoot | null
   ): HTMLElement[] {
     const candidates: HTMLElement[] = [];
     const seen = new Set<HTMLElement>();
+    const runtime = readActionComposedDomRuntime();
+    const composedEntries = runtime && typeof runtime.collect === "function"
+      ? runtime.collect(document)
+      : [];
+    const shadowPathByElement = new Map<Element, Array<{ hostSelectorHint: string; rootType: "open" | "closed"; hostInstanceId?: string }> | undefined>();
+    for (const entry of composedEntries) shadowPathByElement.set(entry.element, entry.shadowPath);
 
     const bounds = readTargetBounds(target.bounds);
     if (bounds) {
@@ -5208,10 +5212,9 @@ export function performPortusDomAction(payload: Record<string, unknown>): Record
       }
     }
 
-    const runtime = readActionComposedDomRuntime();
-    if (runtime && typeof runtime.collect === "function") {
+    if (composedEntries.length > 0) {
       const fallbackSelector = "button,a[href],input,textarea,select,[role],[contenteditable],[tabindex],[onclick]";
-      for (const entry of runtime.collect(document)) {
+      for (const entry of composedEntries) {
         if (!shadowPathsEqual(entry.shadowPath, expectedShadowPath)) continue;
         if (!(entry.element instanceof HTMLElement) || !entry.element.matches(fallbackSelector)) continue;
         addCandidate(entry.element);
@@ -5222,8 +5225,13 @@ export function performPortusDomAction(payload: Record<string, unknown>): Record
 
     function addCandidate(element: Element): void {
       if (!(element instanceof HTMLElement) || seen.has(element)) return;
-      if (expectedShadowPath === undefined && element.getRootNode() !== document) return;
-      if (expectedShadowPath !== undefined && targetRoot && element.getRootNode() !== targetRoot) return;
+      if (expectedShadowPath === undefined) {
+        if (element.getRootNode() !== document) return;
+      } else if (targetRoot) {
+        if (element.getRootNode() !== targetRoot) return;
+      } else if (!shadowPathsEqual(shadowPathByElement.get(element), expectedShadowPath)) {
+        return;
+      }
       seen.add(element);
       candidates.push(element);
     }
@@ -5335,9 +5343,10 @@ export function performPortusDomAction(payload: Record<string, unknown>): Record
     return left.every((segment, index) => {
       const expected = right[index];
       return expected !== undefined
-        && segment.hostSelectorHint === expected.hostSelectorHint
         && segment.rootType === expected.rootType
-        && (expected.hostInstanceId === undefined || segment.hostInstanceId === expected.hostInstanceId);
+        && (expected.hostInstanceId !== undefined
+          ? segment.hostInstanceId === expected.hostInstanceId
+          : segment.hostSelectorHint === expected.hostSelectorHint);
     });
   }
 

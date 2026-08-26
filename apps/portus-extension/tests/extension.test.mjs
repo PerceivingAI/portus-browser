@@ -1728,7 +1728,8 @@ test("closed Shadow DOM participates in snapshots waits and actions through chro
       writable: true,
       value: {
         collect: () => [],
-        shadowRootForElement: closedRuntime.shadowRootForElement
+        shadowRootForElement: closedRuntime.shadowRootForElement,
+        hostInstanceIdForElement: closedRuntime.hostInstanceIdForElement
       }
     });
     closedButton.id = "renamed-closed-action";
@@ -1852,6 +1853,12 @@ test("live DOM actions resolve nested Shadow DOM without crossing the captured r
     assert.equal(shadowClicks, 2);
     assert.equal(lightClicks, 0);
 
+    nested.id = "renamed-nested";
+    const recoveredAfterHostSelectorChange = performPortusDomAction({ action: "click", target: buttonTarget });
+    assert.equal(recoveredAfterHostSelectorChange.ok, true);
+    assert.equal(shadowClicks, 3);
+    assert.equal(lightClicks, 0);
+
     const typed = performPortusDomAction({ action: "type", target: inputTarget, text: "Ada" });
     assert.equal(typed.ok, true);
     assert.equal(shadowInput.value, "Ada");
@@ -1870,6 +1877,7 @@ test("live DOM actions resolve nested Shadow DOM without crossing the captured r
     assert.equal(scrolled.ok, true);
     assert.deepEqual(scrollRequest, { left: 7, top: 90, behavior: "instant" });
 
+    document.elementsFromPoint = () => [lightButton];
     nested.remove();
     const removedStale = performPortusDomAction({ action: "click", target: buttonTarget });
     assert.equal(removedStale.ok, false);
@@ -2860,6 +2868,97 @@ test("uses pierced CDP only for inaccessible closed roots when advanced backend 
   assert.equal(fixture.actions.length, 0);
   assert.equal(fixture.debuggerAttaches.length, 2);
   assert.equal(fixture.debuggerDetaches.length, 2);
+});
+
+test("pierced fallback still reports closed-root counts when normal results fill the requested limit", async () => {
+  const fixture = createChromeFixture({
+    executeScript(injection) {
+      if (injection.files) return Promise.resolve([{ result: undefined }]);
+      if (injection.target?.allFrames === true) {
+        return Promise.resolve([{
+          frameId: 0,
+          documentId: "doc_main",
+          result: {
+            url: "https://example.com/secure-counts",
+            title: "Secure counts",
+            viewport: { width: 1200, height: 800, deviceScaleFactor: 1 },
+            visibleText: "Normal action",
+            elements: [{
+              role: "button",
+              label: "Normal action",
+              text: "Normal action",
+              bounds: { x: 10, y: 20, width: 100, height: 40 },
+              state: {},
+              selectorHint: "#normal-action",
+              tagName: "button"
+            }],
+            candidateCount: 1,
+            matchedElementCount: 1,
+            truncated: false,
+            closedShadowRootAccessAvailable: false
+          }
+        }]);
+      }
+      return Promise.resolve([{ frameId: 0, documentId: "doc_main", result: {} }]);
+    },
+    sendDebuggerCommand(_target, method, params) {
+      if (method === "DOM.getDocument") {
+        return Promise.resolve({
+          root: {
+            nodeType: 9,
+            nodeName: "#document",
+            backendNodeId: 1,
+            children: [{
+              nodeType: 1,
+              nodeName: "SECURE-SHELL",
+              localName: "secure-shell",
+              backendNodeId: 2,
+              shadowRoots: [{
+                nodeType: 11,
+                nodeName: "#document-fragment",
+                backendNodeId: 3,
+                shadowRootType: "closed",
+                children: [{
+                  nodeType: 1,
+                  nodeName: "BUTTON",
+                  localName: "button",
+                  backendNodeId: 4,
+                  attributes: ["id", "closed-action", "aria-label", "Closed action"],
+                  children: [{
+                    nodeType: 3,
+                    nodeName: "#text",
+                    backendNodeId: 5,
+                    nodeValue: "Closed action"
+                  }]
+                }]
+              }]
+            }]
+          }
+        });
+      }
+      if (method === "DOM.getBoxModel") {
+        assert.deepEqual(params, { backendNodeId: 4 });
+        return Promise.resolve({
+          model: { border: [200, 20, 300, 20, 300, 60, 200, 60] }
+        });
+      }
+      return Promise.resolve({});
+    }
+  });
+  const bridge = createConnectedBridge(fixture);
+  await bridge.setAdvancedBackendEnabled(true, false);
+
+  const snapshot = await bridge.captureSnapshot(1, { maxElements: 1 });
+
+  assert.equal(snapshot.elements.length, 1);
+  assert.equal(snapshot.elements[0].label, "Normal action");
+  assert.equal(snapshot.candidateCount, 2);
+  assert.equal(snapshot.matchedElementCount, 2);
+  assert.equal(snapshot.truncated, true);
+  assert.deepEqual(fixture.debuggerCommands.map((command) => command.method), [
+    "DOM.getDocument",
+    "DOM.getBoxModel"
+  ]);
 });
 
 test("atomic fill-form validates normal and CDP-only fields before either backend writes", async () => {
