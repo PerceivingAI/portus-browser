@@ -332,6 +332,7 @@ test("click, hover, drag, fill-form, and type send DOM action payloads", async (
     "el_000001=Ada",
     "--field",
     "el_000002=Lovelace",
+    "--partial",
     "--json"
   ], { brokerClient: broker });
 
@@ -347,6 +348,7 @@ test("click, hover, drag, fill-form, and type send DOM action payloads", async (
   assert.equal(broker.requests[3].payload.sourceElementId, "el_000001");
   assert.equal(broker.requests[4].type, "action.fillForm");
   assert.equal(broker.requests[4].payload.fields.length, 2);
+  assert.equal(broker.requests[4].payload.partial, true);
 });
 
 test("wait routes tab and page conditions to broker commands", async () => {

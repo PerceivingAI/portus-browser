@@ -1160,6 +1160,142 @@ test("performs DOM actions and rejects stale snapshot ids", async () => {
   }), { code: "SNAPSHOT_STALE" });
 });
 
+test("fill form remains all-or-nothing when partial mode is not enabled", async () => {
+  const fixture = createChromeFixture({
+    executeScript(injection, actions) {
+      if (Array.isArray(injection.args) && injection.args.length > 0) {
+        actions.push(injection.args[0]);
+        return Promise.resolve([{ result: { ok: true, details: { action: "fillForm", fields: [] } } }]);
+      }
+      return Promise.resolve([{
+        result: {
+          url: "https://example.com/form",
+          title: "Form",
+          viewport: { width: 1200, height: 800, deviceScaleFactor: 1 },
+          visibleText: "First name",
+          elements: [{
+            role: "textbox",
+            label: "First name",
+            text: "",
+            bounds: { x: 10, y: 20, width: 180, height: 32 },
+            state: { value: "" },
+            selectorHint: "#first-name",
+            tagName: "input",
+            editable: true,
+            inputType: "text",
+            name: "firstName"
+          }]
+        }
+      }]);
+    }
+  });
+  const bridge = createConnectedBridge(fixture);
+  const snapshot = await bridge.captureSnapshot(1);
+
+  await assert.rejects(() => bridge.fillForm({
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    fields: [
+      { elementId: "el_000001", value: "Ada" },
+      { elementId: "el_999999", value: "Lovelace" }
+    ]
+  }), { code: "SNAPSHOT_STALE" });
+
+  assert.equal(fixture.actions.length, 0);
+});
+
+test("fill form partial mode returns mixed per-field results", async () => {
+  const fixture = createChromeFixture({
+    executeScript(injection, actions) {
+      if (Array.isArray(injection.args) && injection.args.length > 0) {
+        const payload = injection.args[0];
+        actions.push(payload);
+        assert.equal(payload.action, "fillForm");
+        assert.equal(payload.partial, true);
+        assert.equal(payload.fields[0].target.elementId, "el_000001");
+        assert.equal(payload.fields[1].target.elementId, "el_000002");
+        assert.equal(payload.fields[2].error.code, "SNAPSHOT_STALE");
+        return Promise.resolve([{
+          result: {
+            ok: true,
+            details: {
+              action: "fillForm",
+              partial: true,
+              fields: [
+                { elementId: "el_000001", ok: true },
+                {
+                  elementId: "el_000002",
+                  ok: false,
+                  error: { code: "SNAPSHOT_STALE", message: "Fill form target no longer matches the current DOM." }
+                },
+                { elementId: "el_999999", ok: false, error: payload.fields[2].error }
+              ]
+            }
+          }
+        }]);
+      }
+      return Promise.resolve([{
+        result: {
+          url: "https://example.com/form",
+          title: "Form",
+          viewport: { width: 1200, height: 800, deviceScaleFactor: 1 },
+          visibleText: "First name Last name",
+          elements: [
+            {
+              role: "textbox",
+              label: "First name",
+              text: "",
+              bounds: { x: 10, y: 20, width: 180, height: 32 },
+              state: { value: "" },
+              selectorHint: "#first-name",
+              tagName: "input",
+              editable: true,
+              inputType: "text",
+              name: "firstName"
+            },
+            {
+              role: "textbox",
+              label: "Last name",
+              text: "",
+              bounds: { x: 10, y: 60, width: 180, height: 32 },
+              state: { value: "" },
+              selectorHint: "#last-name",
+              tagName: "input",
+              editable: true,
+              inputType: "text",
+              name: "lastName"
+            }
+          ]
+        }
+      }]);
+    }
+  });
+  const bridge = createConnectedBridge(fixture);
+  const snapshot = await bridge.captureSnapshot(1);
+
+  const result = await bridge.fillForm({
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    partial: true,
+    fields: [
+      { elementId: "el_000001", value: "Ada" },
+      { elementId: "el_000002", value: "Lovelace" },
+      { elementId: "el_999999", value: "missing@example.com" }
+    ]
+  });
+
+  assert.equal(result.snapshotInvalidated, true);
+  assert.deepEqual(result.fields.map((field) => [field.elementId, field.ok, field.error?.code]), [
+    ["el_000001", true, undefined],
+    ["el_000002", false, "SNAPSHOT_STALE"],
+    ["el_999999", false, "SNAPSHOT_STALE"]
+  ]);
+  assert.equal(result.details.partial, true);
+  assert.equal(result.details.succeeded, 1);
+  assert.equal(result.details.failed, 2);
+  assert.equal(fixture.actions.length, 1);
+});
+
 test("performs DOM hover actions", async () => {
   const fixture = createChromeFixture();
   const bridge = createConnectedBridge(fixture);

@@ -973,33 +973,65 @@ export class PortusExtensionBridge {
       partial: readOptionalBoolean(payload, "partial")
     });
 
-    const targets = request.fields.map((field) => ({
-      elementId: field.elementId,
-      value: field.value,
-      target: createDomActionTarget(resolveActionElement({
-        action: "type",
-        browserId,
-        tabId,
-        snapshotId: request.snapshotId,
-        elementId: field.elementId
-      }, this.snapshots) as SnapshotElement)
-    }));
+    const partial = request.partial === true;
+    const targets = request.fields.map((field) => {
+      try {
+        return {
+          elementId: field.elementId,
+          value: field.value,
+          target: createDomActionTarget(resolveActionElement({
+            action: "type",
+            browserId,
+            tabId,
+            snapshotId: request.snapshotId,
+            elementId: field.elementId
+          }, this.snapshots) as SnapshotElement)
+        };
+      } catch (error) {
+        if (!partial) throw error;
+        return {
+          elementId: field.elementId,
+          value: field.value,
+          error: normalizeExtensionError(error)
+        };
+      }
+    });
 
     const result = await this.executeActionScript(tabId, {
       action: "fillForm",
-      fields: targets
+      fields: targets,
+      partial
     });
     if (!result.ok) throw createPortusError(result.error);
-    markSnapshotsStaleForTab(this.snapshots, browserId, tabId);
-    return FillFormResultSchema.parse({
+
+    const scriptFieldResults = result.details?.fields;
+    if (partial && !Array.isArray(scriptFieldResults)) {
+      throw createPortusError({
+        code: "ACTION_FAILED",
+        message: "Partial fill form action did not return per-field results."
+      });
+    }
+    const fieldResults = Array.isArray(scriptFieldResults)
+      ? scriptFieldResults
+      : request.fields.map((field) => ({ elementId: field.elementId, ok: true }));
+    const succeeded = fieldResults.filter((field) => isRecord(field) && field.ok === true).length;
+    const failed = fieldResults.length - succeeded;
+    const snapshotInvalidated = succeeded > 0;
+
+    const fillFormResult = FillFormResultSchema.parse({
       backend: "content-script-dom",
       completedAt: this.now().toISOString(),
-      snapshotInvalidated: true,
-      fields: request.fields.map((field) => ({ elementId: field.elementId, ok: true })),
+      snapshotInvalidated,
+      fields: fieldResults,
       details: {
-        fieldCount: request.fields.length
+        fieldCount: request.fields.length,
+        succeeded,
+        failed,
+        partial
       }
     });
+    if (fillFormResult.snapshotInvalidated) markSnapshotsStaleForTab(this.snapshots, browserId, tabId);
+    return fillFormResult;
   }
 
   async dismissPage(payload: Record<string, unknown>): Promise<DismissResult> {
@@ -3903,27 +3935,75 @@ function performPortusDomAction(payload: Record<string, unknown>): Record<string
 
     if (action === "fillForm") {
       const fields = Array.isArray(payload.fields) ? payload.fields : [];
+      const partial = payload.partial === true;
       const resolved = fields.map((field) => {
-        if (!isPlainRecord(field) || !isPlainRecord(field.target) || typeof field.value !== "string" || typeof field.elementId !== "string") {
-          return { ok: false as const, error: actionError("ACTION_FAILED", "Invalid fill form field."), elementId: "" };
+        if (!isPlainRecord(field) || typeof field.value !== "string" || typeof field.elementId !== "string") {
+          return { ok: false as const, error: portusActionError("ACTION_FAILED", "Invalid fill form field."), elementId: "" };
+        }
+        if (isPlainRecord(field.error) && typeof field.error.code === "string" && typeof field.error.message === "string") {
+          return { ok: false as const, error: field.error, elementId: field.elementId };
+        }
+        if (!isPlainRecord(field.target)) {
+          return { ok: false as const, error: portusActionError("ACTION_FAILED", "Fill form field is missing a target."), elementId: field.elementId };
         }
         const match = resolveLiveActionElement(field.target);
-        if (!match.element) return { ok: false as const, error: actionError("SNAPSHOT_STALE", "Fill form target no longer matches the current DOM."), elementId: field.elementId };
-        if (!isEditableElement(match.element)) return { ok: false as const, error: actionError("ACTION_UNSUPPORTED", "Fill form target is not editable."), elementId: field.elementId };
+        if (!match.element) {
+          return {
+            ok: false as const,
+            error: portusActionError("SNAPSHOT_STALE", "Fill form target no longer matches the current DOM."),
+            elementId: field.elementId
+          };
+        }
+        if (!isEditableElement(match.element)) {
+          return {
+            ok: false as const,
+            error: portusActionError("ACTION_UNSUPPORTED", "Fill form target is not editable."),
+            elementId: field.elementId
+          };
+        }
         return { ok: true as const, element: match.element, value: field.value, elementId: field.elementId, score: match.score };
       });
-      const firstFailure = resolved.find((field) => !field.ok);
-      if (firstFailure && !firstFailure.ok) return firstFailure.error;
-      for (const field of resolved) {
-        if (!field.ok) continue;
-        setEditableValue(field.element, field.value);
+
+      if (!partial) {
+        const firstFailure = resolved.find((field) => !field.ok);
+        if (firstFailure && !firstFailure.ok) return { ok: false, error: firstFailure.error };
+        for (const field of resolved) {
+          if (!field.ok) continue;
+          setEditableValue(field.element, field.value);
+        }
+        return {
+          ok: true,
+          details: {
+            action,
+            fieldCount: resolved.length,
+            targetValidated: true,
+            partial: false,
+            fields: resolved.map((field) => ({ elementId: field.elementId, ok: true }))
+          }
+        };
       }
+
+      const fieldResults = resolved.map((field) => {
+        if (!field.ok) return { elementId: field.elementId, ok: false, error: field.error };
+        try {
+          setEditableValue(field.element, field.value);
+          return { elementId: field.elementId, ok: true };
+        } catch (error) {
+          return {
+            elementId: field.elementId,
+            ok: false,
+            error: portusActionError("ACTION_FAILED", error instanceof Error ? error.message : "Failed to fill form field.")
+          };
+        }
+      });
       return {
         ok: true,
         details: {
           action,
           fieldCount: resolved.length,
-          targetValidated: true
+          targetValidated: fieldResults.every((field) => field.ok),
+          partial: true,
+          fields: fieldResults
         }
       };
     }
@@ -3980,11 +4060,12 @@ function performPortusDomAction(payload: Record<string, unknown>): Record<string
   function actionError(code: string, message: string): Record<string, unknown> {
     return {
       ok: false,
-      error: {
-        code,
-        message
-      }
+      error: portusActionError(code, message)
     };
+  }
+
+  function portusActionError(code: string, message: string): Record<string, unknown> {
+    return { code, message };
   }
 
   function isPlainRecord(value: unknown): value is Record<string, unknown> {
