@@ -29,8 +29,9 @@ The skill tells an agent to:
 - start with `portus-browser browsers --json`
 - use JSON output
 - choose the correct browser when more than one browser is connected
-- keep separate browser, tab, snapshot, and element IDs
+- keep separate browser, tab, snapshot, and element IDs, and rediscover the browser after a Bridge disconnect/reconnect
 - use snapshots before actions
+- treat regular DOM, iframes, and open/closed Shadow DOM uniformly by targeting returned `snapshotId` + `elementId` values rather than constructing shadow selectors
 - verify actions with waits, screenshots, or new snapshots
 - respect current browser settings and policies
 - avoid switching or editing GUI settings profiles from the CLI

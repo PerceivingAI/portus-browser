@@ -42,11 +42,13 @@ Use browser display indexes for quick interactive work:
 --browser 1
 ```
 
-Use stable ids from JSON when scripting longer workflows:
+Use the current `browserId` from JSON for multi-step work while that browser session remains connected:
 
 ```powershell
 --browser br_001
 ```
+
+A `browserId` identifies the current live Bridge session. If that browser disconnects and reconnects, rediscover it with `portus-browser browsers --json`; the new connection may have a different `browserId`.
 
 For tabs:
 
@@ -75,14 +77,14 @@ Rules:
 - Keep a separate working context per browser: `browserId`, active `tabId`, current URL, and latest `snapshotId`.
 - Never reuse a `tabId`, `snapshotId`, or `elementId` from one browser with another browser.
 - Refresh `portus-browser browsers --json` before resolving display indexes if the browser list may have changed.
-- Prefer stable `browserId` values for longer multi-browser tasks because display indexes are only current-list conveniences.
+- Prefer the current `browserId` over a display index during a multi-step task because display indexes are only current-list conveniences. Treat that `browserId` as valid only while the current browser session remains connected; after disconnect/reconnect, rediscover browsers and use the new current id.
 
 Example:
 
 ```powershell
 portus-browser browsers --json
-portus-browser tabs --browser br_chrome_001 --json
-portus-browser tabs --browser br_edge_001 --json
+portus-browser tabs --browser <currentChromeBrowserId> --json
+portus-browser tabs --browser <currentEdgeBrowserId> --json
 ```
 
 For side-by-side comparisons:
@@ -155,9 +157,11 @@ portus-browser screenshot --browser 1 --tab-id <tabId> --json
 
 Rules:
 
-- Snapshot output contains `snapshotId` and `elementId` values. Each element also carries its originating `frameId` and `documentId`, including elements captured from scriptable iframes.
-- Element ids are scoped to the snapshot that produced them. Element-targeted actions are routed back to the exact captured document automatically.
-- `page.wait` evaluates scriptable child frames as well as the main frame; matched wait details include `frameId` and `documentId`.
+- Snapshot output contains `snapshotId` and `elementId` values. Elements may originate from regular DOM, scriptable iframes, or recursively nested open/closed Shadow DOM. Portus retains frame, document, and shadow identity internally.
+- Continue targeting any returned element only with its `snapshotId` and `elementId`. Do not construct Shadow DOM selectors or depend on internal shadow metadata.
+- Element ids are scoped to the snapshot that produced them. Element-targeted actions are routed back to the exact captured document and shadow tree automatically.
+- `page.wait` evaluates scriptable child frames and their Shadow DOM as well as the main frame; matched wait details may include frame/document and shadow diagnostics.
+- Same-document actions, including drag, can cross Shadow DOM boundaries. Cross-frame/document drag remains unsupported.
 - If the page changes, scrolls, navigates, hovers, or updates, take a fresh snapshot before acting.
 - If a filtered snapshot misses the target, broaden the filter, use a full snapshot, scroll and re-snapshot, or use a screenshot.
 
@@ -201,7 +205,7 @@ Drag:
 portus-browser drag --browser 1 --tab-id <tabId> --snapshot <snapshotId> --from <sourceElementId> --to <targetElementId> --json
 ```
 
-A drag source and target must belong to the same frame document. Cross-frame drag is rejected instead of being executed against incorrect coordinates.
+A drag source and target must belong to the same frame document. They may be in regular DOM or different/nested Shadow DOM trees within that document. Cross-frame drag is rejected instead of being executed against incorrect coordinates.
 
 After any action, verify with `wait`, `tabs`, `snapshot`, or `screenshot`.
 
@@ -336,7 +340,7 @@ When a command returns an error, preserve the exact error code and message in yo
 Common next steps:
 
 - `BROKER_UNAVAILABLE`: ask the user to start Portus Broker.
-- `BROWSER_SESSION_UNAVAILABLE`: ask the user to connect a browser Bridge.
+- `BROWSER_SESSION_UNAVAILABLE`: refresh `portus-browser browsers --json`. If the browser reconnected, use its new current `browserId`; if no browser is available, ask the user to connect the Bridge.
 - `BRIDGE_DISCONNECTED`: ask the user to connect the extension Bridge.
 - `COMMAND_DISABLED_BY_POLICY`: tell the user the command is disabled in Settings.
 - `NAVIGATION_BLOCKED`: tell the user the active navigation policy blocked the URL.

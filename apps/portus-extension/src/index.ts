@@ -3380,8 +3380,8 @@ export class PortusExtensionBridge {
         const children = Array.isArray(node.children) ? node.children.filter(isRecord) : [];
         for (const child of children) walk(child, insideClosedRoot);
         // Deliberately do not traverse contentDocument here. Normal frame snapshots already
-        // preserve Chrome frameId/documentId identity; S7 only supplements inaccessible
-        // closed roots in the main document rather than inventing a CDP frame identity model.
+        // preserve Chrome frameId/documentId identity; the pierced fallback supplements only
+        // inaccessible closed roots in the main document instead of inventing a CDP frame identity model.
       };
       walk(documentResult.root, false);
 
@@ -3500,8 +3500,8 @@ export class PortusExtensionBridge {
         });
       }
 
-      // S8 preserves the existing validation-first contract: no writes occur until every
-      // normal and CDP-only target has been proven live/editable.
+      // Preserve the validation-first contract: no writes occur until every normal and
+      // CDP-only target has been proven live/editable.
       await mutateNormalFields();
       for (const field of resolved) {
         await this.setDebuggerEditableFillValue(debuggerTarget, field.objectId, field.value);
