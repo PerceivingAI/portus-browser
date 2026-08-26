@@ -71,7 +71,7 @@ const navigationRuleFlags = [
  *
  * CLI-4 resolves invocations against this registry before dispatch. CLI-5
  * enforces exact flag sets, CLI-6 repeatability, CLI-7 positional contracts,
- * and CLI-8 primitive value constraints.
+ * CLI-8 primitive value constraints, and CLI-11 generated help/usage.
  */
 export const CLI_INVOCATIONS = [
   { path: ["browsers"], flags: brokerFlags(), positionals: noArgs },
@@ -272,6 +272,60 @@ export function resolveCliInvocation(command: string | undefined, positionals: r
 
 export function cliInvocationPath(spec: CliInvocationSpec): string {
   return spec.path.join(" ");
+}
+
+/**
+ * CLI-11 generated usage/help.
+ *
+ * Syntax is rendered directly from the declarative registry so command paths,
+ * aliases, positionals, and allowed flags cannot drift from validation.
+ */
+export function renderCliInvocationUsage(spec: CliInvocationSpec): string {
+  const positionals = spec.positionals.map(formatPositionalSpec);
+  const usageParts = ["Usage: portus-browser", cliInvocationPath(spec), ...positionals];
+  const lines = [usageParts.join(" ")];
+  const aliases = spec.aliases ?? [];
+  if (aliases.length > 0) lines.push(`Aliases: ${aliases.map((alias) => `portus-browser ${alias.join(" ")}`).join(", ")}`);
+
+  const flags = cliInvocationAllowedFlags({
+    spec,
+    matchedPath: spec.path,
+    consumedPositionals: spec.path.length - 1,
+    argumentPositionals: []
+  });
+  if (flags.length > 0) lines.push(`Flags: ${flags.map((flag) => formatCliFlagUsage(spec, flag)).join(", ")}`);
+  return lines.join("\n");
+}
+
+export function renderCliHelp(): string {
+  const lines = [
+    "Portus Browser CLI",
+    "Usage: portus-browser <command> [arguments] [flags]",
+    "",
+    `Global flags: ${CLI_INHERITED_GLOBAL_FLAGS.map((flag) => formatCliFlagUsage(undefined, flag)).join(", ")}`,
+    "",
+    "Commands:"
+  ];
+
+  for (const spec of CLI_INVOCATIONS) {
+    const positionalSyntax = spec.positionals.map(formatPositionalSpec).join(" ");
+    const aliasSyntax = ("aliases" in spec ? spec.aliases : []).map((alias) => alias.join(" "));
+    const suffix = aliasSyntax.length > 0 ? ` (alias: ${aliasSyntax.join(", ")})` : "";
+    lines.push(`  ${cliInvocationPath(spec)}${positionalSyntax ? ` ${positionalSyntax}` : ""}${suffix}`);
+    if (spec.flags.length > 0) {
+      lines.push(`    Flags: ${spec.flags.map((flag) => formatCliFlagUsage(spec, flag)).join(", ")}`);
+    }
+  }
+
+  return `${lines.join("\n")}\n`;
+}
+
+function formatCliFlagUsage(spec: CliInvocationSpec | undefined, flag: CliFlagSpec): string {
+  if (flag.kind === "boolean") return `--${flag.name}`;
+  const enumConstraint = spec?.flagEnums?.find((constraint) => constraint.flag.name === flag.name);
+  const value = enumConstraint ? enumConstraint.values.join("|") : flag.kind;
+  const repeatable = flag.repeatable ? "..." : "";
+  return `--${flag.name} <${value}>${repeatable}`;
 }
 
 export function validateCliInvocationFlags(

@@ -5,6 +5,8 @@ import {
   CLI_INHERITED_GLOBAL_FLAGS,
   CLI_INVOCATIONS,
   cliInvocationPath,
+  renderCliHelp,
+  renderCliInvocationUsage,
   resolveCliInvocation,
   validateCliInvocationFlags,
   validateCliInvocationPositionals,
@@ -344,6 +346,70 @@ test("CLI-10 aliases resolve to canonical handler paths", () => {
     assert.equal(path, canonical, command);
     assert.equal(CLI_HANDLER_PATHS.includes(path), true, command);
   }
+});
+
+test("CLI-11 generates invocation usage directly from declarative specs", () => {
+  const byPath = (path) => CLI_INVOCATIONS.find((entry) => cliInvocationPath(entry) === path);
+
+  assert.equal(
+    renderCliInvocationUsage(byPath("open")),
+    [
+      "Usage: portus-browser open <url>",
+      "Flags: --json, --quiet, --output <string>, --timeout <integer>, --browser <string>, --background"
+    ].join("\n")
+  );
+
+  assert.equal(
+    renderCliInvocationUsage(byPath("recipes list")),
+    [
+      "Usage: portus-browser recipes list",
+      "Aliases: portus-browser recipes",
+      "Flags: --json, --quiet, --output <string>, --timeout <integer>, --directory <string>"
+    ].join("\n")
+  );
+
+  const dismissUsage = renderCliInvocationUsage(byPath("dismiss"));
+  assert.match(dismissUsage, /--kind <any\|popup\|cookie>/);
+  assert.match(dismissUsage, /--strategy <conservative\|accept>/);
+
+  const fillFormUsage = renderCliInvocationUsage(byPath("fill-form"));
+  assert.match(fillFormUsage, /--field <string>\.\.\./);
+});
+
+test("CLI-11 full help covers every canonical registry invocation without a second command list", () => {
+  const help = renderCliHelp();
+  const lines = help.split("\n");
+
+  assert.equal(lines[0], "Portus Browser CLI");
+  assert.equal(lines[1], "Usage: portus-browser <command> [arguments] [flags]");
+  assert.equal(lines[3], "Global flags: --json, --quiet");
+
+  for (const spec of CLI_INVOCATIONS) {
+    const prefix = `  ${cliInvocationPath(spec)}`;
+    const matchingCommandLines = lines.filter((line) => line === prefix || line.startsWith(`${prefix} `));
+    assert.equal(matchingCommandLines.length, 1, cliInvocationPath(spec));
+  }
+
+  assert.match(help, /  recipes list \(alias: recipes\)/);
+  assert.match(help, /  policy retention set <limit>/);
+  assert.match(help, /  recipes export <recipe-id>\n    Flags: --output <string>, --directory <string>, --force/);
+});
+
+test("CLI-11 resolved syntax errors carry generated usage before side effects", async () => {
+  const broker = createRecordingBroker({});
+  const openSpec = CLI_INVOCATIONS.find((entry) => cliInvocationPath(entry) === "open");
+  const expectedUsage = renderCliInvocationUsage(openSpec);
+
+  const jsonResult = await runPortusBrowserCli(["open", "--json"], { brokerClient: broker });
+  assert.equal(jsonResult.exitCode, 2);
+  assert.equal(JSON.parse(jsonResult.stderr).error.details.usageText, expectedUsage);
+  assert.deepEqual(broker.requests, []);
+
+  const textResult = await runPortusBrowserCli(["open"], { brokerClient: broker });
+  assert.equal(textResult.exitCode, 2);
+  assert.match(textResult.stderr, /open requires <url>\./);
+  assert.match(textResult.stderr, /Usage: portus-browser open <url>/);
+  assert.deepEqual(broker.requests, []);
 });
 
 test("CLI-5 rejects meaningless timeout on local recipe operations before filesystem work", async () => {

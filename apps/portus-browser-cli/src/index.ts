@@ -77,6 +77,7 @@ import {
 } from "./cli-flags.js";
 import {
   cliInvocationPath,
+  renderCliInvocationUsage,
   resolveCliInvocation,
   validateCliInvocationFlags,
   validateCliInvocationPositionals,
@@ -458,14 +459,15 @@ export async function runPortusBrowserCli(
     const resolution = resolveCliInvocation(parsed.command, parsed.positionals);
     if (!resolution.ok) throw usageError(resolution.message);
     const invocation = resolution.invocation;
+    const invocationUsage = renderCliInvocationUsage(invocation.spec);
     const flagValidationError = validateCliInvocationFlags(invocation, parsed.flags.keys());
-    if (flagValidationError) throw usageError(flagValidationError);
+    if (flagValidationError) throw usageError(flagValidationError, invocationUsage);
     const repeatabilityValidationError = validateCliInvocationRepeatability(invocation, parsed.flags);
-    if (repeatabilityValidationError) throw usageError(repeatabilityValidationError);
+    if (repeatabilityValidationError) throw usageError(repeatabilityValidationError, invocationUsage);
     const positionalValidationError = validateCliInvocationPositionals(invocation);
-    if (positionalValidationError) throw usageError(positionalValidationError);
+    if (positionalValidationError) throw usageError(positionalValidationError, invocationUsage);
     const primitiveValidationError = validateCliInvocationPrimitiveValues(invocation, parsed.flags);
-    if (primitiveValidationError) throw usageError(primitiveValidationError);
+    if (primitiveValidationError) throw usageError(primitiveValidationError, invocationUsage);
     const output = resolveOutputMode(parsed, config);
     outputMode = output;
     const timeoutMs = readOptionalIntegerFlag(parsed, CLI_TIMEOUT_FLAG.name) ?? config.commands.timeoutMs;
@@ -1380,7 +1382,10 @@ function renderFailure(error: unknown, output: OutputMode): CliCommandResult {
 
 function renderTextError(error: PortusError): string {
   const suggestion = error.suggestedCommand ? `\nSuggested command: ${error.suggestedCommand}` : "";
-  return `${error.code}: ${error.message}${suggestion}\n`;
+  const usageText = error.details && isRecord(error.details) && typeof error.details.usageText === "string"
+    ? `\n${error.details.usageText}`
+    : "";
+  return `${error.code}: ${error.message}${suggestion}${usageText}\n`;
 }
 
 function renderBrowserTable(browsers: BrowserSession[]): string {
@@ -1841,11 +1846,14 @@ function createDefaultBrokerClient(config: PortusConfig): BrokerClient {
   return new NamedPipeBrokerClient(endpoint.endpointPath, brokerToken, endpoint.transport);
 }
 
-function usageError(message: string): PortusError {
+function usageError(message: string, usageText?: string): PortusError {
   return createPortusError({
     code: "INVALID_MESSAGE",
     message,
-    details: { usage: true }
+    details: {
+      usage: true,
+      ...(usageText === undefined ? {} : { usageText })
+    }
   });
 }
 
