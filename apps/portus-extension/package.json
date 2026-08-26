@@ -10,7 +10,7 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && tailwindcss -i src/gui/styles.css -o dist/gui.css --minify && esbuild src/background.ts --bundle --format=esm --platform=browser --target=chrome120 --outfile=dist/background.js && esbuild src/popup.tsx --bundle --format=esm --platform=browser --target=chrome120 --outfile=dist/popup.js && esbuild src/sidepanel.tsx --bundle --format=esm --platform=browser --target=chrome120 --outfile=dist/sidepanel.js",
+    "build": "tsc -p tsconfig.json && tailwindcss -i src/gui/styles.css -o dist/gui.css --minify && esbuild src/composed-dom-runtime.ts --bundle --format=iife --platform=browser --target=chrome120 --outfile=dist/composed-dom-runtime.js && esbuild src/background.ts --bundle --format=esm --platform=browser --target=chrome120 --outfile=dist/background.js && esbuild src/popup.tsx --bundle --format=esm --platform=browser --target=chrome120 --outfile=dist/popup.js && esbuild src/sidepanel.tsx --bundle --format=esm --platform=browser --target=chrome120 --outfile=dist/sidepanel.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:runtime": "pnpm build && node --test tests/*.test.mjs",
     "test:gui": "vitest run --config vitest.config.ts",

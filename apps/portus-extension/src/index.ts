@@ -31,6 +31,7 @@ import {
   SettingsProfileNameSchema,
   SettingsProfileStateSchema,
   SidePanelDefaultViewSchema,
+  ShadowPathSchema,
   SnapshotFilterSchema,
   SnapshotSchema,
   TabSchema,
@@ -3840,7 +3841,17 @@ function readElementCandidates(value: unknown): SnapshotElementCandidate[] {
       bounds: readBounds(element.bounds),
       state: isRecord(element.state) ? element.state : {}
     };
-    if (typeof element.selectorHint === "string") candidate.selectorHint = element.selectorHint;
+    if (typeof element.selectorHint === "string") candidate.selectorHint = element.selectorHint;    if (element.shadowPath !== undefined) {
+      const shadowPath = ShadowPathSchema.safeParse(element.shadowPath);
+      if (!shadowPath.success) {
+        throw createPortusError({
+          code: "ACTION_FAILED",
+          message: "Snapshot element has an invalid shadow path."
+        });
+      }
+      candidate.shadowPath = shadowPath.data;
+    }
+
     if (typeof element.tagName === "string") candidate.tagName = element.tagName;
     if (typeof element.disabled === "boolean") candidate.disabled = element.disabled;
     if (typeof element.editable === "boolean") candidate.editable = element.editable;
@@ -3865,7 +3876,8 @@ function createDomActionTarget(element: SnapshotElement): Record<string, unknown
     bounds: element.bounds,
     state: element.state
   };
-  if (element.selectorHint !== undefined) target.selectorHint = element.selectorHint;
+  if (element.selectorHint !== undefined) target.selectorHint = element.selectorHint;  if (element.shadowPath !== undefined) target.shadowPath = element.shadowPath;
+
   if (element.tagName !== undefined) target.tagName = element.tagName;
   if (element.disabled !== undefined) target.disabled = element.disabled;
   if (element.editable !== undefined) target.editable = element.editable;

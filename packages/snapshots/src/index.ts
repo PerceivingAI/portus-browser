@@ -1,9 +1,11 @@
 import {
   ScreenshotResultSchema,
+  ShadowPathSchema,
   SnapshotElementSchema,
   SnapshotFilterSchema,
   SnapshotSchema,
   type ScreenshotResult,
+  type ShadowPath,
   type Snapshot,
   type SnapshotElement,
   type SnapshotFilter
@@ -12,11 +14,17 @@ import {
 export {
   BoundsSchema,
   ScreenshotResultSchema,
+  ShadowPathSchema,
+  ShadowPathSegmentSchema,
+  ShadowRootTypeSchema,
   SnapshotElementSchema,
   SnapshotFilterSchema,
   SnapshotSchema,
   ViewportSchema,
   type ScreenshotResult,
+  type ShadowPath,
+  type ShadowPathSegment,
+  type ShadowRootType,
   type Snapshot,
   type SnapshotElement,
   type SnapshotFilter
@@ -35,7 +43,8 @@ export interface SnapshotElementCandidate {
     height: number;
   };
   state?: Record<string, unknown>;
-  selectorHint?: string;
+  selectorHint?: string;  shadowPath?: ShadowPath;
+
   tagName?: string;
   disabled?: boolean;
   editable?: boolean;
@@ -141,7 +150,8 @@ export function normalizeSnapshotElement(input: SnapshotElementCandidate, sequen
     bounds: input.bounds,
     state: input.state ?? {}
   };
-  if (input.selectorHint !== undefined) elementInput.selectorHint = input.selectorHint;
+  if (input.selectorHint !== undefined) elementInput.selectorHint = input.selectorHint;  if (input.shadowPath !== undefined) elementInput.shadowPath = ShadowPathSchema.parse(input.shadowPath);
+
   if (input.tagName !== undefined) elementInput.tagName = input.tagName;
   if (input.disabled !== undefined) elementInput.disabled = input.disabled;
   if (input.editable !== undefined) elementInput.editable = input.editable;

@@ -646,6 +646,15 @@ export const ScreenshotResultSchema = z.object({
   previousActiveTabId: TabIdSchema.optional()
 }).strict();
 
+export const ShadowRootTypeSchema = z.enum(["open", "closed"]);
+
+export const ShadowPathSegmentSchema = z.object({
+  hostSelectorHint: z.string().min(1),
+  rootType: ShadowRootTypeSchema
+}).strict();
+
+export const ShadowPathSchema = z.array(ShadowPathSegmentSchema).min(1);
+
 export const SnapshotElementSchema = z.object({
   elementId: ElementIdSchema,
   frameId: z.number().int().nonnegative(),
@@ -655,7 +664,8 @@ export const SnapshotElementSchema = z.object({
   text: z.string(),
   bounds: BoundsSchema,
   state: JsonObjectSchema,
-  selectorHint: z.string().optional(),
+  selectorHint: z.string().optional(),  shadowPath: ShadowPathSchema.optional(),
+
   tagName: z.string().optional(),
   disabled: z.boolean().optional(),
   editable: z.boolean().optional(),
@@ -871,6 +881,9 @@ export type SettingsProfileState = z.infer<typeof SettingsProfileStateSchema>;
 export type CommandEnvelope = z.infer<typeof CommandEnvelopeSchema>;
 export type CommandResult = z.infer<typeof CommandResultSchema>;
 export type Snapshot = z.infer<typeof SnapshotSchema>;
+export type ShadowRootType = z.infer<typeof ShadowRootTypeSchema>;
+export type ShadowPathSegment = z.infer<typeof ShadowPathSegmentSchema>;
+export type ShadowPath = z.infer<typeof ShadowPathSchema>;
 export type SnapshotElement = z.infer<typeof SnapshotElementSchema>;
 export type SnapshotFilter = z.infer<typeof SnapshotFilterSchema>;
 export type ScreenshotResult = z.infer<typeof ScreenshotResultSchema>;

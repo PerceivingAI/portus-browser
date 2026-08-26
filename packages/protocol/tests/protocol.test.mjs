@@ -334,7 +334,11 @@ test("validates browser session, snapshot, and action shapes", () => {
       label: "Submit",
       text: "Submit",
       bounds: { x: 0, y: 0, width: 80, height: 30 },
-      state: {}
+      state: {},
+      shadowPath: [
+        { hostSelectorHint: "app-shell:nth-of-type(1)", rootType: "open" },
+        { hostSelectorHint: "login-panel:nth-of-type(1)", rootType: "closed" }
+      ]
     }],
     capturedAt: now,
     candidateCount: 180,
@@ -350,7 +354,11 @@ test("validates browser session, snapshot, and action shapes", () => {
   });
   assert.equal(snapshot.elements[0].elementId, "el_001");
   assert.equal(snapshot.elements[0].frameId, 0);
-  assert.equal(snapshot.elements[0].documentId, "doc_main");
+  assert.equal(snapshot.elements[0].documentId, "doc_main");  assert.deepEqual(snapshot.elements[0].shadowPath, [
+    { hostSelectorHint: "app-shell:nth-of-type(1)", rootType: "open" },
+    { hostSelectorHint: "login-panel:nth-of-type(1)", rootType: "closed" }
+  ]);
+
   assert.equal(snapshot.filtered, true);
   assert.equal(snapshot.candidateCount, 180);
   assert.equal(snapshot.matchedElementCount, 12);
@@ -360,7 +368,11 @@ test("validates browser session, snapshot, and action shapes", () => {
     query: "reviews",
     maxElements: 5
   });
-  assert.throws(() => SnapshotFilterSchema.parse({ query: "", maxElements: 0 }));
+  assert.throws(() => SnapshotFilterSchema.parse({ query: "", maxElements: 0 }));  assert.throws(() => SnapshotSchema.parse({
+    ...snapshot,
+    elements: [{ ...snapshot.elements[0], shadowPath: [] }]
+  }));
+
 
   const action = ActionRequestSchema.parse({
     action: "click",

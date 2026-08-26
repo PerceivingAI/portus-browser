@@ -32,6 +32,10 @@ test("builds shallow snapshots with scoped element ids", () => {
         label: "Submit",
         text: "Submit",
         selectorHint: "button:nth-of-type(1)",
+        shadowPath: [
+          { hostSelectorHint: "app-shell:nth-of-type(1)", rootType: "open" },
+          { hostSelectorHint: "action-panel:nth-of-type(1)", rootType: "open" }
+        ],
         tagName: "button",
         bounds: { x: 10, y: 20, width: 100, height: 30 },
         state: { disabled: false }
@@ -43,7 +47,11 @@ test("builds shallow snapshots with scoped element ids", () => {
   assert.equal(snapshot.candidateCount, 180);
   assert.equal(snapshot.matchedElementCount, 1);
   assert.equal(snapshot.truncated, false);
-  assert.equal(snapshot.elements[0].elementId, "el_000001");
+  assert.equal(snapshot.elements[0].elementId, "el_000001");  assert.deepEqual(snapshot.elements[0].shadowPath, [
+    { hostSelectorHint: "app-shell:nth-of-type(1)", rootType: "open" },
+    { hostSelectorHint: "action-panel:nth-of-type(1)", rootType: "open" }
+  ]);
+
   assert.equal(findSnapshotElement(snapshot, "el_000001").label, "Submit");
   assert.equal(isSnapshotForTarget(snapshot, "br_000001", 7), true);
 });

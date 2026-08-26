@@ -1095,6 +1095,9 @@ test("captures filtered snapshots and allows actions with returned element ids",
               bounds: { x: 10, y: 20, width: 180, height: 24 },
               state: {},
               selectorHint: "a:nth-of-type(1)",
+              shadowPath: [
+                { hostSelectorHint: "app-shell:nth-of-type(1)", rootType: "open" }
+              ],
               tagName: "a",
               href: "https://example.com/reviews"
             },
@@ -1123,7 +1126,10 @@ test("captures filtered snapshots and allows actions with returned element ids",
   assert.equal(snapshot.filtered, true);
   assert.equal(snapshot.snapshotId, "snap_000001");
   assert.deepEqual(snapshot.elements.map((element) => element.elementId), ["el_000001"]);
-  assert.equal(snapshot.elements[0].href, "https://example.com/reviews");
+  assert.equal(snapshot.elements[0].href, "https://example.com/reviews");  assert.deepEqual(snapshot.elements[0].shadowPath, [
+    { hostSelectorHint: "app-shell:nth-of-type(1)", rootType: "open" }
+  ]);
+
 
   const action = await bridge.performAction("click", {
     tabId: 1,
@@ -1131,6 +1137,9 @@ test("captures filtered snapshots and allows actions with returned element ids",
     elementId: snapshot.elements[0].elementId
   });
 
+  assert.deepEqual(fixture.actions[0].target.shadowPath, [
+    { hostSelectorHint: "app-shell:nth-of-type(1)", rootType: "open" }
+  ]);
   assert.equal(action.backend, "content-script-dom");
   assert.equal(fixture.actions[0].target.elementId, "el_000001");
 });
