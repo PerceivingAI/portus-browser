@@ -1139,6 +1139,8 @@ function snapshot(browserId, tabId) {
     elements: [
       {
         elementId: "el_000001",
+        frameId: 0,
+        documentId: "doc_main",
         role: "button",
         label: "Submit",
         text: "Submit",

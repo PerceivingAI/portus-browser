@@ -26,6 +26,8 @@ test("builds shallow snapshots with scoped element ids", () => {
     truncated: false,
     elements: [
       {
+        frameId: 0,
+        documentId: "doc_main",
         role: "button",
         label: "Submit",
         text: "Submit",
@@ -73,6 +75,8 @@ test("filters snapshots without changing ids", () => {
     capturedAt: "2026-04-28T00:00:00.000Z",
     elements: [
       {
+        frameId: 0,
+        documentId: "doc_main",
         role: "link",
         label: "Latest reviews",
         text: "Read reviews",
@@ -81,6 +85,8 @@ test("filters snapshots without changing ids", () => {
         bounds: { x: 10, y: 20, width: 100, height: 30 }
       },
       {
+        frameId: 0,
+        documentId: "doc_main",
         role: "button",
         label: "Book now",
         text: "Book now",
@@ -88,6 +94,8 @@ test("filters snapshots without changing ids", () => {
         bounds: { x: 10, y: 60, width: 100, height: 30 }
       },
       {
+        frameId: 7,
+        documentId: "doc_child",
         role: "generic",
         label: "Reviews summary",
         text: "Reviews summary",

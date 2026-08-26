@@ -1135,6 +1135,241 @@ test("captures filtered snapshots and allows actions with returned element ids",
   assert.equal(fixture.actions[0].target.elementId, "el_000001");
 });
 
+test("captures iframe elements and routes actions to the originating document", async () => {
+  const fixture = createChromeFixture({
+    executeScript(injection, actions) {
+      if (isActionInjection(injection)) {
+        actions.push(injection.args[0]);
+        assert.deepEqual(injection.target.documentIds, ["doc_child"]);
+        return Promise.resolve([{
+          frameId: 7,
+          documentId: "doc_child",
+          result: { ok: true, details: { action: "click", targetValidated: true } }
+        }]);
+      }
+      return Promise.resolve([
+        {
+          frameId: 0,
+          documentId: "doc_main",
+          result: {
+            url: "https://example.com/",
+            title: "Main",
+            viewport: { width: 1200, height: 800, deviceScaleFactor: 1 },
+            visibleText: "Main frame",
+            candidateCount: 0,
+            matchedElementCount: 0,
+            truncated: false,
+            elements: []
+          }
+        },
+        {
+          frameId: 7,
+          documentId: "doc_child",
+          result: {
+            url: "https://child.example.com/",
+            title: "Child",
+            viewport: { width: 600, height: 400, deviceScaleFactor: 1 },
+            visibleText: "Child action",
+            candidateCount: 1,
+            matchedElementCount: 1,
+            truncated: false,
+            elements: [{
+              role: "button",
+              label: "Child action",
+              text: "Child action",
+              bounds: { x: 20, y: 30, width: 120, height: 40 },
+              state: {},
+              selectorHint: "#child-action",
+              tagName: "button"
+            }]
+          }
+        }
+      ]);
+    }
+  });
+  const bridge = createConnectedBridge(fixture);
+
+  const snapshot = await bridge.captureSnapshot(1);
+
+  assert.equal(fixture.scriptInjections[0].target.allFrames, true);
+  assert.equal(snapshot.visibleText, "Main frame\nChild action");
+  assert.equal(snapshot.elements.length, 1);
+  assert.equal(snapshot.elements[0].frameId, 7);
+  assert.equal(snapshot.elements[0].documentId, "doc_child");
+
+  await bridge.performAction("click", {
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    elementId: snapshot.elements[0].elementId
+  });
+
+  assert.deepEqual(fixture.scriptInjections.at(-1).target, { tabId: 1, documentIds: ["doc_child"] });
+});
+
+test("document-targeted actions fail stale after the captured iframe document disappears", async () => {
+  const fixture = createChromeFixture({
+    executeScript(injection) {
+      if (isActionInjection(injection)) return Promise.reject(new Error("No document with id doc_child"));
+      return Promise.resolve([
+        {
+          frameId: 0,
+          documentId: "doc_main",
+          result: {
+            url: "https://example.com/",
+            title: "Main",
+            viewport: { width: 1200, height: 800, deviceScaleFactor: 1 },
+            visibleText: "",
+            elements: []
+          }
+        },
+        {
+          frameId: 7,
+          documentId: "doc_child",
+          result: {
+            url: "https://child.example.com/",
+            title: "Child",
+            viewport: { width: 600, height: 400, deviceScaleFactor: 1 },
+            visibleText: "Save",
+            elements: [{
+              role: "button",
+              label: "Save",
+              text: "Save",
+              bounds: { x: 10, y: 10, width: 80, height: 30 },
+              state: {},
+              tagName: "button"
+            }]
+          }
+        }
+      ]);
+    }
+  });
+  const bridge = createConnectedBridge(fixture);
+  const snapshot = await bridge.captureSnapshot(1);
+
+  await assert.rejects(() => bridge.performAction("click", {
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    elementId: snapshot.elements[0].elementId
+  }), { code: "SNAPSHOT_STALE" });
+});
+
+test("page wait matches conditions inside child frames and returns frame identity", async () => {
+  const fixture = createChromeFixture({
+    executeScript(injection) {
+      assert.equal(injection.target.allFrames, true);
+      return Promise.resolve([
+        { frameId: 0, documentId: "doc_main", result: { matched: false } },
+        {
+          frameId: 11,
+          documentId: "doc_wait_child",
+          result: { matched: true, details: { match: "text", text: "Inside frame" } }
+        }
+      ]);
+    }
+  });
+  const bridge = createConnectedBridge(fixture);
+
+  const wait = await bridge.waitForPage({ tabId: 1, text: "Inside frame", timeoutMs: 500 });
+
+  assert.equal(wait.matched, true);
+  assert.equal(wait.details.frameId, 11);
+  assert.equal(wait.details.documentId, "doc_wait_child");
+});
+
+test("partial fill-form spans frame documents while atomic mode rejects cross-document fills", async () => {
+  const fixture = createChromeFixture({
+    executeScript(injection, actions) {
+      if (isActionInjection(injection)) {
+        const payload = injection.args[0];
+        actions.push({ target: injection.target, payload });
+        const documentId = injection.target.documentIds[0];
+        const frameId = documentId === "doc_main" ? 0 : 5;
+        return Promise.resolve([{
+          frameId,
+          documentId,
+          result: {
+            ok: true,
+            details: {
+              action: "fillForm",
+              partial: true,
+              fields: payload.fields.map((field) => ({ elementId: field.elementId, ok: true }))
+            }
+          }
+        }]);
+      }
+      return Promise.resolve([
+        {
+          frameId: 0,
+          documentId: "doc_main",
+          result: {
+            url: "https://example.com/",
+            title: "Main form",
+            viewport: { width: 1200, height: 800, deviceScaleFactor: 1 },
+            visibleText: "First name",
+            elements: [{
+              role: "textbox",
+              label: "First name",
+              text: "",
+              bounds: { x: 10, y: 20, width: 180, height: 32 },
+              state: { value: "" },
+              tagName: "input",
+              editable: true,
+              inputType: "text",
+              name: "firstName"
+            }]
+          }
+        },
+        {
+          frameId: 5,
+          documentId: "doc_child",
+          result: {
+            url: "https://child.example.com/form",
+            title: "Child form",
+            viewport: { width: 600, height: 400, deviceScaleFactor: 1 },
+            visibleText: "Last name",
+            elements: [{
+              role: "textbox",
+              label: "Last name",
+              text: "",
+              bounds: { x: 10, y: 20, width: 180, height: 32 },
+              state: { value: "" },
+              tagName: "input",
+              editable: true,
+              inputType: "text",
+              name: "lastName"
+            }]
+          }
+        }
+      ]);
+    }
+  });
+  const bridge = createConnectedBridge(fixture);
+  const snapshot = await bridge.captureSnapshot(1);
+
+  await assert.rejects(() => bridge.fillForm({
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    fields: [
+      { elementId: snapshot.elements[0].elementId, value: "Ada" },
+      { elementId: snapshot.elements[1].elementId, value: "Lovelace" }
+    ]
+  }), { code: "ACTION_UNSUPPORTED" });
+  assert.equal(fixture.actions.length, 0);
+
+  const result = await bridge.fillForm({
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    partial: true,
+    fields: [
+      { elementId: snapshot.elements[0].elementId, value: "Ada" },
+      { elementId: snapshot.elements[1].elementId, value: "Lovelace" }
+    ]
+  });
+
+  assert.deepEqual(result.fields.map((field) => field.ok), [true, true]);
+  assert.deepEqual(fixture.actions.map((entry) => entry.target.documentIds[0]), ["doc_main", "doc_child"]);
+});
+
 test("snapshot collection filters beyond the first 100 candidates before applying limits", () => {
   const buttons = Array.from({ length: 150 }, (_, index) => {
     const label = index === 142 ? "Target after 100" : `Button ${index + 1}`;
@@ -1274,9 +1509,9 @@ test("fill form partial mode returns mixed per-field results", async () => {
         actions.push(payload);
         assert.equal(payload.action, "fillForm");
         assert.equal(payload.partial, true);
+        assert.equal(payload.fields.length, 2);
         assert.equal(payload.fields[0].target.elementId, "el_000001");
         assert.equal(payload.fields[1].target.elementId, "el_000002");
-        assert.equal(payload.fields[2].error.code, "SNAPSHOT_STALE");
         return Promise.resolve([{
           result: {
             ok: true,
@@ -1289,8 +1524,7 @@ test("fill form partial mode returns mixed per-field results", async () => {
                   elementId: "el_000002",
                   ok: false,
                   error: { code: "SNAPSHOT_STALE", message: "Fill form target no longer matches the current DOM." }
-                },
-                { elementId: "el_999999", ok: false, error: payload.fields[2].error }
+                }
               ]
             }
           }
@@ -2006,11 +2240,30 @@ function isHistoryInjection(injection) {
   return direction === "back" || direction === "forward";
 }
 
+function withInjectionMetadata(injection, results) {
+  if (!Array.isArray(results)) return results;
+  const targetedDocumentId = Array.isArray(injection.target?.documentIds) ? injection.target.documentIds[0] : undefined;
+  const targetedFrameId = Array.isArray(injection.target?.frameIds) ? injection.target.frameIds[0] : undefined;
+  return results.map((entry, index) => {
+    if (entry === null || typeof entry !== "object") return entry;
+    const frameId = Number.isInteger(entry.frameId)
+      ? entry.frameId
+      : Number.isInteger(targetedFrameId)
+        ? targetedFrameId
+        : index === 0 ? 0 : index;
+    const documentId = typeof entry.documentId === "string" && entry.documentId.length > 0
+      ? entry.documentId
+      : targetedDocumentId ?? `doc_frame_${frameId}`;
+    return { ...entry, frameId, documentId };
+  });
+}
+
 function createChromeFixture(overrides = {}) {
   const ports = [];
   const connectedHostNames = [];
   const capturedWindows = [];
   const actions = [];
+  const scriptInjections = [];
   const actionTitles = [];
   const actionBadgeTexts = [];
   const actionBadgeColors = [];
@@ -2032,6 +2285,7 @@ function createChromeFixture(overrides = {}) {
     connectedHostNames,
     capturedWindows,
     actions,
+    scriptInjections,
     actionTitles,
     actionBadgeTexts,
     actionBadgeColors,
@@ -2086,17 +2340,20 @@ function createChromeFixture(overrides = {}) {
         ...tabEvents
       },
       scripting: {
-        executeScript(injection) {
-          if (overrides.executeScript) return overrides.executeScript(injection, actions);
-          if (isActionInjection(injection)) {
+        async executeScript(injection) {
+          scriptInjections.push(injection);
+          let result;
+          if (overrides.executeScript) result = await overrides.executeScript(injection, actions);
+          else if (isActionInjection(injection)) {
             actions.push(injection.args[0]);
-            return Promise.resolve([{ result: { ok: true, details: { action: injection.args[0].action } } }]);
-          }
-          if (isHistoryInjection(injection)) {
+            result = [{ result: { ok: true, details: { action: injection.args[0].action } } }];
+          } else if (isHistoryInjection(injection)) {
             actions.push(injection.args[0]);
-            return Promise.resolve([{ result: { ok: true } }]);
+            result = [{ result: { ok: true } }];
+          } else {
+            result = await defaultSnapshotScriptResult();
           }
-          return defaultSnapshotScriptResult();
+          return withInjectionMetadata(injection, result);
         }
       },
       windows: {

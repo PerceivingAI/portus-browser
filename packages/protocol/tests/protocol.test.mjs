@@ -328,6 +328,8 @@ test("validates browser session, snapshot, and action shapes", () => {
     visibleText: "Example",
     elements: [{
       elementId: "el_001",
+      frameId: 0,
+      documentId: "doc_main",
       role: "button",
       label: "Submit",
       text: "Submit",
@@ -347,6 +349,8 @@ test("validates browser session, snapshot, and action shapes", () => {
     }
   });
   assert.equal(snapshot.elements[0].elementId, "el_001");
+  assert.equal(snapshot.elements[0].frameId, 0);
+  assert.equal(snapshot.elements[0].documentId, "doc_main");
   assert.equal(snapshot.filtered, true);
   assert.equal(snapshot.candidateCount, 180);
   assert.equal(snapshot.matchedElementCount, 12);

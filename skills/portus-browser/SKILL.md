@@ -155,8 +155,9 @@ portus-browser screenshot --browser 1 --tab-id <tabId> --json
 
 Rules:
 
-- Snapshot output contains `snapshotId` and `elementId` values.
-- Element ids are scoped to the snapshot that produced them.
+- Snapshot output contains `snapshotId` and `elementId` values. Each element also carries its originating `frameId` and `documentId`, including elements captured from scriptable iframes.
+- Element ids are scoped to the snapshot that produced them. Element-targeted actions are routed back to the exact captured document automatically.
+- `page.wait` evaluates scriptable child frames as well as the main frame; matched wait details include `frameId` and `documentId`.
 - If the page changes, scrolls, navigates, hovers, or updates, take a fresh snapshot before acting.
 - If a filtered snapshot misses the target, broaden the filter, use a full snapshot, scroll and re-snapshot, or use a screenshot.
 
@@ -199,6 +200,8 @@ Drag:
 ```powershell
 portus-browser drag --browser 1 --tab-id <tabId> --snapshot <snapshotId> --from <sourceElementId> --to <targetElementId> --json
 ```
+
+A drag source and target must belong to the same frame document. Cross-frame drag is rejected instead of being executed against incorrect coordinates.
 
 After any action, verify with `wait`, `tabs`, `snapshot`, or `screenshot`.
 

@@ -23,6 +23,8 @@ export {
 } from "@portus/protocol";
 
 export interface SnapshotElementCandidate {
+  frameId: number;
+  documentId: string;
   role: string;
   label?: string;
   text?: string;
@@ -131,6 +133,8 @@ export function filterSnapshot(snapshot: Snapshot, filterInput: SnapshotFilter |
 export function normalizeSnapshotElement(input: SnapshotElementCandidate, sequence: number): SnapshotElement {
   const elementInput: Record<string, unknown> = {
     elementId: createElementId(sequence),
+    frameId: input.frameId,
+    documentId: input.documentId,
     role: input.role,
     label: input.label ?? "",
     text: input.text ?? "",

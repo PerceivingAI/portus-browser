@@ -146,6 +146,17 @@ export interface ChromeWindow {
   incognito?: boolean;
 }
 
+interface DomExecutionTarget {
+  frameId: number;
+  documentId: string;
+}
+
+export interface ChromeScriptInjectionResult {
+  frameId: number;
+  documentId: string;
+  result?: unknown;
+}
+
 export interface PortusChromeApi {
   runtime: {
     id?: string;
@@ -172,11 +183,16 @@ export interface PortusChromeApi {
   };
   scripting?: {
     executeScript(injection: {
-      target: { tabId: number };
+      target: {
+        tabId: number;
+        allFrames?: boolean;
+        frameIds?: number[];
+        documentIds?: string[];
+      };
       func: (...args: never[]) => unknown;
       args?: unknown[];
       world?: "ISOLATED" | "MAIN";
-    }): Promise<Array<{ result?: unknown }>> | void;
+    }): Promise<ChromeScriptInjectionResult[]> | void;
   };
   windows?: {
     getAll(getInfo?: Record<string, unknown>): Promise<ChromeWindow[]> | void;
@@ -954,13 +970,28 @@ export class PortusExtensionBridge {
       deltaY: typeof payload.deltaY === "number" ? payload.deltaY : 600
     };
 
-    if (action === "drag" && this.shouldUseDebuggerBackend()) {
+    if (action === "drag" && sourceElement && targetElement && sourceElement.documentId !== targetElement.documentId) {
+      throw createPortusError({
+        code: "ACTION_UNSUPPORTED",
+        message: "Cross-frame drag is not supported as a single atomic DOM action.",
+        details: {
+          sourceFrameId: sourceElement.frameId,
+          sourceDocumentId: sourceElement.documentId,
+          targetFrameId: targetElement.frameId,
+          targetDocumentId: targetElement.documentId
+        }
+      });
+    }
+
+    if (action === "drag" && this.shouldUseDebuggerBackend() && sourceElement?.frameId === 0 && targetElement?.frameId === 0) {
       const debuggerResult = await this.executeDebuggerDragAction(tabId, sourceElement, targetElement);
       markSnapshotsStaleForTab(this.snapshots, browserId, tabId);
       return debuggerResult;
     }
 
-    const result = await this.executeActionScript(tabId, domPayload);
+    const executionElement = action === "drag" ? sourceElement : element;
+    const executionTarget = executionElement ? snapshotElementExecutionTarget(executionElement) : undefined;
+    const result = await this.executeActionScript(tabId, domPayload, executionTarget);
     if (!result.ok) throw createPortusError(result.error);
     markSnapshotsStaleForTab(this.snapshots, browserId, tabId);
     return ActionResultSchema.parse(createDomActionResult(this.now().toISOString(), result.details ?? { action }));
@@ -982,22 +1013,34 @@ export class PortusExtensionBridge {
     });
 
     const partial = request.partial === true;
-    const targets = request.fields.map((field) => {
+    type ResolvedFillTarget = {
+      index: number;
+      elementId: string;
+      value: string;
+      target?: Record<string, unknown>;
+      executionTarget?: DomExecutionTarget;
+      error?: PortusError;
+    };
+    const targets: ResolvedFillTarget[] = request.fields.map((field, index) => {
       try {
+        const element = resolveActionElement({
+          action: "type",
+          browserId,
+          tabId,
+          snapshotId: request.snapshotId,
+          elementId: field.elementId
+        }, this.snapshots) as SnapshotElement;
         return {
+          index,
           elementId: field.elementId,
           value: field.value,
-          target: createDomActionTarget(resolveActionElement({
-            action: "type",
-            browserId,
-            tabId,
-            snapshotId: request.snapshotId,
-            elementId: field.elementId
-          }, this.snapshots) as SnapshotElement)
+          target: createDomActionTarget(element),
+          executionTarget: snapshotElementExecutionTarget(element)
         };
       } catch (error) {
         if (!partial) throw error;
         return {
+          index,
           elementId: field.elementId,
           value: field.value,
           error: normalizeExtensionError(error)
@@ -1005,23 +1048,103 @@ export class PortusExtensionBridge {
       }
     });
 
-    const result = await this.executeActionScript(tabId, {
-      action: "fillForm",
-      fields: targets,
-      partial
-    });
-    if (!result.ok) throw createPortusError(result.error);
+    let fieldResults: unknown[];
+    if (!partial) {
+      const executionTargets = targets.map((target) => target.executionTarget).filter((target): target is DomExecutionTarget => target !== undefined);
+      const documentIds = new Set(executionTargets.map((target) => target.documentId));
+      if (documentIds.size !== 1) {
+        throw createPortusError({
+          code: "ACTION_UNSUPPORTED",
+          message: "Atomic fill-form cannot span multiple frame documents. Use --partial for multi-frame forms.",
+          details: { documentCount: documentIds.size }
+        });
+      }
+      const executionTarget = executionTargets[0];
+      if (!executionTarget) {
+        throw createPortusError({ code: "SNAPSHOT_STALE", message: "Fill form has no available snapshot targets." });
+      }
+      const result = await this.executeActionScript(tabId, {
+        action: "fillForm",
+        fields: targets.map((target) => ({ elementId: target.elementId, value: target.value, target: target.target })),
+        partial: false
+      }, executionTarget);
+      if (!result.ok) throw createPortusError(result.error);
+      const scriptFieldResults = result.details?.fields;
+      fieldResults = Array.isArray(scriptFieldResults)
+        ? scriptFieldResults
+        : request.fields.map((field) => ({ elementId: field.elementId, ok: true }));
+    } else {
+      const resultsByIndex: unknown[] = new Array(request.fields.length);
+      const groups = new Map<string, {
+        executionTarget: DomExecutionTarget;
+        fields: Array<{ index: number; elementId: string; value: string; target: Record<string, unknown> }>;
+      }>();
 
-    const scriptFieldResults = result.details?.fields;
-    if (partial && !Array.isArray(scriptFieldResults)) {
-      throw createPortusError({
-        code: "ACTION_FAILED",
-        message: "Partial fill form action did not return per-field results."
-      });
+      for (const target of targets) {
+        if (target.error) {
+          resultsByIndex[target.index] = { elementId: target.elementId, ok: false, error: target.error };
+          continue;
+        }
+        if (!target.target || !target.executionTarget) {
+          resultsByIndex[target.index] = {
+            elementId: target.elementId,
+            ok: false,
+            error: createPortusError({ code: "ACTION_FAILED", message: "Fill form target is incomplete." })
+          };
+          continue;
+        }
+        const group = groups.get(target.executionTarget.documentId) ?? {
+          executionTarget: target.executionTarget,
+          fields: []
+        };
+        group.fields.push({ index: target.index, elementId: target.elementId, value: target.value, target: target.target });
+        groups.set(target.executionTarget.documentId, group);
+      }
+
+      for (const group of groups.values()) {
+        try {
+          const result = await this.executeActionScript(tabId, {
+            action: "fillForm",
+            fields: group.fields.map((field) => ({ elementId: field.elementId, value: field.value, target: field.target })),
+            partial: true
+          }, group.executionTarget);
+          if (!result.ok) {
+            for (const field of group.fields) {
+              resultsByIndex[field.index] = { elementId: field.elementId, ok: false, error: result.error };
+            }
+            continue;
+          }
+          const scriptFieldResults = result.details?.fields;
+          if (!Array.isArray(scriptFieldResults) || scriptFieldResults.length !== group.fields.length) {
+            const error = createPortusError({
+              code: "ACTION_FAILED",
+              message: "Partial fill form action did not return complete per-field results."
+            });
+            for (const field of group.fields) {
+              resultsByIndex[field.index] = { elementId: field.elementId, ok: false, error };
+            }
+            continue;
+          }
+          group.fields.forEach((field, index) => {
+            const scriptResult = scriptFieldResults[index];
+            resultsByIndex[field.index] = isRecord(scriptResult)
+              ? scriptResult
+              : {
+                elementId: field.elementId,
+                ok: false,
+                error: createPortusError({ code: "ACTION_FAILED", message: "Partial fill form field result is invalid." })
+              };
+          });
+        } catch (error) {
+          const normalized = normalizeExtensionError(error);
+          for (const field of group.fields) {
+            resultsByIndex[field.index] = { elementId: field.elementId, ok: false, error: normalized };
+          }
+        }
+      }
+      fieldResults = resultsByIndex;
     }
-    const fieldResults = Array.isArray(scriptFieldResults)
-      ? scriptFieldResults
-      : request.fields.map((field) => ({ elementId: field.elementId, ok: true }));
+
     const succeeded = fieldResults.filter((field) => isRecord(field) && field.ok === true).length;
     const failed = fieldResults.length - succeeded;
     const snapshotInvalidated = succeeded > 0;
@@ -2760,22 +2883,77 @@ export class PortusExtensionBridge {
         message: "Chrome scripting API is unavailable."
       });
     }
-    const results = await mapChromeAccessOperation("execute snapshot script", promisifyChromeCall<Array<{ result?: unknown }>>((done) => {
+
+    const collectionFilter = createSnapshotCollectionFilter(filter);
+    const results = await mapChromeAccessOperation("execute snapshot script", promisifyChromeCall<ChromeScriptInjectionResult[]>((done) => {
       const result = this.chromeApi.scripting?.executeScript({
-        target: { tabId },
+        target: { tabId, allFrames: true },
         func: capturePortusSnapshotPayload,
-        args: [filter ?? null, SNAPSHOT_COLLECTION_LIMIT]
+        args: [collectionFilter, SNAPSHOT_COLLECTION_LIMIT]
       });
-      done(result as Promise<Array<{ result?: unknown }>> | Array<{ result?: unknown }> | undefined);
+      done(result as Promise<ChromeScriptInjectionResult[]> | ChromeScriptInjectionResult[] | undefined);
     }));
-    const page = results[0]?.result;
-    if (!isRecord(page)) {
+
+    if (results.length === 0) {
       throw createPortusError({
         code: "ACTION_FAILED",
-        message: "Snapshot script returned an invalid result."
+        message: "Snapshot script returned no frame results."
       });
     }
-    return page;
+
+    const frames = results.map((injection) => {
+      if (!Number.isInteger(injection.frameId) || injection.frameId < 0 || typeof injection.documentId !== "string" || injection.documentId.length === 0 || !isRecord(injection.result)) {
+        throw createPortusError({
+          code: "ACTION_FAILED",
+          message: "Snapshot script returned invalid frame metadata."
+        });
+      }
+      return {
+        frameId: injection.frameId,
+        documentId: injection.documentId,
+        page: injection.result
+      };
+    });
+    const mainFrame = frames.find((frame) => frame.frameId === 0);
+    if (!mainFrame) {
+      throw createPortusError({
+        code: "ACTION_FAILED",
+        message: "Snapshot script did not return the main frame."
+      });
+    }
+
+    const elements: Record<string, unknown>[] = [];
+    let candidateCount = 0;
+    let matchedElementCount = 0;
+    let frameTruncated = false;
+    for (const frame of frames) {
+      const pageElements = Array.isArray(frame.page.elements) ? frame.page.elements.filter(isRecord) : [];
+      candidateCount += readNonnegativeInteger(frame.page.candidateCount) ?? pageElements.length;
+      matchedElementCount += readNonnegativeInteger(frame.page.matchedElementCount) ?? pageElements.length;
+      frameTruncated = frameTruncated || frame.page.truncated === true;
+      for (const element of pageElements) {
+        elements.push({ ...element, frameId: frame.frameId, documentId: frame.documentId });
+      }
+    }
+
+    const requestedLimit = Math.min(filter?.maxElements ?? SNAPSHOT_COLLECTION_LIMIT, SNAPSHOT_COLLECTION_LIMIT);
+    const truncated = frameTruncated || matchedElementCount > requestedLimit;
+    const visibleText = frames
+      .map((frame) => typeof frame.page.visibleText === "string" ? frame.page.visibleText : "")
+      .filter(Boolean)
+      .join("\n")
+      .slice(0, 100000);
+
+    return {
+      url: readString(mainFrame.page, "url"),
+      title: readString(mainFrame.page, "title"),
+      viewport: mainFrame.page.viewport,
+      visibleText,
+      elements: elements.slice(0, SNAPSHOT_COLLECTION_LIMIT),
+      candidateCount,
+      matchedElementCount,
+      truncated
+    };
   }
 
   private async executePageWaitScript(tabId: number, condition: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -2785,22 +2963,37 @@ export class PortusExtensionBridge {
         message: "Chrome scripting API is unavailable."
       });
     }
-    const results = await mapChromeAccessOperation("execute page wait script", promisifyChromeCall<Array<{ result?: unknown }>>((done) => {
+    const results = await mapChromeAccessOperation("execute page wait script", promisifyChromeCall<ChromeScriptInjectionResult[]>((done) => {
       const result = this.chromeApi.scripting?.executeScript({
-        target: { tabId },
+        target: { tabId, allFrames: true },
         func: evaluatePortusPageWait,
         args: [condition]
       });
-      done(result as Promise<Array<{ result?: unknown }>> | Array<{ result?: unknown }> | undefined);
+      done(result as Promise<ChromeScriptInjectionResult[]> | ChromeScriptInjectionResult[] | undefined);
     }));
-    const waitResult = results[0]?.result;
-    if (!isRecord(waitResult) || typeof waitResult.matched !== "boolean") {
+
+    let sawValidResult = false;
+    for (const injection of results) {
+      const waitResult = injection.result;
+      if (!isRecord(waitResult) || typeof waitResult.matched !== "boolean") continue;
+      sawValidResult = true;
+      if (waitResult.matched !== true) continue;
+      return {
+        ...waitResult,
+        details: {
+          ...(isRecord(waitResult.details) ? waitResult.details : {}),
+          frameId: injection.frameId,
+          documentId: injection.documentId
+        }
+      };
+    }
+    if (!sawValidResult) {
       throw createPortusError({
         code: "ACTION_FAILED",
-        message: "Page wait script returned an invalid result."
+        message: "Page wait script returned no valid frame results."
       });
     }
-    return waitResult;
+    return { matched: false };
   }
 
   private async executeConsoleListScript(tabId: number): Promise<Record<string, unknown>[]> {
@@ -2839,7 +3032,11 @@ export class PortusExtensionBridge {
     }));
   }
 
-  private async executeActionScript(tabId: number, payload: Record<string, unknown>): Promise<{
+  private async executeActionScript(
+    tabId: number,
+    payload: Record<string, unknown>,
+    executionTarget?: DomExecutionTarget
+  ): Promise<{
     ok: true;
     details?: Record<string, unknown>;
   } | {
@@ -2852,15 +3049,50 @@ export class PortusExtensionBridge {
         message: "Chrome scripting API is unavailable."
       });
     }
-    const results = await mapChromeAccessOperation("execute action script", promisifyChromeCall<Array<{ result?: unknown }>>((done) => {
-      const result = this.chromeApi.scripting?.executeScript({
-        target: { tabId },
-        func: performPortusDomAction,
-        args: [payload]
+
+    let results: ChromeScriptInjectionResult[];
+    try {
+      results = await mapChromeAccessOperation("execute action script", promisifyChromeCall<ChromeScriptInjectionResult[]>((done) => {
+        const result = this.chromeApi.scripting?.executeScript({
+          target: executionTarget
+            ? { tabId, documentIds: [executionTarget.documentId] }
+            : { tabId, frameIds: [0] },
+          func: performPortusDomAction,
+          args: [payload]
+        });
+        done(result as Promise<ChromeScriptInjectionResult[]> | ChromeScriptInjectionResult[] | undefined);
+      }));
+    } catch (error) {
+      if (executionTarget) {
+        throw createPortusError({
+          code: "SNAPSHOT_STALE",
+          message: "Snapshot document is no longer available for the action.",
+          details: {
+            tabId,
+            frameId: executionTarget.frameId,
+            documentId: executionTarget.documentId,
+            reason: isPortusError(error) ? error.message : error instanceof Error ? error.message : "Document-targeted action failed."
+          }
+        });
+      }
+      throw error;
+    }
+
+    const injection = results[0];
+    if (!injection || (executionTarget && (injection.frameId !== executionTarget.frameId || injection.documentId !== executionTarget.documentId))) {
+      throw createPortusError({
+        code: "SNAPSHOT_STALE",
+        message: "Action executed in a different document than the snapshot target.",
+        details: executionTarget ? {
+          expectedFrameId: executionTarget.frameId,
+          expectedDocumentId: executionTarget.documentId,
+          actualFrameId: injection?.frameId,
+          actualDocumentId: injection?.documentId
+        } : {}
       });
-      done(result as Promise<Array<{ result?: unknown }>> | Array<{ result?: unknown }> | undefined);
-    }));
-    const actionResult = results[0]?.result;
+    }
+
+    const actionResult = injection.result;
     if (!isRecord(actionResult) || typeof actionResult.ok !== "boolean") {
       throw createPortusError({
         code: "ACTION_FAILED",
@@ -3568,10 +3800,40 @@ function readViewport(value: unknown): { width: number; height: number; deviceSc
   };
 }
 
+function createSnapshotCollectionFilter(filter?: SnapshotFilter): Record<string, unknown> | null {
+  if (!filter) return null;
+  const collectionFilter: Record<string, unknown> = {};
+  if (filter.query !== undefined) collectionFilter.query = filter.query;
+  if (filter.role !== undefined) collectionFilter.role = filter.role;
+  if (filter.interactiveOnly === true) collectionFilter.interactiveOnly = true;
+  return Object.keys(collectionFilter).length === 0 ? null : collectionFilter;
+}
+
+function readNonnegativeInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+function snapshotElementExecutionTarget(element: SnapshotElement): DomExecutionTarget {
+  return {
+    frameId: element.frameId,
+    documentId: element.documentId
+  };
+}
+
 function readElementCandidates(value: unknown): SnapshotElementCandidate[] {
   if (!Array.isArray(value)) return [];
   return value.filter(isRecord).map((element) => {
+    const frameId = readNonnegativeInteger(element.frameId);
+    const documentId = typeof element.documentId === "string" && element.documentId.length > 0 ? element.documentId : null;
+    if (frameId === null || documentId === null) {
+      throw createPortusError({
+        code: "ACTION_FAILED",
+        message: "Snapshot element is missing frame or document identity."
+      });
+    }
     const candidate: SnapshotElementCandidate = {
+      frameId,
+      documentId,
       role: typeof element.role === "string" && element.role.length > 0 ? element.role : "generic",
       label: typeof element.label === "string" ? element.label : "",
       text: typeof element.text === "string" ? element.text : "",
@@ -3595,6 +3857,8 @@ function createDomActionTarget(element: SnapshotElement): Record<string, unknown
   const extendedElement = element as SnapshotElement & Record<string, unknown>;
   const target: Record<string, unknown> = {
     elementId: element.elementId,
+    frameId: element.frameId,
+    documentId: element.documentId,
     role: element.role,
     label: element.label,
     text: element.text,

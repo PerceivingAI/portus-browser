@@ -648,6 +648,8 @@ export const ScreenshotResultSchema = z.object({
 
 export const SnapshotElementSchema = z.object({
   elementId: ElementIdSchema,
+  frameId: z.number().int().nonnegative(),
+  documentId: z.string().min(1),
   role: z.string(),
   label: z.string(),
   text: z.string(),
