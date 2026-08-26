@@ -2104,6 +2104,129 @@ test("bounds recovery recursively hit-tests nested Shadow DOM", () => {
   }
 });
 
+test("same-document drag crosses light and Shadow DOM boundaries", () => {
+  const dom = new JSDOM(`<!doctype html><html><body>
+    <button id="light-source">Light source</button>
+    <button id="light-target">Light target</button>
+    <app-shell id="app"></app-shell>
+  </body></html>`, { url: "https://example.com/" });
+  const document = dom.window.document;
+  const app = document.querySelector("#app");
+  const appRoot = app.attachShadow({ mode: "open" });
+  appRoot.innerHTML = `<left-panel id="left"></left-panel><right-panel id="right"></right-panel>`;
+  const left = appRoot.querySelector("#left");
+  const right = appRoot.querySelector("#right");
+  const leftRoot = left.attachShadow({ mode: "open" });
+  const rightRoot = right.attachShadow({ mode: "open" });
+  leftRoot.innerHTML = `<button id="shadow-left">Shadow left</button><nested-left id="nested-left"></nested-left>`;
+  rightRoot.innerHTML = `<button id="shadow-right">Shadow right</button><nested-right id="nested-right"></nested-right>`;
+  const nestedLeft = leftRoot.querySelector("#nested-left");
+  const nestedRight = rightRoot.querySelector("#nested-right");
+  const nestedLeftRoot = nestedLeft.attachShadow({ mode: "open" });
+  const nestedRightRoot = nestedRight.attachShadow({ mode: "open" });
+  nestedLeftRoot.innerHTML = `<button id="nested-source">Nested source</button>`;
+  nestedRightRoot.innerHTML = `<button id="nested-target">Nested target</button>`;
+
+  const lightSource = document.querySelector("#light-source");
+  const lightTarget = document.querySelector("#light-target");
+  const shadowLeft = leftRoot.querySelector("#shadow-left");
+  const shadowRight = rightRoot.querySelector("#shadow-right");
+  const nestedSource = nestedLeftRoot.querySelector("#nested-source");
+  const nestedTarget = nestedRightRoot.querySelector("#nested-target");
+
+  const descriptors = new Map();
+  const globals = {
+    window: dom.window,
+    document,
+    location: dom.window.location,
+    HTMLElement: dom.window.HTMLElement,
+    HTMLButtonElement: dom.window.HTMLButtonElement,
+    HTMLInputElement: dom.window.HTMLInputElement,
+    HTMLTextAreaElement: dom.window.HTMLTextAreaElement,
+    HTMLSelectElement: dom.window.HTMLSelectElement,
+    HTMLAnchorElement: dom.window.HTMLAnchorElement,
+    Event: dom.window.Event,
+    MouseEvent: dom.window.MouseEvent,
+    getComputedStyle: dom.window.getComputedStyle.bind(dom.window)
+  };
+  for (const [key, value] of Object.entries(globals)) {
+    descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  }
+  descriptors.set("__portusComposedDom", Object.getOwnPropertyDescriptor(globalThis, "__portusComposedDom"));
+  installPortusComposedDomRuntime(globalThis);
+  dom.window.HTMLElement.prototype.scrollIntoView = () => {};
+  const xById = new Map([
+    ["light-source", 10],
+    ["light-target", 160],
+    ["shadow-left", 310],
+    ["shadow-right", 460],
+    ["nested-source", 610],
+    ["nested-target", 760]
+  ]);
+  dom.window.HTMLElement.prototype.getBoundingClientRect = function () {
+    const x = xById.get(this.id) ?? 0;
+    return {
+      x, y: 20, left: x, top: 20, right: x + 100, bottom: 50, width: 100, height: 30,
+      toJSON() { return this; }
+    };
+  };
+
+  const lightTargetFor = (element, label) => ({
+    selectorHint: `#${element.id}`,
+    tagName: "button",
+    role: "button",
+    label,
+    text: label,
+    bounds: { x: xById.get(element.id), y: 20, width: 100, height: 30 },
+    state: {},
+    disabled: false
+  });
+  const shadowTargetFor = (element, label, shadowPath) => ({
+    ...lightTargetFor(element, label),
+    shadowPath
+  });
+  const appLeftPath = [
+    { hostSelectorHint: "#app", rootType: "open" },
+    { hostSelectorHint: "#left", rootType: "open" }
+  ];
+  const appRightPath = [
+    { hostSelectorHint: "#app", rootType: "open" },
+    { hostSelectorHint: "#right", rootType: "open" }
+  ];
+  const nestedLeftPath = [...appLeftPath, { hostSelectorHint: "#nested-left", rootType: "open" }];
+  const nestedRightPath = [...appRightPath, { hostSelectorHint: "#nested-right", rootType: "open" }];
+
+  const targets = {
+    lightSource: lightTargetFor(lightSource, "Light source"),
+    lightTarget: lightTargetFor(lightTarget, "Light target"),
+    shadowLeft: shadowTargetFor(shadowLeft, "Shadow left", appLeftPath),
+    shadowRight: shadowTargetFor(shadowRight, "Shadow right", appRightPath),
+    nestedSource: shadowTargetFor(nestedSource, "Nested source", nestedLeftPath),
+    nestedTarget: shadowTargetFor(nestedTarget, "Nested target", nestedRightPath)
+  };
+
+  const drops = { shadowLeft: 0, lightTarget: 0, shadowRight: 0, nestedTarget: 0 };
+  shadowLeft.addEventListener("drop", () => drops.shadowLeft += 1);
+  lightTarget.addEventListener("drop", () => drops.lightTarget += 1);
+  shadowRight.addEventListener("drop", () => drops.shadowRight += 1);
+  nestedTarget.addEventListener("drop", () => drops.nestedTarget += 1);
+
+  try {
+    assert.equal(performPortusDomAction({ action: "drag", sourceTarget: targets.lightSource, dropTarget: targets.shadowLeft }).ok, true);
+    assert.equal(performPortusDomAction({ action: "drag", sourceTarget: targets.shadowLeft, dropTarget: targets.lightTarget }).ok, true);
+    assert.equal(performPortusDomAction({ action: "drag", sourceTarget: targets.shadowLeft, dropTarget: targets.shadowRight }).ok, true);
+    assert.equal(performPortusDomAction({ action: "drag", sourceTarget: targets.nestedSource, dropTarget: targets.nestedTarget }).ok, true);
+    assert.deepEqual(drops, { shadowLeft: 1, lightTarget: 1, shadowRight: 1, nestedTarget: 1 });
+  } finally {
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    }
+    dom.window.close();
+  }
+});
+
 test("performs DOM actions and rejects stale snapshot ids", async () => {
   const fixture = createChromeFixture();
   const bridge = createConnectedBridge(fixture);
@@ -2422,6 +2545,149 @@ test("uses debugger input for drag when advanced backend is enabled", async () =
   ]);
   assert.equal(fixture.actions.length, 0);
   assert.deepEqual(fixture.debuggerDetaches, [{ target: { tabId: 1 } }]);
+});
+
+test("debugger drag supports normal and CDP-only endpoints in the same document", async () => {
+  const scenarios = [
+    { name: "normal-to-cdp", sourceIndex: 0, targetIndex: 2, refreshed: [5] },
+    { name: "cdp-to-normal", sourceIndex: 1, targetIndex: 0, refreshed: [4] },
+    { name: "cdp-to-cdp", sourceIndex: 1, targetIndex: 2, refreshed: [4, 5] }
+  ];
+
+  for (const scenario of scenarios) {
+    const fixture = createPiercedDragFixture();
+    const bridge = createConnectedBridge(fixture);
+    await bridge.setCommandPolicyEnabled("action.drag", true, false);
+    await bridge.setAdvancedBackendEnabled(true, false);
+    const snapshot = await bridge.captureSnapshot(1);
+    assert.equal(snapshot.elements.length, 3, scenario.name);
+    const commandStart = fixture.debuggerCommands.length;
+
+    const result = await bridge.performAction("drag", {
+      tabId: 1,
+      snapshotId: snapshot.snapshotId,
+      sourceElementId: snapshot.elements[scenario.sourceIndex].elementId,
+      targetElementId: snapshot.elements[scenario.targetIndex].elementId
+    });
+
+    assert.equal(result.backend, "debugger-cdp", scenario.name);
+    assert.equal(result.snapshotInvalidated, true, scenario.name);
+    assert.equal(result.details.piercedClosedShadowFallback, true, scenario.name);
+    const dragCommands = fixture.debuggerCommands.slice(commandStart);
+    assert.deepEqual(
+      dragCommands.filter((command) => command.method === "DOM.getBoxModel").map((command) => command.params.backendNodeId),
+      scenario.refreshed,
+      scenario.name
+    );
+    assert.equal(dragCommands.filter((command) => command.method === "Input.dispatchMouseEvent").length, 4, scenario.name);
+    if (scenario.refreshed.includes(4)) assert.deepEqual(result.details.source, { x: 550, y: 130 }, scenario.name);
+    if (scenario.refreshed.includes(5)) assert.deepEqual(result.details.target, { x: 750, y: 330 }, scenario.name);
+    assert.equal(fixture.actions.length, 0, scenario.name);
+  }
+});
+
+test("CDP-only drag fails stale before dispatching mouse input when live bounds disappear", async () => {
+  const fixture = createPiercedDragFixture({ staleBackendNodeId: 5 });
+  const bridge = createConnectedBridge(fixture);
+  await bridge.setCommandPolicyEnabled("action.drag", true, false);
+  await bridge.setAdvancedBackendEnabled(true, false);
+  const snapshot = await bridge.captureSnapshot(1);
+  const commandStart = fixture.debuggerCommands.length;
+
+  await assert.rejects(() => bridge.performAction("drag", {
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    sourceElementId: snapshot.elements[0].elementId,
+    targetElementId: snapshot.elements[2].elementId
+  }), { code: "SNAPSHOT_STALE" });
+
+  const dragCommands = fixture.debuggerCommands.slice(commandStart);
+  assert.deepEqual(dragCommands.map((command) => command.method), ["DOM.getBoxModel"]);
+  assert.equal(dragCommands[0].params.backendNodeId, 5);
+});
+
+test("CDP-only drag cannot fall through to DOM after Advanced Backend is disabled", async () => {
+  const fixture = createPiercedDragFixture();
+  const bridge = createConnectedBridge(fixture);
+  await bridge.setCommandPolicyEnabled("action.drag", true, false);
+  await bridge.setAdvancedBackendEnabled(true, false);
+  const snapshot = await bridge.captureSnapshot(1);
+  const commandCount = fixture.debuggerCommands.length;
+  await bridge.setAdvancedBackendEnabled(false, false);
+
+  await assert.rejects(() => bridge.performAction("drag", {
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    sourceElementId: snapshot.elements[1].elementId,
+    targetElementId: snapshot.elements[0].elementId
+  }), { code: "CAPABILITY_UNAVAILABLE" });
+
+  assert.equal(fixture.debuggerCommands.length, commandCount);
+  assert.equal(fixture.actions.length, 0);
+});
+
+test("drag keeps the existing cross-document restriction even with Advanced Backend enabled", async () => {
+  const fixture = createChromeFixture({
+    executeScript(injection) {
+      if (injection.files) return Promise.resolve([{ result: undefined }]);
+      return Promise.resolve([
+        {
+          frameId: 0,
+          documentId: "doc_main",
+          result: {
+            url: "https://example.com/drag",
+            title: "Main",
+            viewport: { width: 1200, height: 800, deviceScaleFactor: 1 },
+            visibleText: "Source",
+            closedShadowRootAccessAvailable: true,
+            elements: [{
+              role: "button",
+              label: "Source",
+              text: "Source",
+              bounds: { x: 10, y: 20, width: 100, height: 40 },
+              state: {},
+              selectorHint: "#source",
+              tagName: "button"
+            }]
+          }
+        },
+        {
+          frameId: 7,
+          documentId: "doc_child",
+          result: {
+            url: "https://child.example.com/drag",
+            title: "Child",
+            viewport: { width: 600, height: 400, deviceScaleFactor: 1 },
+            visibleText: "Target",
+            closedShadowRootAccessAvailable: true,
+            elements: [{
+              role: "region",
+              label: "Target",
+              text: "Target",
+              bounds: { x: 20, y: 30, width: 120, height: 50 },
+              state: {},
+              selectorHint: "#target",
+              tagName: "section"
+            }]
+          }
+        }
+      ]);
+    }
+  });
+  const bridge = createConnectedBridge(fixture);
+  await bridge.setCommandPolicyEnabled("action.drag", true, false);
+  await bridge.setAdvancedBackendEnabled(true, false);
+  const snapshot = await bridge.captureSnapshot(1);
+
+  await assert.rejects(() => bridge.performAction("drag", {
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    sourceElementId: snapshot.elements[0].elementId,
+    targetElementId: snapshot.elements[1].elementId
+  }), { code: "ACTION_UNSUPPORTED" });
+
+  assert.equal(fixture.actions.length, 0);
+  assert.equal(fixture.debuggerCommands.length, 0);
 });
 
 test("uses pierced CDP only for inaccessible closed roots when advanced backend is enabled", async () => {
@@ -3260,6 +3526,101 @@ function createPiercedFillFormFixture({ debuggerEditable = true, resolveFails = 
     }
   });
   return { fixture, chronology };
+}
+
+function createPiercedDragFixture({ staleBackendNodeId } = {}) {
+  const boxCalls = new Map();
+  return createChromeFixture({
+    executeScript(injection) {
+      if (injection.files) return Promise.resolve([{ result: undefined }]);
+      if (injection.target?.allFrames === true) {
+        return Promise.resolve([{
+          frameId: 0,
+          documentId: "doc_main",
+          result: {
+            url: "https://example.com/drag-shadow",
+            title: "Drag shadow",
+            viewport: { width: 1200, height: 800, deviceScaleFactor: 1 },
+            visibleText: "Normal source",
+            closedShadowRootAccessAvailable: false,
+            candidateCount: 1,
+            matchedElementCount: 1,
+            truncated: false,
+            elements: [{
+              role: "button",
+              label: "Normal source",
+              text: "Normal source",
+              bounds: { x: 10, y: 20, width: 100, height: 40 },
+              state: {},
+              selectorHint: "#normal-source",
+              tagName: "button"
+            }]
+          }
+        }]);
+      }
+      return Promise.resolve([{ result: {} }]);
+    },
+    sendDebuggerCommand(_target, method, params) {
+      if (method === "DOM.getDocument") {
+        return Promise.resolve({
+          root: {
+            nodeType: 9,
+            nodeName: "#document",
+            backendNodeId: 1,
+            children: [{
+              nodeType: 1,
+              nodeName: "SECURE-SHELL",
+              localName: "secure-shell",
+              backendNodeId: 2,
+              shadowRoots: [{
+                nodeType: 11,
+                nodeName: "#document-fragment",
+                backendNodeId: 3,
+                shadowRootType: "closed",
+                children: [
+                  {
+                    nodeType: 1,
+                    nodeName: "BUTTON",
+                    localName: "button",
+                    backendNodeId: 4,
+                    attributes: ["id", "secret-source", "aria-label", "Secret source"]
+                  },
+                  {
+                    nodeType: 1,
+                    nodeName: "SECTION",
+                    localName: "section",
+                    backendNodeId: 5,
+                    attributes: ["id", "secret-target", "role", "region", "aria-label", "Secret target"]
+                  }
+                ]
+              }]
+            }]
+          }
+        });
+      }
+      if (method === "DOM.getBoxModel") {
+        const backendNodeId = params.backendNodeId;
+        const call = (boxCalls.get(backendNodeId) ?? 0) + 1;
+        boxCalls.set(backendNodeId, call);
+        if (call > 1 && backendNodeId === staleBackendNodeId) {
+          return Promise.reject(new Error("Node no longer has a box"));
+        }
+        if (backendNodeId === 4) {
+          const border = call === 1
+            ? [300, 20, 400, 20, 400, 60, 300, 60]
+            : [500, 100, 600, 100, 600, 160, 500, 160];
+          return Promise.resolve({ model: { border } });
+        }
+        if (backendNodeId === 5) {
+          const border = call === 1
+            ? [600, 200, 700, 200, 700, 260, 600, 260]
+            : [700, 300, 800, 300, 800, 360, 700, 360];
+          return Promise.resolve({ model: { border } });
+        }
+      }
+      return Promise.resolve({});
+    }
+  });
 }
 
 function createChromeFixture(overrides = {}) {

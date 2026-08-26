@@ -1061,13 +1061,6 @@ export class PortusExtensionBridge {
       deltaY: typeof payload.deltaY === "number" ? payload.deltaY : 600
     };
 
-    if (action === "drag" && (debuggerSourceTarget || debuggerDropTarget)) {
-      throw createPortusError({
-        code: "ACTION_UNSUPPORTED",
-        message: "Drag involving a CDP-only pierced Shadow DOM target is deferred to S9."
-      });
-    }
-
     if (debuggerElementTarget && element && action !== "drag") {
       const debuggerResult = await this.executeDebuggerSnapshotElementAction(tabId, action, element, debuggerElementTarget, payload);
       const invalidated = markSnapshotsStaleForTab(this.snapshots, browserId, tabId);
@@ -1088,8 +1081,21 @@ export class PortusExtensionBridge {
       });
     }
 
+    if (action === "drag" && (debuggerSourceTarget || debuggerDropTarget) && !this.shouldUseDebuggerBackend()) {
+      throw createPortusError({
+        code: "CAPABILITY_UNAVAILABLE",
+        message: "Advanced debugger backend is required for this drag snapshot target."
+      });
+    }
+
     if (action === "drag" && this.shouldUseDebuggerBackend() && sourceElement?.frameId === 0 && targetElement?.frameId === 0) {
-      const debuggerResult = await this.executeDebuggerDragAction(tabId, sourceElement, targetElement);
+      const debuggerResult = await this.executeDebuggerDragAction(
+        tabId,
+        sourceElement,
+        targetElement,
+        debuggerSourceTarget,
+        debuggerDropTarget
+      );
       const invalidated = markSnapshotsStaleForTab(this.snapshots, browserId, tabId);
       this.clearDebuggerTargetsForSnapshots(invalidated);
       return debuggerResult;
@@ -3601,7 +3607,9 @@ export class PortusExtensionBridge {
   private async executeDebuggerDragAction(
     tabId: number,
     sourceElement: SnapshotElement | null,
-    targetElement: SnapshotElement | null
+    targetElement: SnapshotElement | null,
+    sourceDebuggerTarget?: DebuggerSnapshotTarget,
+    targetDebuggerTarget?: DebuggerSnapshotTarget
   ): Promise<ActionResult> {
     this.ensureDebuggerApiAvailable();
     if (!sourceElement || !targetElement) {
@@ -3611,9 +3619,16 @@ export class PortusExtensionBridge {
       });
     }
 
-    const source = centerOfBounds(sourceElement.bounds);
-    const target = centerOfBounds(targetElement.bounds);
+    let source = centerOfBounds(sourceElement.bounds);
+    let target = centerOfBounds(targetElement.bounds);
     await this.withDebuggerSession(tabId, async (debuggerTarget) => {
+      if (sourceDebuggerTarget) {
+        source = await this.resolveDebuggerDragPoint(debuggerTarget, sourceDebuggerTarget, "source");
+      }
+      if (targetDebuggerTarget) {
+        target = await this.resolveDebuggerDragPoint(debuggerTarget, targetDebuggerTarget, "target");
+      }
+
       await this.sendDebuggerCommand(debuggerTarget, "Input.dispatchMouseEvent", {
         type: "mouseMoved",
         x: source.x,
@@ -3654,9 +3669,34 @@ export class PortusExtensionBridge {
         sourceElementId: sourceElement.elementId,
         targetElementId: targetElement.elementId,
         source,
-        target
+        target,
+        piercedClosedShadowFallback: sourceDebuggerTarget !== undefined || targetDebuggerTarget !== undefined
       }
     });
+  }
+
+  private async resolveDebuggerDragPoint(
+    debuggerTarget: ChromeDebuggerTarget,
+    target: DebuggerSnapshotTarget,
+    endpoint: "source" | "target"
+  ): Promise<{ x: number; y: number }> {
+    let boxResult: unknown;
+    try {
+      boxResult = await this.sendDebuggerCommand(debuggerTarget, "DOM.getBoxModel", { backendNodeId: target.backendNodeId });
+    } catch {
+      throw createPortusError({
+        code: "SNAPSHOT_STALE",
+        message: `CDP drag ${endpoint} is no longer available.`
+      });
+    }
+    const bounds = readCdpBoxBounds(boxResult);
+    if (!bounds || bounds.width <= 0 || bounds.height <= 0) {
+      throw createPortusError({
+        code: "SNAPSHOT_STALE",
+        message: `CDP drag ${endpoint} no longer has usable bounds.`
+      });
+    }
+    return centerOfBounds(bounds);
   }
 
   private async withDebuggerSession<T>(
