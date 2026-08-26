@@ -497,6 +497,12 @@ test("blocks native commands disabled by user policy before browser work", async
   await assert.rejects(() => bridge.dispatchNativeRequest(request("req_screenshot", "screenshot.capture", {
     tabId: 1
   })), { code: "COMMAND_DISABLED_BY_POLICY" });
+  await assert.rejects(() => bridge.dispatchNativeRequest(request("req_snapshot_screenshot", "snapshot.capture", {
+    tabId: 1,
+    includeScreenshot: true
+  })), { code: "COMMAND_DISABLED_BY_POLICY" });
+  assert.deepEqual(fixture.capturedWindows, []);
+
   assert.deepEqual(fixture.capturedWindows, []);
 
   await bridge.setCommandPolicyEnabled("screenshot.capture", true, false);
@@ -975,7 +981,7 @@ test("updates extension action title and badge for bridge states", async () => {
   assert.equal(fixture.actionBadgeTexts.at(-1), "ON");
 });
 
-test("captures screenshots and reports activation side effects", async () => {
+test("captures inactive-tab screenshots without focusing the window and restores the previous tab", async () => {
   const fixture = createChromeFixture();
   const bridge = createConnectedBridge(fixture);
 
@@ -985,8 +991,61 @@ test("captures screenshots and reports activation side effects", async () => {
   assert.equal(screenshot.tabId, 2);
   assert.equal(screenshot.activatedTabBeforeCapture, true);
   assert.equal(screenshot.previousActiveTabId, 1);
-  assert.equal(fixture.windowFocused, 11);
+  assert.equal(screenshot.restoredPreviousActiveTab, true);
+  assert.equal(fixture.windowFocused, null);
+  assert.equal(fixture.activeTabId(), 1);
+  assert.deepEqual(fixture.tabUpdates, [
+    { tabId: 2, properties: { active: true } },
+    { tabId: 1, properties: { active: true } }
+  ]);
   assert.deepEqual(fixture.capturedWindows, [11]);
+});
+
+test("restores the previous active tab when normal screenshot capture fails", async () => {
+  const fixture = createChromeFixture({
+    captureVisibleTab() {
+      return Promise.reject(new Error("capture failed"));
+    }
+  });
+  const bridge = createConnectedBridge(fixture);
+
+  await assert.rejects(() => bridge.captureScreenshot(2));
+
+  assert.equal(fixture.activeTabId(), 1);
+  assert.equal(fixture.windowFocused, null);
+  assert.deepEqual(fixture.tabUpdates, [
+    { tabId: 2, properties: { active: true } },
+    { tabId: 1, properties: { active: true } }
+  ]);
+});
+
+test("does not overwrite a newer user tab selection while restoring screenshot state", async () => {
+  let activeTabId = 1;
+  const fixture = createChromeFixture({
+    queryTabs(queryInfo) {
+      const tabs = [1, 2, 3].map((id) => chromeTab(id, `https://example.com/${id}`, activeTabId === id));
+      return Promise.resolve(queryInfo.active === true ? tabs.filter((tab) => tab.active) : tabs);
+    },
+    getTab(tabId) {
+      return Promise.resolve(chromeTab(tabId, `https://example.com/${tabId}`, activeTabId === tabId));
+    },
+    updateTab(tabId, properties) {
+      if (properties.active === true) activeTabId = tabId;
+      return Promise.resolve(chromeTab(tabId, `https://example.com/${tabId}`, activeTabId === tabId));
+    },
+    captureVisibleTab() {
+      activeTabId = 3;
+      return Promise.resolve("data:image/png;base64,user-race");
+    }
+  });
+  const bridge = createConnectedBridge(fixture);
+
+  const screenshot = await bridge.captureScreenshot(2);
+
+  assert.equal(screenshot.restoredPreviousActiveTab, false);
+  assert.equal(activeTabId, 3);
+  assert.deepEqual(fixture.tabUpdates, [{ tabId: 2, properties: { active: true } }]);
+  assert.equal(fixture.windowFocused, null);
 });
 
 test("honors explicit debugger screenshots without the automatic backend preference", async () => {
@@ -1001,6 +1060,9 @@ test("honors explicit debugger screenshots without the automatic backend prefere
   const screenshot = await bridge.captureScreenshot(1, true);
 
   assert.equal(screenshot.data, "data:image/png;base64,debugger-image");
+  assert.equal(screenshot.activatedTabBeforeCapture, false);
+  assert.deepEqual(fixture.tabUpdates, []);
+  assert.equal(fixture.windowFocused, null);
   assert.deepEqual(fixture.capturedWindows, []);
   assert.deepEqual(fixture.debuggerCommands.map((command) => command.method), ["Page.captureScreenshot"]);
   assert.deepEqual(fixture.debuggerAttaches, [{ target: { tabId: 1 }, version: "1.3" }]);
@@ -1021,6 +1083,67 @@ test("captures snapshots with actionable elements", async () => {
   assert.equal(fixture.scriptInjections[1].target.allFrames, true);
   assert.equal(snapshot.elements[0].elementId, "el_000001");
   assert.equal(snapshot.elements[0].selectorHint, "button:nth-of-type(1)");
+});
+
+test("structural snapshots do not capture images or mutate tab/window state", async () => {
+  const fixture = createChromeFixture();
+  const bridge = createConnectedBridge(fixture);
+
+  const snapshot = await bridge.captureSnapshot(2);
+
+  assert.equal("screenshot" in snapshot, false);
+  assert.deepEqual(fixture.capturedWindows, []);
+  assert.deepEqual(fixture.tabUpdates, []);
+  assert.equal(fixture.windowFocused, null);
+  assert.equal(fixture.activeTabId(), 1);
+});
+
+test("snapshots include screenshots only when explicitly requested", async () => {
+  const fixture = createChromeFixture();
+  const bridge = createConnectedBridge(fixture);
+
+  const snapshot = await bridge.captureSnapshot(2, undefined, { includeScreenshot: true });
+
+  assert.equal(snapshot.screenshot?.tabId, 2);
+  assert.equal(snapshot.screenshot?.restoredPreviousActiveTab, true);
+  assert.deepEqual(fixture.capturedWindows, [11]);
+  assert.equal(fixture.activeTabId(), 1);
+  assert.equal(fixture.windowFocused, null);
+});
+
+test("snapshot screenshot failures surface instead of fabricating a placeholder image", async () => {
+  const fixture = createChromeFixture({
+    captureVisibleTab() {
+      return Promise.reject(new Error("capture unavailable"));
+    }
+  });
+  const bridge = createConnectedBridge(fixture);
+
+  await assert.rejects(() => bridge.captureSnapshot(2, undefined, { includeScreenshot: true }));
+
+  assert.equal(fixture.activeTabId(), 1);
+  assert.deepEqual(fixture.scriptInjections, []);
+});
+
+test("snapshot debugger mode requires and captures an explicit screenshot without activation", async () => {
+  const fixture = createChromeFixture({
+    sendDebuggerCommand(_target, method) {
+      if (method === "Page.captureScreenshot") return Promise.resolve({ data: "snapshot-debugger-image" });
+      return Promise.resolve({});
+    }
+  });
+  const bridge = createConnectedBridge(fixture);
+
+  await assert.rejects(
+    () => bridge.captureSnapshot(2, undefined, { useDebugger: true }),
+    { code: "INVALID_MESSAGE" }
+  );
+
+  const snapshot = await bridge.captureSnapshot(2, undefined, { includeScreenshot: true, useDebugger: true });
+  assert.equal(snapshot.screenshot?.data, "data:image/png;base64,snapshot-debugger-image");
+  assert.deepEqual(fixture.tabUpdates, []);
+  assert.equal(fixture.windowFocused, null);
+  assert.deepEqual(fixture.capturedWindows, []);
 });
 
 test("preserves enriched snapshot metadata for links and fields", async () => {
@@ -4315,6 +4438,8 @@ function createChromeFixture(overrides = {}) {
   const ports = [];
   const connectedHostNames = [];
   const capturedWindows = [];
+  const tabUpdates = [];
+  let activeTabId = overrides.activeTabId ?? 1;
   const actions = [];
   const scriptInjections = [];
   const actionTitles = [];
@@ -4337,6 +4462,8 @@ function createChromeFixture(overrides = {}) {
     ports,
     connectedHostNames,
     capturedWindows,
+    tabUpdates,
+    activeTabId: () => activeTabId,
     actions,
     scriptInjections,
     actionTitles,
@@ -4366,20 +4493,28 @@ function createChromeFixture(overrides = {}) {
       tabs: {
         query(queryInfo) {
           if (overrides.queryTabs) return overrides.queryTabs(queryInfo);
-          return Promise.resolve([
-            chromeTab(1, "https://example.com/a", true),
-            chromeTab(2, "https://example.com/b", false)
-          ]);
+          const tabs = [
+            chromeTab(1, "https://example.com/a", activeTabId === 1),
+            chromeTab(2, "https://example.com/b", activeTabId === 2)
+          ];
+          return Promise.resolve(queryInfo.active === true ? tabs.filter((tab) => tab.active) : tabs);
         },
         get(tabId) {
           if (overrides.getTab) return overrides.getTab(tabId);
-          return Promise.resolve(chromeTab(tabId, `https://example.com/${tabId}`, tabId === 1));
+          return Promise.resolve(chromeTab(tabId, `https://example.com/${tabId}`, tabId === activeTabId));
         },
         create(properties) {
           return Promise.resolve(chromeTab(3, properties.url, properties.active ?? true));
         },
         update(tabId, properties) {
-          return Promise.resolve(chromeTab(tabId, properties.url ?? `https://example.com/${tabId}`, properties.active ?? false));
+          tabUpdates.push({ tabId, properties });
+          if (overrides.updateTab) return overrides.updateTab(tabId, properties);
+          if (properties.active === true) activeTabId = tabId;
+          return Promise.resolve(chromeTab(
+            tabId,
+            properties.url ?? `https://example.com/${tabId}`,
+            properties.active ?? activeTabId === tabId
+          ));
         },
         remove(tabId) {
           fixture.closedTabId = tabId;

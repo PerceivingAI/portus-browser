@@ -308,15 +308,6 @@ test("validates browser session, snapshot, and action shapes", () => {
   });
   assert.equal(session.browserName, "Chrome");
 
-  const screenshot = {
-    browserId: "br_001",
-    tabId: 1,
-    capturedAt: now,
-    mimeType: "image/png",
-    data: "data",
-    activatedTabBeforeCapture: false
-  };
-
   const snapshot = SnapshotSchema.parse({
     snapshotId: "snap_001",
     browserId: "br_001",
@@ -324,7 +315,6 @@ test("validates browser session, snapshot, and action shapes", () => {
     url: "https://example.com",
     title: "Example",
     viewport: { width: 1280, height: 720, deviceScaleFactor: 1 },
-    screenshot,
     visibleText: "Example",
     elements: [{
       elementId: "el_001",
@@ -352,6 +342,7 @@ test("validates browser session, snapshot, and action shapes", () => {
       maxElements: 10
     }
   });
+  assert.equal("screenshot" in snapshot, false);
   assert.equal(snapshot.elements[0].elementId, "el_001");
   assert.equal(snapshot.elements[0].frameId, 0);
   assert.equal(snapshot.elements[0].documentId, "doc_main");  assert.deepEqual(snapshot.elements[0].shadowPath, [

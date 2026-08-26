@@ -708,7 +708,11 @@ async function handleSnapshot(context: CliContext, parsed: ParsedArgs): Promise<
   if (tabId !== undefined) payload.tabId = tabId;
   const filter = readSnapshotFilter(parsed);
   if (filter !== undefined) payload.filter = filter;
-  if (hasFlag(parsed, "debugger")) payload.useDebugger = true;
+  const includeScreenshot = hasFlag(parsed, "screenshot");
+  const useDebugger = hasFlag(parsed, "debugger");
+  if (useDebugger && !includeScreenshot) throw usageError("snapshot --debugger requires --screenshot.");
+  if (includeScreenshot) payload.includeScreenshot = true;
+  if (useDebugger) payload.useDebugger = true;
   const result = SnapshotCommandResultSchema.parse(await context.broker.request("snapshot.capture", payload, context.timeoutMs));
   return {
     ok: true,
@@ -1457,12 +1461,13 @@ function renderTabTable(tabs: Tab[]): string {
 }
 
 function renderScreenshotTable(screenshot: ScreenshotResult): string {
-  return renderTable(["BROWSER_ID", "TAB_ID", "MIME_TYPE", "CAPTURED_AT", "ACTIVATED_TAB_BEFORE_CAPTURE"], [{
+  return renderTable(["BROWSER_ID", "TAB_ID", "MIME_TYPE", "CAPTURED_AT", "ACTIVATED_TAB_BEFORE_CAPTURE", "RESTORED_PREVIOUS_ACTIVE_TAB"], [{
     BROWSER_ID: screenshot.browserId,
     TAB_ID: String(screenshot.tabId),
     MIME_TYPE: screenshot.mimeType,
     CAPTURED_AT: screenshot.capturedAt,
-    ACTIVATED_TAB_BEFORE_CAPTURE: String(screenshot.activatedTabBeforeCapture)
+    ACTIVATED_TAB_BEFORE_CAPTURE: String(screenshot.activatedTabBeforeCapture),
+    RESTORED_PREVIOUS_ACTIVE_TAB: screenshot.restoredPreviousActiveTab === undefined ? "" : String(screenshot.restoredPreviousActiveTab)
   }]);
 }
 

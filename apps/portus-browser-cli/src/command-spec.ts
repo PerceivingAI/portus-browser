@@ -98,6 +98,7 @@ export const CLI_INVOCATIONS = [
     flags: brokerFlags(
       CLI_FLAGS.browser,
       CLI_FLAGS.tabId,
+      CLI_FLAGS.includeScreenshot,
       CLI_FLAGS.debugger,
       CLI_FLAGS.query,
       CLI_FLAGS.role,

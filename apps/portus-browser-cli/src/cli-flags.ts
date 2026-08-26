@@ -57,6 +57,7 @@ export const CLI_FLAGS = {
   id: { name: "id", kind: "string", repeatable: false },
   background: { name: "background", kind: "boolean", repeatable: false },
   debugger: { name: "debugger", kind: "boolean", repeatable: false },
+  includeScreenshot: { name: "screenshot", kind: "boolean", repeatable: false },
   json: { name: "json", kind: "boolean", repeatable: false },
   partial: { name: "partial", kind: "boolean", repeatable: false },
   dryRun: { name: "dry-run", kind: "boolean", repeatable: false },

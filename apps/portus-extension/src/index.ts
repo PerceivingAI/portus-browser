@@ -147,6 +147,11 @@ export interface ChromeWindow {
   incognito?: boolean;
 }
 
+interface SnapshotCaptureOptions {
+  includeScreenshot?: boolean;
+  useDebugger?: boolean;
+}
+
 interface DomExecutionTarget {
   frameId: number;
   documentId: string;
@@ -911,25 +916,44 @@ export class PortusExtensionBridge {
     const targetTab = tabId === undefined ? await this.getActiveTab() : await this.getChromeTab(tabId);
     this.ensureTabPolicyAllowed(targetTab);
     const targetTabId = requireTabId(targetTab);
+
+    if (useDebugger) {
+      const data = await this.captureDebuggerScreenshotData(targetTabId);
+      return ScreenshotResultSchema.parse({
+        browserId: this.requireBrowserId(),
+        tabId: targetTabId,
+        capturedAt: this.now().toISOString(),
+        mimeType: inferImageMimeType(data),
+        data,
+        activatedTabBeforeCapture: false
+      });
+    }
+
     const previousActiveTab = await this.getActiveTabForWindow(targetTab.windowId);
     const previousActiveTabId = previousActiveTab?.id;
-    const activatedTabBeforeCapture = previousActiveTabId !== undefined && previousActiveTabId !== targetTabId;
+    const activatedTabBeforeCapture = previousActiveTabId !== targetTabId;
+    let restoredPreviousActiveTab: boolean | undefined;
 
-    if (activatedTabBeforeCapture) await this.activateTab(targetTabId);
+    if (activatedTabBeforeCapture) await this.setTabActiveForCapture(targetTabId);
 
     let data: string;
-    if (useDebugger) {
-      data = await this.captureDebuggerScreenshotData(targetTabId);
-    } else {
+    try {
       const capturePromise = mapChromeAccessOperation("capture visible tab", promisifyChromeCall<string>((done) => {
         const result = this.chromeApi.tabs.captureVisibleTab(targetTab.windowId, { format: "png" });
         done(result as Promise<string> | string | undefined);
       }));
-
       data = await Promise.race([
         capturePromise,
         new Promise<string>((_, reject) => setTimeout(() => reject(new Error("Timeout capturing visible tab.")), 4000))
       ]);
+    } finally {
+      if (activatedTabBeforeCapture && previousActiveTabId !== undefined) {
+        restoredPreviousActiveTab = await this.restorePreviousActiveTabAfterCapture(
+          targetTab.windowId,
+          targetTabId,
+          previousActiveTabId
+        );
+      }
     }
 
     const input: Record<string, unknown> = {
@@ -941,6 +965,7 @@ export class PortusExtensionBridge {
       activatedTabBeforeCapture
     };
     if (activatedTabBeforeCapture && previousActiveTabId !== undefined) input.previousActiveTabId = previousActiveTabId;
+    if (restoredPreviousActiveTab !== undefined) input.restoredPreviousActiveTab = restoredPreviousActiveTab;
     return ScreenshotResultSchema.parse(input);
   }
 
@@ -954,24 +979,20 @@ export class PortusExtensionBridge {
     }, "debugger-screenshot");
   }
 
-  async captureSnapshot(tabId?: number, filter?: SnapshotFilter, useDebugger?: boolean): Promise<Snapshot> {
+  async captureSnapshot(tabId?: number, filter?: SnapshotFilter, options: SnapshotCaptureOptions = {}): Promise<Snapshot> {
     await this.ready;
+    if (options.useDebugger === true && options.includeScreenshot !== true) {
+      throw createPortusError({
+        code: "INVALID_MESSAGE",
+        message: "Debugger screenshot mode requires includeScreenshot=true."
+      });
+    }
     const targetTab = tabId === undefined ? await this.getActiveTab() : await this.getChromeTab(tabId);
     const targetTabId = requireTabId(targetTab);
     this.ensureTabPolicyAllowed(targetTab);
-    let screenshot: ScreenshotResult;
-    try {
-      screenshot = await this.captureScreenshot(targetTabId, useDebugger);
-    } catch (error) {
-      screenshot = {
-        browserId: this.requireBrowserId(),
-        tabId: targetTabId,
-        capturedAt: this.now().toISOString(),
-        mimeType: "image/png",
-        data: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
-        activatedTabBeforeCapture: false
-      };
-    }
+    const screenshot = options.includeScreenshot === true
+      ? await this.captureScreenshot(targetTabId, options.useDebugger)
+      : undefined;
     const page = await this.executeSnapshotScript(targetTabId, filter);
     const normalCandidates = readElementCandidates(page.elements);
     const requestedLimit = Math.min(filter?.maxElements ?? SNAPSHOT_COLLECTION_LIMIT, SNAPSHOT_COLLECTION_LIMIT);
@@ -997,7 +1018,7 @@ export class PortusExtensionBridge {
       url: readString(page, "url"),
       title: readString(page, "title"),
       viewport: readViewport(page.viewport),
-      screenshot,
+      ...(screenshot ? { screenshot } : {}),
       visibleText: typeof page.visibleText === "string" ? page.visibleText : "",
       elements: [...normalCandidates, ...supplementalCandidates],
       capturedAt: this.now().toISOString(),
@@ -2183,7 +2204,11 @@ export class PortusExtensionBridge {
       case "portus.screenshot.capture":
         return { screenshot: await this.captureScreenshot(readOptionalNumber(message, "tabId")) };
       case "portus.snapshot.capture":
-        return { snapshot: await this.captureSnapshot(readOptionalNumber(message, "tabId"), readOptionalSnapshotFilter(message)) };
+        return { snapshot: await this.captureSnapshot(
+          readOptionalNumber(message, "tabId"),
+          readOptionalSnapshotFilter(message),
+          readSnapshotCaptureOptions(message)
+        ) };
       case "portus.policy.get":
         return { policy: this.getPolicyPreferences() };
       case "portus.policy.mode.set": {
@@ -2541,6 +2566,9 @@ export class PortusExtensionBridge {
   private async dispatchNativeRequest(request: RequestEnvelope): Promise<Record<string, unknown>> {
     const commandType = canonicalCommandType(request.type);
     if (commandType) this.ensureCommandPolicyAllows(commandType);
+    if (request.type === "snapshot.capture" && readOptionalBoolean(request.payload, "includeScreenshot") === true) {
+      this.ensureCommandPolicyAllows("screenshot.capture");
+    }
 
     switch (request.type) {
       case "tab.list":
@@ -2571,7 +2599,11 @@ export class PortusExtensionBridge {
       case "screenshot.capture":
         return { screenshot: await this.captureScreenshot(readOptionalNumber(request.payload, "tabId"), readOptionalBoolean(request.payload, "useDebugger")) };
       case "snapshot.capture":
-        return { snapshot: await this.captureSnapshot(readOptionalNumber(request.payload, "tabId"), readOptionalSnapshotFilter(request.payload), readOptionalBoolean(request.payload, "useDebugger")) };
+        return { snapshot: await this.captureSnapshot(
+          readOptionalNumber(request.payload, "tabId"),
+          readOptionalSnapshotFilter(request.payload),
+          readSnapshotCaptureOptions(request.payload)
+        ) };
       case "page.wait":
         return { wait: await this.waitForPage({ ...request.payload, timeoutMs: request.timeoutMs }) };
       case "action.click":
@@ -3038,6 +3070,28 @@ export class PortusExtensionBridge {
       });
     }
     return tab;
+  }
+
+  private async setTabActiveForCapture(tabId: number): Promise<void> {
+    await mapChromeTabOperation(tabId, promisifyChromeCall<ChromeTab>((done) => {
+      const result = this.chromeApi.tabs.update(tabId, { active: true });
+      done(result as Promise<ChromeTab> | ChromeTab | undefined);
+    }));
+  }
+
+  private async restorePreviousActiveTabAfterCapture(
+    windowId: number,
+    targetTabId: number,
+    previousActiveTabId: number
+  ): Promise<boolean> {
+    try {
+      const currentActiveTab = await this.getActiveTabForWindow(windowId);
+      if (currentActiveTab?.id !== targetTabId) return false;
+      await this.setTabActiveForCapture(previousActiveTabId);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private async getActiveTabForWindow(windowId: number): Promise<ChromeTab | undefined> {
@@ -4510,6 +4564,15 @@ function readFillFormFields(record: Record<string, unknown>): Array<{ elementId:
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function readSnapshotCaptureOptions(record: Record<string, unknown>): SnapshotCaptureOptions {
+  const options: SnapshotCaptureOptions = {};
+  const includeScreenshot = readOptionalBoolean(record, "includeScreenshot");
+  const useDebugger = readOptionalBoolean(record, "useDebugger");
+  if (includeScreenshot !== undefined) options.includeScreenshot = includeScreenshot;
+  if (useDebugger !== undefined) options.useDebugger = useDebugger;
+  return options;
 }
 
 function readOptionalSnapshotFilter(record: Record<string, unknown>): SnapshotFilter | undefined {

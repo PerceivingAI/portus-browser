@@ -643,7 +643,8 @@ export const ScreenshotResultSchema = z.object({
   mimeType: z.string().min(1),
   data: z.string(),
   activatedTabBeforeCapture: z.boolean(),
-  previousActiveTabId: TabIdSchema.optional()
+  previousActiveTabId: TabIdSchema.optional(),
+  restoredPreviousActiveTab: z.boolean().optional()
 }).strict();
 
 export const ShadowRootTypeSchema = z.enum(["open", "closed"]);
@@ -690,7 +691,7 @@ export const SnapshotSchema = z.object({
   url: z.string(),
   title: z.string(),
   viewport: ViewportSchema,
-  screenshot: ScreenshotResultSchema,
+  screenshot: ScreenshotResultSchema.optional(),
   visibleText: z.string(),
   elements: z.array(SnapshotElementSchema),
   capturedAt: IsoDateTimeSchema,

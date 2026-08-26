@@ -1488,6 +1488,13 @@ export class BrokerCore {
     const record = this.resolveTargetSession(payload.browserId);
     const commandType = CommandTypeSchema.parse(request.type);
     this.enforceCommandPolicy(commandType, record);
+    const snapshotIncludesScreenshot = request.type === "snapshot.capture" && payload.includeScreenshot === true;
+    if (snapshotIncludesScreenshot) {
+      this.enforceCommandPolicy(CommandTypeSchema.parse("screenshot.capture"), record);
+      if (!record.session.capabilities.includes("screenshots" as never)) {
+        throw brokerError("CAPABILITY_UNAVAILABLE", "Browser session does not support screenshots.", false);
+      }
+    }
     const requiredCapability = REQUIRED_CAPABILITY_BY_REQUEST_TYPE.get(request.type);
     if (requiredCapability && !record.session.capabilities.includes(requiredCapability as never)) {
       throw brokerError("CAPABILITY_UNAVAILABLE", `Browser session does not support ${requiredCapability}.`, false);

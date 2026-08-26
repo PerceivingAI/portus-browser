@@ -344,6 +344,47 @@ test("routes commands only to bridge-connected sessions with required capabiliti
   assert.equal(afterDisconnect.error.code, "BROWSER_SESSION_UNAVAILABLE");
 });
 
+test("snapshot embedded screenshots require screenshot policy and capability", async () => {
+  const routed = [];
+  const bridgeClient = {
+    async sendCommand(command) {
+      routed.push(command);
+      return { snapshot: {} };
+    }
+  };
+  const broker = createBroker({ brokerToken: TEST_BROKER_TOKEN, now: fixedClock() });
+
+  const policyRegister = await broker.handleRequest(request("req_snapshot_policy_register", "bridge.register", registrationWithCommandPolicy({
+    "snapshot.capture": true,
+    "screenshot.capture": false
+  })), { bridgeClient });
+  const policyBlocked = await broker.handleRequest(request("req_snapshot_policy", "snapshot.capture", {
+    browserId: policyRegister.result.browserId,
+    tabId: 1,
+    includeScreenshot: true
+  }));
+  assert.equal(policyBlocked.ok, false);
+  assert.equal(policyBlocked.error.code, "COMMAND_DISABLED_BY_POLICY");
+  assert.equal(routed.length, 0);
+
+  const capabilityBroker = createBroker({ brokerToken: TEST_BROKER_TOKEN, now: fixedClock() });
+  const capabilityRegister = await capabilityBroker.handleRequest(request("req_snapshot_cap_register", "bridge.register", {
+    ...registrationWithCommandPolicy({
+      "snapshot.capture": true,
+      "screenshot.capture": true
+    }),
+    capabilities: ["tabs", "events", "snapshots", "actions", "policy"]
+  }), { bridgeClient });
+  const capabilityBlocked = await capabilityBroker.handleRequest(request("req_snapshot_capability", "snapshot.capture", {
+    browserId: capabilityRegister.result.browserId,
+    tabId: 1,
+    includeScreenshot: true
+  }));
+  assert.equal(capabilityBlocked.ok, false);
+  assert.equal(capabilityBlocked.error.code, "CAPABILITY_UNAVAILABLE");
+  assert.equal(routed.length, 0);
+});
+
 test("terminal-shaped traffic does not register or expose broker browser sessions", async () => {
   const broker = createBroker({ brokerToken: TEST_BROKER_TOKEN, now: fixedClock() });
 

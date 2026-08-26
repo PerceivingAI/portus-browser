@@ -149,11 +149,20 @@ portus-browser snapshot --browser 1 --tab-id <tabId> --role button --query "dism
 portus-browser snapshot --browser 1 --tab-id <tabId> --interactive-only --max-elements 100 --json
 ```
 
-Use screenshots for visual ambiguity:
+Snapshots are structural by default and do not include image data or activate/focus browser tabs. Use screenshots only when visual information is needed:
 
 ```powershell
 portus-browser screenshot --browser 1 --tab-id <tabId> --json
 ```
+
+When one response needs both structural targeting data and an image, request the image explicitly on the snapshot:
+
+```powershell
+portus-browser snapshot --browser 1 --tab-id <tabId> --screenshot --json
+portus-browser snapshot --browser 1 --tab-id <tabId> --screenshot --debugger --json
+```
+
+`--debugger` on `snapshot` is valid only with `--screenshot`; it selects the screenshot backend and does not control structural Shadow DOM collection. Normal screenshots of an inactive tab may temporarily activate that tab inside its existing window, but Portus does not focus the window and restores the previous active tab when it is still safe to do so. Debugger screenshots target the tab directly and do not require activation.
 
 Rules:
 

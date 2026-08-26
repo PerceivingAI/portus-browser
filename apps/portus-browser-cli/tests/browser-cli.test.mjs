@@ -260,6 +260,45 @@ test("snapshot sends optional filters", async () => {
   assert.equal(output.snapshot.elements[0].elementId, "el_000001");
 });
 
+test("snapshot screenshot capture is explicit and debugger mode requires it", async () => {
+  const withScreenshot = {
+    ...snapshot("br_000001", 11),
+    screenshot: screenshot("br_000001", 11, false)
+  };
+  const broker = createMockBroker({
+    "snapshot.capture": { snapshot: withScreenshot }
+  });
+
+  const invalid = await runPortusBrowserCli([
+    "snapshot",
+    "--browser",
+    "br_000001",
+    "--tab-id",
+    "11",
+    "--debugger",
+    "--json"
+  ], { brokerClient: broker });
+  assert.equal(invalid.exitCode, 2);
+  assert.match(invalid.stderr, /requires --screenshot/i);
+  assert.equal(broker.requests.length, 0);
+
+  const explicit = await runPortusBrowserCli([
+    "snapshot",
+    "--browser",
+    "br_000001",
+    "--tab-id",
+    "11",
+    "--screenshot",
+    "--debugger",
+    "--json"
+  ], { brokerClient: broker });
+
+  assert.equal(explicit.exitCode, 0);
+  assert.equal(broker.requests[0].payload.includeScreenshot, true);
+  assert.equal(broker.requests[0].payload.useDebugger, true);
+  assert.equal(JSON.parse(explicit.stdout).snapshot.screenshot.data, "data:image/png;base64,abc");
+});
+
 test("click, hover, drag, fill-form, and type send DOM action payloads", async () => {
   const broker = createMockBroker({
     "action.click": { action: actionResult("click") },
@@ -1120,12 +1159,14 @@ function screenshot(browserId, tabId, activatedTabBeforeCapture) {
     data: "data:image/png;base64,abc",
     activatedTabBeforeCapture
   };
-  if (activatedTabBeforeCapture) result.previousActiveTabId = 10;
+  if (activatedTabBeforeCapture) {
+    result.previousActiveTabId = 10;
+    result.restoredPreviousActiveTab = true;
+  }
   return result;
 }
 
 function snapshot(browserId, tabId) {
-  const shot = screenshot(browserId, tabId, false);
   return {
     snapshotId: "snap_000001",
     browserId,
@@ -1133,7 +1174,6 @@ function snapshot(browserId, tabId) {
     url: "https://example.com/",
     title: "Example",
     viewport: { width: 1200, height: 800, deviceScaleFactor: 1 },
-    screenshot: shot,
     visibleText: "Submit",
     capturedAt: "2026-04-28T00:00:00.000Z",
     elements: [

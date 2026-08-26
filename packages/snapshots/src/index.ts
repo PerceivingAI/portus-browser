@@ -65,7 +65,7 @@ export interface BuildSnapshotInput {
     height: number;
     deviceScaleFactor: number;
   };
-  screenshot: ScreenshotResult;
+  screenshot?: ScreenshotResult;
   visibleText: string;
   elements: SnapshotElementCandidate[];
   capturedAt: string;
@@ -99,11 +99,11 @@ export function buildSnapshot(input: BuildSnapshotInput): Snapshot {
     url: input.url,
     title: input.title,
     viewport: input.viewport,
-    screenshot: ScreenshotResultSchema.parse(input.screenshot),
     visibleText: input.visibleText,
     elements,
     capturedAt: input.capturedAt
   };
+  if (input.screenshot !== undefined) snapshotInput.screenshot = ScreenshotResultSchema.parse(input.screenshot);
   if (input.cleanedDom !== undefined) snapshotInput.cleanedDom = input.cleanedDom;
   if (input.candidateCount !== undefined) snapshotInput.candidateCount = input.candidateCount;
   if (input.matchedElementCount !== undefined) snapshotInput.matchedElementCount = input.matchedElementCount;

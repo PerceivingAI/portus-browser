@@ -2,15 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildSnapshot, createElementId, createSnapshotId, filterSnapshot, findSnapshotElement, isSnapshotForTarget } from "../dist/index.js";
 
-test("builds shallow snapshots with scoped element ids", () => {
-  const screenshot = {
-    browserId: "br_000001",
-    tabId: 7,
-    capturedAt: "2026-04-28T00:00:00.000Z",
-    mimeType: "image/png",
-    data: "data:image/png;base64,abc",
-    activatedTabBeforeCapture: false
-  };
+test("builds structural snapshots without requiring screenshots", () => {
   const snapshot = buildSnapshot({
     snapshotId: "snap_000123",
     browserId: "br_000001",
@@ -18,7 +10,6 @@ test("builds shallow snapshots with scoped element ids", () => {
     url: "https://example.com/",
     title: "Example",
     viewport: { width: 1200, height: 800, deviceScaleFactor: 1 },
-    screenshot,
     visibleText: "Submit Email",
     capturedAt: "2026-04-28T00:00:00.000Z",
     candidateCount: 180,
@@ -44,6 +35,7 @@ test("builds shallow snapshots with scoped element ids", () => {
   });
 
   assert.equal(snapshot.snapshotId, "snap_000123");
+  assert.equal("screenshot" in snapshot, false);
   assert.equal(snapshot.candidateCount, 180);
   assert.equal(snapshot.matchedElementCount, 1);
   assert.equal(snapshot.truncated, false);
