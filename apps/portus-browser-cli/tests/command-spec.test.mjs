@@ -5,7 +5,8 @@ import {
   CLI_INHERITED_GLOBAL_FLAGS,
   CLI_INVOCATIONS,
   cliInvocationPath,
-  resolveCliInvocation
+  resolveCliInvocation,
+  validateCliInvocationFlags
 } from "../dist/command-spec.js";
 import { CLI_SURFACE_BASELINE } from "../dist/cli-surface.js";
 import { runPortusBrowserCli } from "../dist/index.js";
@@ -106,14 +107,74 @@ test("CLI-4 rejects unknown nested invocations before Broker dispatch", async ()
   }
 });
 
-test("CLI-4 does not enforce command-specific flag legality before CLI-5", async () => {
+test("CLI-5 validates flags against the exact resolved invocation", () => {
+  const browsers = resolveCliInvocation("browsers", []);
+  assert.equal(browsers.ok, true);
+  assert.equal(validateCliInvocationFlags(browsers.invocation, ["json"]), undefined);
+  assert.equal(validateCliInvocationFlags(browsers.invocation, ["output", "timeout"]), undefined);
+  assert.equal(
+    validateCliInvocationFlags(browsers.invocation, ["background"]),
+    "--background is not valid for browsers."
+  );
+
+  const networkGet = resolveCliInvocation("network", ["get", "req_1"]);
+  assert.equal(networkGet.ok, true);
+  assert.equal(validateCliInvocationFlags(networkGet.invocation, ["browser", "tab-id", "quiet"]), undefined);
+  assert.equal(
+    validateCliInvocationFlags(networkGet.invocation, ["limit"]),
+    "--limit is not valid for network get."
+  );
+});
+
+test("CLI-5 rejects cross-command flags before Broker dispatch", async () => {
+  const invalidInvocations = [
+    ["browsers", "--background", "--json"],
+    ["open", "example.com", "--limit", "5", "--json"],
+    ["screenshot", "--browser", "br_000001", "--limit", "5", "--json"],
+    ["close-tab", "--browser", "br_000001", "--tab-id", "22", "--yes", "--json"],
+    ["broker", "status", "--browser", "br_000001", "--json"],
+    ["console", "clear", "--browser", "br_000001", "--tab-id", "11", "--limit", "5", "--json"],
+    ["network", "get", "req_1", "--browser", "br_000001", "--tab-id", "11", "--limit", "5", "--json"],
+    ["policy", "allow", "list", "--browser", "br_000001", "--reason", "unused", "--json"],
+    ["recipes", "export", "recipe-1", "--content", "unused", "--output", "out.json", "--json"]
+  ];
+
+  for (const argv of invalidInvocations) {
+    const broker = createRecordingBroker({});
+    const result = await runPortusBrowserCli(argv, { brokerClient: broker });
+    assert.equal(result.exitCode, 2, argv.join(" "));
+    const error = JSON.parse(result.stderr).error;
+    assert.match(error.message, /is not valid for/, argv.join(" "));
+    assert.deepEqual(broker.requests, [], argv.join(" "));
+  }
+});
+
+test("CLI-5 keeps global presentation flags valid across invocation types", async () => {
   const broker = createRecordingBroker({
     "browser.list": { browsers: [] }
   });
-  const result = await runPortusBrowserCli(["browsers", "--background", "--json"], { brokerClient: broker });
+  const result = await runPortusBrowserCli(["browsers", "--quiet"], { brokerClient: broker });
 
   assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout, "");
   assert.deepEqual(broker.requests.map((request) => request.type), ["browser.list"]);
+});
+
+test("CLI-5 rejects meaningless timeout on local recipe operations before filesystem work", async () => {
+  const { mkdtemp, readdir } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const directory = await mkdtemp(join(tmpdir(), "portus-cli5-no-side-effect-"));
+  const broker = createRecordingBroker({});
+
+  const result = await runPortusBrowserCli([
+    "recipes", "create", "blocked", "--content", "must not be written", "--directory", directory, "--timeout", "1", "--json"
+  ], { brokerClient: broker });
+
+  assert.equal(result.exitCode, 2);
+  assert.match(JSON.parse(result.stderr).error.message, /--timeout is not valid for recipes create/);
+  assert.deepEqual(await readdir(directory), []);
+  assert.deepEqual(broker.requests, []);
 });
 
 function createRecordingBroker(results) {

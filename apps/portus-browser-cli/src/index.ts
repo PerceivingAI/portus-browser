@@ -78,7 +78,7 @@ import {
   getCliFlagSpec,
   type CliFlagSpec
 } from "./cli-flags.js";
-import { resolveCliInvocation } from "./command-spec.js";
+import { resolveCliInvocation, validateCliInvocationFlags } from "./command-spec.js";
 import {
   deserializeTransportFrame,
   resolveBrokerEndpoint,
@@ -451,6 +451,8 @@ export async function runPortusBrowserCli(
     const resolution = resolveCliInvocation(parsed.command, parsed.positionals);
     if (!resolution.ok) throw usageError(resolution.message);
     const invocation = resolution.invocation;
+    const flagValidationError = validateCliInvocationFlags(invocation, parsed.flags.keys());
+    if (flagValidationError) throw usageError(flagValidationError);
     const output = resolveOutputMode(parsed, config);
     outputMode = output;
     const timeoutMs = readOptionalPositiveIntegerFlag(parsed, CLI_TIMEOUT_FLAG.name) ?? config.commands.timeoutMs;

@@ -235,6 +235,22 @@ export function cliInvocationPath(spec: CliInvocationSpec): string {
   return spec.path.join(" ");
 }
 
+export function validateCliInvocationFlags(
+  invocation: ResolvedCliInvocation,
+  providedFlagNames: Iterable<string>
+): string | undefined {
+  const allowed = new Set<string>([
+    ...CLI_INHERITED_GLOBAL_FLAGS.map((flag) => flag.name),
+    ...invocation.spec.flags.map((flag) => flag.name)
+  ]);
+  const invocationPath = cliInvocationPath(invocation.spec);
+
+  for (const name of providedFlagNames) {
+    if (!allowed.has(name)) return `--${name} is not valid for ${invocationPath}.`;
+  }
+  return undefined;
+}
+
 function unresolvedInvocationMessage(command: string, positionals: readonly string[]): string {
   const first = positionals[0];
   const second = positionals[1];

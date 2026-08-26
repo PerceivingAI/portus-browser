@@ -181,7 +181,7 @@ test("activate-tab and close-tab send tab commands", async () => {
   });
 
   const activate = await runPortusBrowserCli(["activate-tab", "--browser", "br_000001", "--tab-id", "22", "--json"], { brokerClient: broker });
-  const close = await runPortusBrowserCli(["close-tab", "--browser", "br_000001", "--tab-id", "22", "--yes", "--json"], { brokerClient: broker });
+  const close = await runPortusBrowserCli(["close-tab", "--browser", "br_000001", "--tab-id", "22", "--json"], { brokerClient: broker });
 
   assert.equal(activate.exitCode, 0);
   assert.equal(close.exitCode, 0);
