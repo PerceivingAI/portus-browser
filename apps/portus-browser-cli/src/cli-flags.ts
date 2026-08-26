@@ -10,11 +10,11 @@ export interface CliFlagSpec {
 }
 
 /**
- * CLI-1 primitive flag registry.
+ * Canonical primitive flag registry.
  *
- * Each CLI flag spelling is defined exactly once here. Later declarative CLI
- * phases will reference these reusable definitions when declaring which flags
- * are legal for a particular command/subcommand invocation.
+ * Each CLI flag spelling is defined exactly once here. Declarative invocation
+ * specs reference these definitions for legality, primitive validation,
+ * repeatability, and generated usage.
  */
 export const CLI_FLAGS = {
   output: { name: "output", kind: "string", repeatable: false },

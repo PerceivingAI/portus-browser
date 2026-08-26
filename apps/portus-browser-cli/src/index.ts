@@ -76,13 +76,15 @@ import {
   getCliFlagSpec
 } from "./cli-flags.js";
 import {
+  cliInvocationOutputFlagRole,
   cliInvocationPath,
   renderCliInvocationUsage,
   resolveCliInvocation,
   validateCliInvocationFlags,
   validateCliInvocationPositionals,
   validateCliInvocationPrimitiveValues,
-  validateCliInvocationRepeatability
+  validateCliInvocationRepeatability,
+  type CliInvocationSpec
 } from "./command-spec.js";
 import {
   deserializeTransportFrame,
@@ -133,6 +135,28 @@ interface CliContext {
 
 type CliPayloadHandler = (context: CliContext, parsed: ParsedArgs) => Promise<Record<string, unknown>>;
 type CliDispatchHandler = (context: CliContext, parsed: ParsedArgs) => Promise<CliCommandResult>;
+
+type DialogCliAction = "accept" | "dismiss";
+type ConsoleCliAction = "list" | "clear";
+type NetworkCliAction = "list" | "get";
+type BrokerCliAction = "status" | "stop";
+type NavigationPolicyArea = "allow" | "block";
+type NavigationPolicyAction = "list" | "add" | "remove";
+type RetentionPolicyAction = "get" | "set";
+type RecipeCliAction =
+  | "list"
+  | "create"
+  | "show"
+  | "search"
+  | "use"
+  | "resolve"
+  | "update"
+  | "rename"
+  | "delete"
+  | "validate"
+  | "import"
+  | "export"
+  | "duplicate";
 
 const BrowserListResultSchema = z.object({
   browsers: z.array(BrowserSessionSchema)
@@ -460,6 +484,8 @@ export async function runPortusBrowserCli(
     if (!resolution.ok) throw usageError(resolution.message);
     const invocation = resolution.invocation;
     const invocationUsage = renderCliInvocationUsage(invocation.spec);
+    const output = resolveOutputMode(parsed, config, invocation.spec);
+    outputMode = output;
     const flagValidationError = validateCliInvocationFlags(invocation, parsed.flags.keys());
     if (flagValidationError) throw usageError(flagValidationError, invocationUsage);
     const repeatabilityValidationError = validateCliInvocationRepeatability(invocation, parsed.flags);
@@ -468,8 +494,6 @@ export async function runPortusBrowserCli(
     if (positionalValidationError) throw usageError(positionalValidationError, invocationUsage);
     const primitiveValidationError = validateCliInvocationPrimitiveValues(invocation, parsed.flags);
     if (primitiveValidationError) throw usageError(primitiveValidationError, invocationUsage);
-    const output = resolveOutputMode(parsed, config);
-    outputMode = output;
     const timeoutMs = readOptionalIntegerFlag(parsed, CLI_TIMEOUT_FLAG.name) ?? config.commands.timeoutMs;
     broker = options.brokerClient ?? createDefaultBrokerClient(config);
     const context: CliContext = {
@@ -525,40 +549,40 @@ const CLI_HANDLERS = {
   "wait": outputHandler(handleWait),
   "watch": outputHandler(handleWatch, "quiet"),
 
-  "dialog accept": outputHandler(handleDialog),
-  "dialog dismiss": outputHandler(handleDialog),
-  "console list": outputHandler(handleConsole),
-  "console clear": outputHandler(handleConsole),
-  "network list": outputHandler(handleNetwork),
-  "network get": outputHandler(handleNetwork),
+  "dialog accept": outputHandler((context, parsed) => handleDialog(context, parsed, "accept")),
+  "dialog dismiss": outputHandler((context, parsed) => handleDialog(context, parsed, "dismiss")),
+  "console list": outputHandler((context, parsed) => handleConsole(context, parsed, "list")),
+  "console clear": outputHandler((context, parsed) => handleConsole(context, parsed, "clear")),
+  "network list": outputHandler((context, parsed) => handleNetwork(context, parsed, "list")),
+  "network get": outputHandler((context, parsed) => handleNetwork(context, parsed, "get")),
   "events recent": outputHandler(handleEvents),
   "session steps": outputHandler(handleSession),
   "bridge disconnect": outputHandler(handleBridge),
-  "broker status": outputHandler(handleBroker),
-  "broker stop": outputHandler(handleBroker),
+  "broker status": outputHandler((context, parsed) => handleBroker(context, parsed, "status")),
+  "broker stop": outputHandler((context, parsed) => handleBroker(context, parsed, "stop")),
 
-  "policy allow list": outputHandler(handlePolicy),
-  "policy allow add": outputHandler(handlePolicy),
-  "policy allow remove": outputHandler(handlePolicy),
-  "policy block list": outputHandler(handlePolicy),
-  "policy block add": outputHandler(handlePolicy),
-  "policy block remove": outputHandler(handlePolicy),
-  "policy retention get": outputHandler(handlePolicy),
-  "policy retention set": outputHandler(handlePolicy),
+  "policy allow list": outputHandler((context, parsed) => handleNavigationPolicy(context, parsed, "allow", "list")),
+  "policy allow add": outputHandler((context, parsed) => handleNavigationPolicy(context, parsed, "allow", "add")),
+  "policy allow remove": outputHandler((context, parsed) => handleNavigationPolicy(context, parsed, "allow", "remove")),
+  "policy block list": outputHandler((context, parsed) => handleNavigationPolicy(context, parsed, "block", "list")),
+  "policy block add": outputHandler((context, parsed) => handleNavigationPolicy(context, parsed, "block", "add")),
+  "policy block remove": outputHandler((context, parsed) => handleNavigationPolicy(context, parsed, "block", "remove")),
+  "policy retention get": outputHandler((context, parsed) => handleRetentionPolicy(context, parsed, "get")),
+  "policy retention set": outputHandler((context, parsed) => handleRetentionPolicy(context, parsed, "set")),
 
-  "recipes list": outputHandler(handleRecipes),
-  "recipes create": outputHandler(handleRecipes),
-  "recipes show": outputHandler(handleRecipes),
-  "recipes search": outputHandler(handleRecipes),
-  "recipes use": outputHandler(handleRecipes),
-  "recipes resolve": outputHandler(handleRecipes),
-  "recipes update": outputHandler(handleRecipes),
-  "recipes rename": outputHandler(handleRecipes),
-  "recipes delete": outputHandler(handleRecipes),
-  "recipes validate": outputHandler(handleRecipes),
-  "recipes import": outputHandler(handleRecipes),
-  "recipes export": outputHandler(handleRecipes),
-  "recipes duplicate": outputHandler(handleRecipes)
+  "recipes list": outputHandler((context, parsed) => handleRecipes(context, parsed, "list")),
+  "recipes create": outputHandler((context, parsed) => handleRecipes(context, parsed, "create")),
+  "recipes show": outputHandler((context, parsed) => handleRecipes(context, parsed, "show")),
+  "recipes search": outputHandler((context, parsed) => handleRecipes(context, parsed, "search")),
+  "recipes use": outputHandler((context, parsed) => handleRecipes(context, parsed, "use")),
+  "recipes resolve": outputHandler((context, parsed) => handleRecipes(context, parsed, "resolve")),
+  "recipes update": outputHandler((context, parsed) => handleRecipes(context, parsed, "update")),
+  "recipes rename": outputHandler((context, parsed) => handleRecipes(context, parsed, "rename")),
+  "recipes delete": outputHandler((context, parsed) => handleRecipes(context, parsed, "delete")),
+  "recipes validate": outputHandler((context, parsed) => handleRecipes(context, parsed, "validate")),
+  "recipes import": outputHandler((context, parsed) => handleRecipes(context, parsed, "import")),
+  "recipes export": outputHandler((context, parsed) => handleRecipes(context, parsed, "export")),
+  "recipes duplicate": outputHandler((context, parsed) => handleRecipes(context, parsed, "duplicate"))
 } satisfies Record<string, CliDispatchHandler>;
 
 export const CLI_HANDLER_PATHS: readonly string[] = Object.freeze(Object.keys(CLI_HANDLERS));
@@ -690,65 +714,59 @@ async function handleSnapshot(context: CliContext, parsed: ParsedArgs): Promise<
 }
 
 
-async function handlePolicy(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
-  const area = parsed.positionals[0];
-  const action = parsed.positionals[1];
-
+async function handleNavigationPolicy(
+  context: CliContext,
+  parsed: ParsedArgs,
+  area: NavigationPolicyArea,
+  action: NavigationPolicyAction
+): Promise<Record<string, unknown>> {
   const browserId = await resolveRequiredBrowser(context, parsed);
-
-  if (area === "allow" || area === "block") {
-    if (action === "list") {
-      const result = PolicyResultSchema.parse(await context.broker.request("policy.get", { browserId }, context.timeoutMs));
-      return {
-        ok: true,
-        policy: result.policy,
-        entries: area === "allow" ? result.policy.allowedNavigationRules : result.policy.blockedNavigationRules
-      };
-    }
-
-    if (action === "add" || action === "remove") {
-      const rule = readNavigationRuleFlags(parsed);
-      const payload: Record<string, unknown> = {
-        browserId,
-        ...rule
-      };
-      const reason = readOptionalStringFlag(parsed, "reason");
-      if (reason && action === "add") payload.reason = reason;
-      const result = PolicyResultSchema.parse(await context.broker.request(`policy.${area}.${action}`, payload, context.timeoutMs));
-      return {
-        ok: true,
-        policy: result.policy,
-        entries: area === "allow" ? result.policy.allowedNavigationRules : result.policy.blockedNavigationRules
-      };
-    }
-
-    throw usageError(`Unknown policy ${area} action: ${action}.`);
+  if (action === "list") {
+    const result = PolicyResultSchema.parse(await context.broker.request("policy.get", { browserId }, context.timeoutMs));
+    return {
+      ok: true,
+      policy: result.policy,
+      entries: area === "allow" ? result.policy.allowedNavigationRules : result.policy.blockedNavigationRules
+    };
   }
 
-  if (area === "retention") {
-    if (action === "get") {
-      const result = PolicyResultSchema.parse(await context.broker.request("policy.get", { browserId }, context.timeoutMs));
-      return {
-        ok: true,
-        policy: result.policy,
-        retention: result.policy.sessionStepRetentionLimit
-      };
-    }
+  const rule = readNavigationRuleFlags(parsed);
+  const payload: Record<string, unknown> = {
+    browserId,
+    ...rule
+  };
+  const reason = readOptionalStringFlag(parsed, "reason");
+  if (reason && action === "add") payload.reason = reason;
+  const result = PolicyResultSchema.parse(await context.broker.request(`policy.${area}.${action}`, payload, context.timeoutMs));
+  return {
+    ok: true,
+    policy: result.policy,
+    entries: area === "allow" ? result.policy.allowedNavigationRules : result.policy.blockedNavigationRules
+  };
+}
 
-    if (action === "set") {
-      const limit = Number(parsed.positionals[2]);
-      const result = PolicyResultSchema.parse(await context.broker.request("policy.retention.set", { browserId, limit }, context.timeoutMs));
-      return {
-        ok: true,
-        policy: result.policy,
-        retention: result.policy.sessionStepRetentionLimit
-      };
-    }
-
-    throw usageError(`Unknown policy retention action: ${action}.`);
+async function handleRetentionPolicy(
+  context: CliContext,
+  parsed: ParsedArgs,
+  action: RetentionPolicyAction
+): Promise<Record<string, unknown>> {
+  const browserId = await resolveRequiredBrowser(context, parsed);
+  if (action === "get") {
+    const result = PolicyResultSchema.parse(await context.broker.request("policy.get", { browserId }, context.timeoutMs));
+    return {
+      ok: true,
+      policy: result.policy,
+      retention: result.policy.sessionStepRetentionLimit
+    };
   }
 
-  throw usageError(`Unknown policy area: ${area}.`);
+  const limit = Number(parsed.positionals[2]);
+  const result = PolicyResultSchema.parse(await context.broker.request("policy.retention.set", { browserId, limit }, context.timeoutMs));
+  return {
+    ok: true,
+    policy: result.policy,
+    retention: result.policy.sessionStepRetentionLimit
+  };
 }
 
 async function handleWatch(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
@@ -827,25 +845,14 @@ async function handleBridge(context: CliContext, parsed: ParsedArgs): Promise<Re
   };
 }
 
-async function handleBroker(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
-  const subcommand = parsed.positionals[0];
-
-  if (subcommand === "status") {
-    const status = BrokerStatusResultSchema.parse(await context.broker.request("broker.status", {}, context.timeoutMs));
-    return {
-      ok: true,
-      broker: status
-    };
-  }
-  if (subcommand === "stop") {
-    const stop = BrokerStopResultSchema.parse(await context.broker.request("broker.stop", {}, context.timeoutMs));
-    return {
-      ok: true,
-      broker: stop
-    };
-  }
-
-  throw usageError(`Unknown broker subcommand: ${subcommand}.`);
+async function handleBroker(context: CliContext, _parsed: ParsedArgs, action: BrokerCliAction): Promise<Record<string, unknown>> {
+  const result = action === "status"
+    ? BrokerStatusResultSchema.parse(await context.broker.request("broker.status", {}, context.timeoutMs))
+    : BrokerStopResultSchema.parse(await context.broker.request("broker.stop", {}, context.timeoutMs));
+  return {
+    ok: true,
+    broker: result
+  };
 }
 
 async function handleAction(
@@ -928,25 +935,23 @@ async function handleDismiss(context: CliContext, parsed: ParsedArgs): Promise<R
   };
 }
 
-async function handleDialog(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
-  const subcommand = parsed.positionals[0] as "accept" | "dismiss";
+async function handleDialog(context: CliContext, parsed: ParsedArgs, action: DialogCliAction): Promise<Record<string, unknown>> {
   const browserId = await resolveRequiredBrowser(context, parsed);
   const tabId = readRequiredIntegerFlag(parsed, "tab-id");
   const payload: Record<string, unknown> = { browserId, tabId };
   const text = readOptionalStringFlag(parsed, "text");
   if (text !== undefined) payload.text = text;
-  const result = DialogCommandResultSchema.parse(await context.broker.request(`dialog.${subcommand}`, payload, context.timeoutMs));
+  const result = DialogCommandResultSchema.parse(await context.broker.request(`dialog.${action}`, payload, context.timeoutMs));
   return {
     ok: true,
     dialog: result.dialog
   };
 }
 
-async function handleConsole(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
-  const subcommand = parsed.positionals[0] ?? "list";
+async function handleConsole(context: CliContext, parsed: ParsedArgs, action: ConsoleCliAction): Promise<Record<string, unknown>> {
   const browserId = await resolveRequiredBrowser(context, parsed);
   const tabId = readRequiredIntegerFlag(parsed, "tab-id");
-  if (subcommand === "clear") {
+  if (action === "clear") {
     const result = await context.broker.request("console.clear", { browserId, tabId }, context.timeoutMs);
     return { ok: true, cleared: result.cleared === true, tabId };
   }
@@ -960,11 +965,10 @@ async function handleConsole(context: CliContext, parsed: ParsedArgs): Promise<R
   };
 }
 
-async function handleNetwork(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
-  const subcommand = parsed.positionals[0] ?? "list";
+async function handleNetwork(context: CliContext, parsed: ParsedArgs, action: NetworkCliAction): Promise<Record<string, unknown>> {
   const browserId = await resolveRequiredBrowser(context, parsed);
   const tabId = readRequiredIntegerFlag(parsed, "tab-id");
-  if (subcommand === "get") {
+  if (action === "get") {
     const requestId = parsed.positionals[1] as string;
     const result = NetworkGetCommandResultSchema.parse(await context.broker.request("network.get", { browserId, tabId, requestId }, context.timeoutMs));
     return {
@@ -982,11 +986,10 @@ async function handleNetwork(context: CliContext, parsed: ParsedArgs): Promise<R
   };
 }
 
-async function handleRecipes(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
-  const subcommand = parsed.positionals[0] ?? "list";
+async function handleRecipes(context: CliContext, parsed: ParsedArgs, action: RecipeCliAction): Promise<Record<string, unknown>> {
   const directory = readOptionalStringFlag(parsed, "directory");
 
-  switch (subcommand) {
+  switch (action) {
     case "list": {
       const library = RecipeListResultSchema.parse(await context.broker.request("recipe.list", recipeRequestPayload(directory), context.timeoutMs));
       return {
@@ -1108,8 +1111,6 @@ async function handleRecipes(context: CliContext, parsed: ParsedArgs): Promise<R
       });
       return { ok: true, recipe, filePath };
     }
-    default:
-      throw usageError(`Unknown recipes subcommand: ${subcommand}.`);
   }
 }
 
@@ -1732,12 +1733,12 @@ function parseFillFormFields(input: unknown): Array<{ elementId: string; value: 
   return parsed.data;
 }
 
-function resolveOutputMode(parsed: ParsedArgs, config: PortusConfig): OutputMode {
-  if (hasFlag(parsed, CLI_FLAGS.json.name)) return "json";
-  if (hasFlag(parsed, CLI_FLAGS.quiet.name)) return "quiet";
-  const output = parsed.command === "recipes" && parsed.positionals[0] === "export"
-    ? undefined
-    : readOptionalStringFlag(parsed, CLI_OUTPUT_FLAG.name);
+function resolveOutputMode(parsed: ParsedArgs, config: PortusConfig, invocation: CliInvocationSpec): OutputMode {
+  if (parsed.flags.has(CLI_FLAGS.json.name)) return "json";
+  if (parsed.flags.has(CLI_FLAGS.quiet.name)) return "quiet";
+  const output = cliInvocationOutputFlagRole(invocation) === "renderer"
+    ? readOptionalStringFlag(parsed, CLI_OUTPUT_FLAG.name)
+    : undefined;
   if (!output) return config.cli.output;
   if (output === "table" || output === "json" || output === "ndjson" || output === "quiet") return output;
   throw usageError(`--${CLI_OUTPUT_FLAG.name} must be table, json, ndjson, or quiet.`);

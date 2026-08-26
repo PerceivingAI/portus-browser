@@ -13,20 +13,7 @@ import {
   validateCliInvocationPrimitiveValues,
   validateCliInvocationRepeatability
 } from "../dist/command-spec.js";
-import { CLI_SURFACE_BASELINE } from "../dist/cli-surface.js";
 import { CLI_HANDLER_PATHS, runPortusBrowserCli } from "../dist/index.js";
-
-test("CLI-3 registry exactly covers the CLI-0 canonical surface and aliases", () => {
-  const actualPaths = CLI_INVOCATIONS.map(cliInvocationPath);
-  const baselinePaths = CLI_SURFACE_BASELINE.map((entry) => entry.path.join(" "));
-  assert.deepEqual(actualPaths, baselinePaths);
-  assert.equal(new Set(actualPaths).size, actualPaths.length);
-
-  const actualAliases = CLI_INVOCATIONS.flatMap((entry) => (entry.aliases ?? []).map((alias) => alias.join(" ")));
-  const baselineAliases = CLI_SURFACE_BASELINE.flatMap((entry) => (entry.aliases ?? []).map((alias) => alias.join(" ")));
-  assert.deepEqual(actualAliases, baselineAliases);
-  assert.equal(new Set(actualAliases).size, actualAliases.length);
-});
 
 test("CLI-3 registry references canonical flag definitions and keeps globals inherited", () => {
   const canonicalFlags = new Set(CLI_FLAG_SPECS);

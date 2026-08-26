@@ -30,6 +30,7 @@ export interface CliInvocationSpec {
   flags: readonly CliFlagSpec[];
   positionals: readonly CliPositionalSpec[];
   flagEnums?: readonly CliFlagEnumConstraint[];
+  outputFlagRole?: "file";
 }
 
 export interface ResolvedCliInvocation {
@@ -62,16 +63,15 @@ const navigationRuleFlags = [
 ] as const;
 
 /**
- * CLI-3 authoritative invocation registry.
+ * Authoritative declarative invocation registry.
  *
- * This registry describes the exact canonical command/subcommand surface,
- * aliases, invocation-scoped flags, and positional shape that the declarative
- * parser is migrating toward. CLI_GLOBAL_PRESENTATION_FLAGS are inherited by
- * every invocation and therefore are not repeated in each `flags` array.
+ * This is the single source of truth for canonical command/subcommand paths,
+ * aliases, invocation-scoped flags, positional shape, primitive constraints,
+ * and invocation-specific output semantics. Global presentation flags are
+ * inherited and therefore are not repeated in each `flags` array.
  *
- * CLI-4 resolves invocations against this registry before dispatch. CLI-5
- * enforces exact flag sets, CLI-6 repeatability, CLI-7 positional contracts,
- * CLI-8 primitive value constraints, and CLI-11 generated help/usage.
+ * Resolution, validation, dispatch integrity, and generated usage/help all
+ * consume this registry.
  */
 export const CLI_INVOCATIONS = [
   { path: ["browsers"], flags: brokerFlags(), positionals: noArgs },
@@ -215,7 +215,8 @@ export const CLI_INVOCATIONS = [
   {
     path: ["recipes", "export"],
     flags: [CLI_OUTPUT_FLAG, CLI_FLAGS.directory, CLI_FLAGS.force],
-    positionals: [arg("recipe-id")]
+    positionals: [arg("recipe-id")],
+    outputFlagRole: "file"
   },
   { path: ["recipes", "duplicate"], flags: localFlags(CLI_FLAGS.directory, CLI_FLAGS.name, CLI_FLAGS.force), positionals: [arg("source-id"), arg("new-id")] }
 ] as const satisfies readonly CliInvocationSpec[];
@@ -272,6 +273,13 @@ export function resolveCliInvocation(command: string | undefined, positionals: r
 
 export function cliInvocationPath(spec: CliInvocationSpec): string {
   return spec.path.join(" ");
+}
+
+export type CliOutputFlagRole = "renderer" | "file" | "none";
+
+export function cliInvocationOutputFlagRole(spec: CliInvocationSpec): CliOutputFlagRole {
+  if (!spec.flags.some((flag) => flag.name === CLI_OUTPUT_FLAG.name)) return "none";
+  return spec.outputFlagRole ?? "renderer";
 }
 
 /**
