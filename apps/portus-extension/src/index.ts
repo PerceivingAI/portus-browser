@@ -1120,20 +1120,14 @@ export class PortusExtensionBridge {
     });
 
     const partial = request.partial === true;
-    const debuggerFields = request.fields.filter((field) => this.lookupDebuggerSnapshotTarget(request.snapshotId, field.elementId) !== undefined);
-    if (debuggerFields.length > 0) {
-      throw createPortusError({
-        code: "ACTION_UNSUPPORTED",
-        message: "Fill-form for CDP-only pierced Shadow DOM targets is deferred to S8.",
-        details: { elementIds: debuggerFields.map((field) => field.elementId) }
-      });
-    }
     type ResolvedFillTarget = {
       index: number;
       elementId: string;
       value: string;
+      element?: SnapshotElement;
       target?: Record<string, unknown>;
       executionTarget?: DomExecutionTarget;
+      debuggerTarget?: DebuggerSnapshotTarget;
       error?: PortusError;
     };
     const targets: ResolvedFillTarget[] = request.fields.map((field, index) => {
@@ -1145,11 +1139,13 @@ export class PortusExtensionBridge {
           snapshotId: request.snapshotId,
           elementId: field.elementId
         }, this.snapshots) as SnapshotElement;
+        const debuggerTarget = this.lookupDebuggerSnapshotTarget(request.snapshotId, field.elementId);
         return {
           index,
           elementId: field.elementId,
           value: field.value,
-          target: createDomActionTarget(element),
+          element,
+          ...(debuggerTarget ? { debuggerTarget } : { target: createDomActionTarget(element) }),
           executionTarget: snapshotElementExecutionTarget(element)
         };
       } catch (error) {
@@ -1163,7 +1159,10 @@ export class PortusExtensionBridge {
       }
     });
 
+    const normalTargets = targets.filter((target) => !target.error && !target.debuggerTarget);
+    const debuggerTargets = targets.filter((target) => !target.error && target.debuggerTarget !== undefined);
     let fieldResults: unknown[];
+
     if (!partial) {
       const executionTargets = targets.map((target) => target.executionTarget).filter((target): target is DomExecutionTarget => target !== undefined);
       const documentIds = new Set(executionTargets.map((target) => target.documentId));
@@ -1178,16 +1177,54 @@ export class PortusExtensionBridge {
       if (!executionTarget) {
         throw createPortusError({ code: "SNAPSHOT_STALE", message: "Fill form has no available snapshot targets." });
       }
-      const result = await this.executeActionScript(tabId, {
-        action: "fillForm",
-        fields: targets.map((target) => ({ elementId: target.elementId, value: target.value, target: target.target })),
-        partial: false
-      }, executionTarget);
-      if (!result.ok) throw createPortusError(result.error);
-      const scriptFieldResults = result.details?.fields;
-      fieldResults = Array.isArray(scriptFieldResults)
-        ? scriptFieldResults
-        : request.fields.map((field) => ({ elementId: field.elementId, ok: true }));
+
+      if (normalTargets.length > 0 && debuggerTargets.length > 0) {
+        const validation = await this.executeActionScript(tabId, {
+          action: "fillForm",
+          fields: normalTargets.map((target) => ({ elementId: target.elementId, value: target.value, target: target.target })),
+          partial: false,
+          validateOnly: true
+        }, executionTarget);
+        if (!validation.ok) throw createPortusError(validation.error);
+      }
+
+      if (debuggerTargets.length > 0) {
+        if (!this.shouldUseDebuggerBackend()) {
+          throw createPortusError({
+            code: "CAPABILITY_UNAVAILABLE",
+            message: "Advanced debugger backend is required for this fill-form snapshot target."
+          });
+        }
+        await this.executeAtomicDebuggerFillForm(
+          tabId,
+          debuggerTargets.map((target) => ({
+            elementId: target.elementId,
+            value: target.value,
+            target: target.debuggerTarget as DebuggerSnapshotTarget
+          })),
+          async () => {
+            if (normalTargets.length === 0) return;
+            const result = await this.executeActionScript(tabId, {
+              action: "fillForm",
+              fields: normalTargets.map((target) => ({ elementId: target.elementId, value: target.value, target: target.target })),
+              partial: false
+            }, executionTarget);
+            if (!result.ok) throw createPortusError(result.error);
+          }
+        );
+        fieldResults = request.fields.map((field) => ({ elementId: field.elementId, ok: true }));
+      } else {
+        const result = await this.executeActionScript(tabId, {
+          action: "fillForm",
+          fields: targets.map((target) => ({ elementId: target.elementId, value: target.value, target: target.target })),
+          partial: false
+        }, executionTarget);
+        if (!result.ok) throw createPortusError(result.error);
+        const scriptFieldResults = result.details?.fields;
+        fieldResults = Array.isArray(scriptFieldResults)
+          ? scriptFieldResults
+          : request.fields.map((field) => ({ elementId: field.elementId, ok: true }));
+      }
     } else {
       const resultsByIndex: unknown[] = new Array(request.fields.length);
       const groups = new Map<string, {
@@ -1200,6 +1237,7 @@ export class PortusExtensionBridge {
           resultsByIndex[target.index] = { elementId: target.elementId, ok: false, error: target.error };
           continue;
         }
+        if (target.debuggerTarget) continue;
         if (!target.target || !target.executionTarget) {
           resultsByIndex[target.index] = {
             elementId: target.elementId,
@@ -1257,15 +1295,36 @@ export class PortusExtensionBridge {
           }
         }
       }
+
+      if (debuggerTargets.length > 0) {
+        if (!this.shouldUseDebuggerBackend()) {
+          const error = createPortusError({
+            code: "CAPABILITY_UNAVAILABLE",
+            message: "Advanced debugger backend is required for this fill-form snapshot target."
+          });
+          for (const target of debuggerTargets) {
+            resultsByIndex[target.index] = { elementId: target.elementId, ok: false, error };
+          }
+        } else {
+          const debuggerResults = await this.executePartialDebuggerFillForm(tabId, debuggerTargets.map((target) => ({
+            index: target.index,
+            elementId: target.elementId,
+            value: target.value,
+            target: target.debuggerTarget as DebuggerSnapshotTarget
+          })));
+          for (const result of debuggerResults) resultsByIndex[result.index] = result.result;
+        }
+      }
       fieldResults = resultsByIndex;
     }
 
     const succeeded = fieldResults.filter((field) => isRecord(field) && field.ok === true).length;
     const failed = fieldResults.length - succeeded;
     const snapshotInvalidated = succeeded > 0;
+    const usedDebuggerBackend = debuggerTargets.length > 0;
 
     const fillFormResult = FillFormResultSchema.parse({
-      backend: "content-script-dom",
+      backend: usedDebuggerBackend ? "debugger-cdp" : "content-script-dom",
       completedAt: this.now().toISOString(),
       snapshotInvalidated,
       fields: fieldResults,
@@ -1273,7 +1332,10 @@ export class PortusExtensionBridge {
         fieldCount: request.fields.length,
         succeeded,
         failed,
-        partial
+        partial,
+        normalFieldCount: normalTargets.length,
+        debuggerFieldCount: debuggerTargets.length,
+        mixedBackends: normalTargets.length > 0 && debuggerTargets.length > 0
       }
     });
     if (fillFormResult.snapshotInvalidated) {
@@ -1282,7 +1344,6 @@ export class PortusExtensionBridge {
     }
     return fillFormResult;
   }
-
   async dismissPage(payload: Record<string, unknown>): Promise<DismissResult> {
     await this.ready;
     const tabId = readOptionalNumber(payload, "tabId");
@@ -3364,6 +3425,106 @@ export class PortusExtensionBridge {
     for (const snapshotId of snapshotIds) this.debuggerSnapshotTargets.delete(snapshotId);
   }
 
+  private async resolveDebuggerEditableFillObject(
+    debuggerTarget: ChromeDebuggerTarget,
+    target: DebuggerSnapshotTarget
+  ): Promise<string> {
+    let resolved: unknown;
+    try {
+      resolved = await this.sendDebuggerCommand(debuggerTarget, "DOM.resolveNode", { backendNodeId: target.backendNodeId });
+    } catch {
+      throw createPortusError({
+        code: "SNAPSHOT_STALE",
+        message: "CDP fill-form target is no longer available."
+      });
+    }
+    if (!isRecord(resolved) || !isRecord(resolved.object) || typeof resolved.object.objectId !== "string") {
+      throw createPortusError({
+        code: "SNAPSHOT_STALE",
+        message: "CDP fill-form target could not be resolved to a live object."
+      });
+    }
+    const objectId = resolved.object.objectId;
+    const validation = await this.sendDebuggerCommand(debuggerTarget, "Runtime.callFunctionOn", {
+      objectId,
+      functionDeclaration: "function(){ const tag=String(this.tagName||'').toLowerCase(); if(tag==='input') return String(this.type||'text').toLowerCase()!=='file'; return tag==='textarea'||tag==='select'||this.isContentEditable===true; }",
+      returnByValue: true,
+      awaitPromise: false
+    });
+    if (!isRecord(validation) || !isRecord(validation.result) || validation.result.value !== true) {
+      throw createPortusError({
+        code: "ACTION_UNSUPPORTED",
+        message: "Fill form target is not editable."
+      });
+    }
+    return objectId;
+  }
+
+  private async setDebuggerEditableFillValue(
+    debuggerTarget: ChromeDebuggerTarget,
+    objectId: string,
+    value: string
+  ): Promise<void> {
+    const mutation = await this.sendDebuggerCommand(debuggerTarget, "Runtime.callFunctionOn", {
+      objectId,
+      functionDeclaration: "function(value){ const tag=String(this.tagName||'').toLowerCase(); if(this.focus) this.focus(); if(tag==='input'||tag==='textarea'){ this.value=String(value); this.dispatchEvent(new InputEvent('input',{bubbles:true,composed:true,inputType:'insertText',data:String(value)})); this.dispatchEvent(new Event('change',{bubbles:true,composed:true})); return true; } if(tag==='select'){ this.value=String(value); this.dispatchEvent(new Event('input',{bubbles:true,composed:true})); this.dispatchEvent(new Event('change',{bubbles:true,composed:true})); return true; } if(this.isContentEditable===true){ this.textContent=String(value); this.dispatchEvent(new InputEvent('input',{bubbles:true,composed:true,inputType:'insertText',data:String(value)})); return true; } return false; }",
+      arguments: [{ value }],
+      returnByValue: true,
+      awaitPromise: false
+    });
+    if (!isRecord(mutation) || !isRecord(mutation.result) || mutation.result.value !== true) {
+      throw createPortusError({
+        code: "ACTION_FAILED",
+        message: "Failed to fill CDP snapshot field."
+      });
+    }
+  }
+
+  private async executeAtomicDebuggerFillForm(
+    tabId: number,
+    fields: Array<{ elementId: string; value: string; target: DebuggerSnapshotTarget }>,
+    mutateNormalFields: () => Promise<void>
+  ): Promise<void> {
+    await this.withDebuggerSession(tabId, async (debuggerTarget) => {
+      const resolved: Array<{ objectId: string; value: string }> = [];
+      for (const field of fields) {
+        resolved.push({
+          objectId: await this.resolveDebuggerEditableFillObject(debuggerTarget, field.target),
+          value: field.value
+        });
+      }
+
+      // S8 preserves the existing validation-first contract: no writes occur until every
+      // normal and CDP-only target has been proven live/editable.
+      await mutateNormalFields();
+      for (const field of resolved) {
+        await this.setDebuggerEditableFillValue(debuggerTarget, field.objectId, field.value);
+      }
+    }, "fill-form.atomic.pierced-closed-shadow");
+  }
+
+  private async executePartialDebuggerFillForm(
+    tabId: number,
+    fields: Array<{ index: number; elementId: string; value: string; target: DebuggerSnapshotTarget }>
+  ): Promise<Array<{ index: number; result: Record<string, unknown> }>> {
+    return await this.withDebuggerSession(tabId, async (debuggerTarget) => {
+      const results: Array<{ index: number; result: Record<string, unknown> }> = [];
+      for (const field of fields) {
+        try {
+          const objectId = await this.resolveDebuggerEditableFillObject(debuggerTarget, field.target);
+          await this.setDebuggerEditableFillValue(debuggerTarget, objectId, field.value);
+          results.push({ index: field.index, result: { elementId: field.elementId, ok: true } });
+        } catch (error) {
+          results.push({
+            index: field.index,
+            result: { elementId: field.elementId, ok: false, error: normalizeExtensionError(error) }
+          });
+        }
+      }
+      return results;
+    }, "fill-form.partial.pierced-closed-shadow");
+  }
+
   private async executeDebuggerSnapshotElementAction(
     tabId: number,
     action: "click" | "hover" | "type" | "press" | "scroll",
@@ -4787,9 +4948,12 @@ export function performPortusDomAction(payload: Record<string, unknown>): Record
       if (!partial) {
         const firstFailure = resolved.find((field) => !field.ok);
         if (firstFailure && !firstFailure.ok) return { ok: false, error: firstFailure.error };
-        for (const field of resolved) {
-          if (!field.ok) continue;
-          setEditableValue(field.element, field.value);
+        const validateOnly = payload.validateOnly === true;
+        if (!validateOnly) {
+          for (const field of resolved) {
+            if (!field.ok) continue;
+            setEditableValue(field.element, field.value);
+          }
         }
         return {
           ok: true,
@@ -4798,6 +4962,7 @@ export function performPortusDomAction(payload: Record<string, unknown>): Record
             fieldCount: resolved.length,
             targetValidated: true,
             partial: false,
+            validateOnly,
             fields: resolved.map((field) => ({ elementId: field.elementId, ok: true }))
           }
         };

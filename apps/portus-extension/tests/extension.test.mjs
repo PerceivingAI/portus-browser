@@ -1867,6 +1867,115 @@ test("live DOM actions resolve nested Shadow DOM without crossing the captured r
   }
 });
 
+test("atomic fill-form validates fields across sibling Shadow DOM roots before mutation", () => {
+  const dom = new JSDOM(`<!doctype html><html><body><app-shell id="app"></app-shell></body></html>`, { url: "https://example.com/" });
+  const document = dom.window.document;
+  const app = document.querySelector("#app");
+  const appRoot = app.attachShadow({ mode: "open" });
+  appRoot.innerHTML = `<left-panel id="left"></left-panel><right-panel id="right"></right-panel>`;
+  const left = appRoot.querySelector("#left");
+  const right = appRoot.querySelector("#right");
+  const leftRoot = left.attachShadow({ mode: "open" });
+  const rightRoot = right.attachShadow({ mode: "open" });
+  leftRoot.innerHTML = `<input id="first" name="first" />`;
+  rightRoot.innerHTML = `<input id="last" name="last" />`;
+  const first = leftRoot.querySelector("#first");
+  const last = rightRoot.querySelector("#last");
+
+  const descriptors = new Map();
+  const globals = {
+    window: dom.window,
+    document,
+    location: dom.window.location,
+    HTMLElement: dom.window.HTMLElement,
+    HTMLInputElement: dom.window.HTMLInputElement,
+    HTMLTextAreaElement: dom.window.HTMLTextAreaElement,
+    HTMLSelectElement: dom.window.HTMLSelectElement,
+    HTMLAnchorElement: dom.window.HTMLAnchorElement,
+    Event: dom.window.Event,
+    InputEvent: dom.window.InputEvent,
+    getComputedStyle: dom.window.getComputedStyle.bind(dom.window)
+  };
+  for (const [key, value] of Object.entries(globals)) {
+    descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  }
+  descriptors.set("__portusComposedDom", Object.getOwnPropertyDescriptor(globalThis, "__portusComposedDom"));
+  installPortusComposedDomRuntime(globalThis);
+  dom.window.HTMLElement.prototype.getBoundingClientRect = () => ({
+    x: 10, y: 20, left: 10, top: 20, right: 110, bottom: 50, width: 100, height: 30,
+    toJSON() { return this; }
+  });
+
+  const firstTarget = {
+    shadowPath: [
+      { hostSelectorHint: "#app", rootType: "open" },
+      { hostSelectorHint: "#left", rootType: "open" }
+    ],
+    selectorHint: "#first",
+    tagName: "input",
+    role: "textbox",
+    label: "First",
+    text: "",
+    bounds: { x: 10, y: 20, width: 100, height: 30 },
+    state: { value: "" },
+    editable: true,
+    inputType: "text",
+    name: "first"
+  };
+  const lastTarget = {
+    shadowPath: [
+      { hostSelectorHint: "#app", rootType: "open" },
+      { hostSelectorHint: "#right", rootType: "open" }
+    ],
+    selectorHint: "#last",
+    tagName: "input",
+    role: "textbox",
+    label: "Last",
+    text: "",
+    bounds: { x: 10, y: 20, width: 100, height: 30 },
+    state: { value: "" },
+    editable: true,
+    inputType: "text",
+    name: "last"
+  };
+
+  try {
+    const success = performPortusDomAction({
+      action: "fillForm",
+      partial: false,
+      fields: [
+        { elementId: "el_first", value: "Ada", target: firstTarget },
+        { elementId: "el_last", value: "Lovelace", target: lastTarget }
+      ]
+    });
+    assert.equal(success.ok, true);
+    assert.equal(first.value, "Ada");
+    assert.equal(last.value, "Lovelace");
+
+    first.value = "";
+    last.value = "";
+    right.remove();
+    const stale = performPortusDomAction({
+      action: "fillForm",
+      partial: false,
+      fields: [
+        { elementId: "el_first", value: "Grace", target: firstTarget },
+        { elementId: "el_last", value: "Hopper", target: lastTarget }
+      ]
+    });
+    assert.equal(stale.ok, false);
+    assert.equal(stale.error.code, "SNAPSHOT_STALE");
+    assert.equal(first.value, "");
+  } finally {
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    }
+    dom.window.close();
+  }
+});
+
 test("bounds recovery recursively hit-tests nested Shadow DOM", () => {
   const dom = new JSDOM(`<!doctype html><html><body>
     <button id="light-duplicate">Shadow target</button>
@@ -2440,6 +2549,95 @@ test("uses pierced CDP only for inaccessible closed roots when advanced backend 
   assert.equal(fixture.debuggerDetaches.length, 2);
 });
 
+test("atomic fill-form validates normal and CDP-only fields before either backend writes", async () => {
+  const { fixture, chronology } = createPiercedFillFormFixture();
+  const bridge = createConnectedBridge(fixture);
+  await bridge.setAdvancedBackendEnabled(true, false);
+  const snapshot = await bridge.captureSnapshot(1);
+  assert.equal(snapshot.elements.length, 2);
+  chronology.length = 0;
+  fixture.actions.length = 0;
+
+  const result = await bridge.fillForm({
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    fields: [
+      { elementId: snapshot.elements[0].elementId, value: "Ada" },
+      { elementId: snapshot.elements[1].elementId, value: "Lovelace" }
+    ]
+  });
+
+  assert.equal(result.backend, "debugger-cdp");
+  assert.equal(result.snapshotInvalidated, true);
+  assert.deepEqual(result.fields.map((field) => field.ok), [true, true]);
+  assert.equal(result.details.mixedBackends, true);
+  assert.equal(result.details.normalFieldCount, 1);
+  assert.equal(result.details.debuggerFieldCount, 1);
+  assert.deepEqual(chronology, [
+    "normal-validate",
+    "cdp-resolve",
+    "cdp-validate",
+    "normal-mutate",
+    "cdp-mutate"
+  ]);
+  assert.equal(fixture.actions.length, 2);
+  assert.equal(fixture.actions[0].validateOnly, true);
+  assert.equal(fixture.actions[1].validateOnly, undefined);
+});
+
+test("atomic mixed fill-form does not mutate normal fields when a CDP-only target fails validation", async () => {
+  const { fixture, chronology } = createPiercedFillFormFixture({ debuggerEditable: false });
+  const bridge = createConnectedBridge(fixture);
+  await bridge.setAdvancedBackendEnabled(true, false);
+  const snapshot = await bridge.captureSnapshot(1);
+  chronology.length = 0;
+  fixture.actions.length = 0;
+
+  await assert.rejects(() => bridge.fillForm({
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    fields: [
+      { elementId: snapshot.elements[0].elementId, value: "Ada" },
+      { elementId: snapshot.elements[1].elementId, value: "Lovelace" }
+    ]
+  }), { code: "ACTION_UNSUPPORTED" });
+
+  assert.deepEqual(chronology, ["normal-validate", "cdp-resolve", "cdp-validate"]);
+  assert.equal(fixture.actions.length, 1);
+  assert.equal(fixture.actions[0].validateOnly, true);
+});
+
+test("partial mixed fill-form reports a stale CDP-only field without blocking a normal field", async () => {
+  const { fixture, chronology } = createPiercedFillFormFixture({ resolveFails: true });
+  const bridge = createConnectedBridge(fixture);
+  await bridge.setAdvancedBackendEnabled(true, false);
+  const snapshot = await bridge.captureSnapshot(1);
+  chronology.length = 0;
+  fixture.actions.length = 0;
+
+  const result = await bridge.fillForm({
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    partial: true,
+    fields: [
+      { elementId: snapshot.elements[0].elementId, value: "Ada" },
+      { elementId: snapshot.elements[1].elementId, value: "Lovelace" }
+    ]
+  });
+
+  assert.equal(result.backend, "debugger-cdp");
+  assert.equal(result.snapshotInvalidated, true);
+  assert.deepEqual(result.fields.map((field) => [field.ok, field.error?.code]), [
+    [true, undefined],
+    [false, "SNAPSHOT_STALE"]
+  ]);
+  assert.equal(result.details.succeeded, 1);
+  assert.equal(result.details.failed, 1);
+  assert.deepEqual(chronology, ["normal-mutate", "cdp-resolve"]);
+  assert.equal(fixture.actions.length, 1);
+  assert.equal(fixture.actions[0].partial, true);
+});
+
 test("detaches debugger sessions when a debugger command fails after attach", async () => {
   const fixture = createChromeFixture({
     sendDebuggerCommand(_target, method) {
@@ -2952,6 +3150,116 @@ function withInjectionMetadata(injection, results) {
       : targetedDocumentId ?? `doc_frame_${frameId}`;
     return { ...entry, frameId, documentId };
   });
+}
+
+function createPiercedFillFormFixture({ debuggerEditable = true, resolveFails = false } = {}) {
+  const chronology = [];
+  const fixture = createChromeFixture({
+    executeScript(injection, actions) {
+      if (injection.files) return Promise.resolve([{ result: undefined }]);
+      if (isActionInjection(injection)) {
+        const payload = injection.args[0];
+        actions.push(payload);
+        if (payload.action === "fillForm") {
+          chronology.push(payload.validateOnly === true ? "normal-validate" : "normal-mutate");
+          return Promise.resolve([{
+            frameId: 0,
+            documentId: "doc_main",
+            result: {
+              ok: true,
+              details: {
+                action: "fillForm",
+                partial: payload.partial === true,
+                validateOnly: payload.validateOnly === true,
+                fields: payload.fields.map((field) => ({ elementId: field.elementId, ok: true }))
+              }
+            }
+          }]);
+        }
+      }
+      if (injection.target?.allFrames === true) {
+        return Promise.resolve([{
+          frameId: 0,
+          documentId: "doc_main",
+          result: {
+            url: "https://example.com/mixed-form",
+            title: "Mixed form",
+            viewport: { width: 1200, height: 800, deviceScaleFactor: 1 },
+            visibleText: "Public name",
+            closedShadowRootAccessAvailable: false,
+            candidateCount: 1,
+            matchedElementCount: 1,
+            truncated: false,
+            elements: [{
+              role: "textbox",
+              label: "Public name",
+              text: "",
+              bounds: { x: 10, y: 20, width: 180, height: 32 },
+              state: { value: "" },
+              selectorHint: "#public-name",
+              tagName: "input",
+              editable: true,
+              inputType: "text",
+              name: "publicName"
+            }]
+          }
+        }]);
+      }
+      return Promise.resolve([{ result: {} }]);
+    },
+    sendDebuggerCommand(_target, method, params) {
+      if (method === "DOM.getDocument") {
+        return Promise.resolve({
+          root: {
+            nodeType: 9,
+            nodeName: "#document",
+            backendNodeId: 1,
+            children: [{
+              nodeType: 1,
+              nodeName: "SECURE-SHELL",
+              localName: "secure-shell",
+              backendNodeId: 2,
+              shadowRoots: [{
+                nodeType: 11,
+                nodeName: "#document-fragment",
+                backendNodeId: 3,
+                shadowRootType: "closed",
+                children: [{
+                  nodeType: 1,
+                  nodeName: "INPUT",
+                  localName: "input",
+                  backendNodeId: 4,
+                  attributes: ["id", "secret-name", "aria-label", "Secret name", "type", "text", "name", "secretName"]
+                }]
+              }]
+            }]
+          }
+        });
+      }
+      if (method === "DOM.getBoxModel") {
+        assert.deepEqual(params, { backendNodeId: 4 });
+        return Promise.resolve({ model: { border: [10, 70, 190, 70, 190, 102, 10, 102] } });
+      }
+      if (method === "DOM.resolveNode") {
+        chronology.push("cdp-resolve");
+        if (resolveFails) return Promise.reject(new Error("Node no longer exists"));
+        return Promise.resolve({ object: { objectId: "remote_secret_name" } });
+      }
+      if (method === "Runtime.callFunctionOn") {
+        assert.equal(params.objectId, "remote_secret_name");
+        if (String(params.functionDeclaration).includes("return String(this.type||'text').toLowerCase()!=='file'")) {
+          chronology.push("cdp-validate");
+          return Promise.resolve({ result: { value: debuggerEditable } });
+        }
+        if (String(params.functionDeclaration).includes("this.value=String(value)")) {
+          chronology.push("cdp-mutate");
+          return Promise.resolve({ result: { value: true } });
+        }
+      }
+      return Promise.resolve({});
+    }
+  });
+  return { fixture, chronology };
 }
 
 function createChromeFixture(overrides = {}) {
