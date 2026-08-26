@@ -21,6 +21,9 @@ test("builds shallow snapshots with scoped element ids", () => {
     screenshot,
     visibleText: "Submit Email",
     capturedAt: "2026-04-28T00:00:00.000Z",
+    candidateCount: 180,
+    matchedElementCount: 1,
+    truncated: false,
     elements: [
       {
         role: "button",
@@ -35,6 +38,9 @@ test("builds shallow snapshots with scoped element ids", () => {
   });
 
   assert.equal(snapshot.snapshotId, "snap_000123");
+  assert.equal(snapshot.candidateCount, 180);
+  assert.equal(snapshot.matchedElementCount, 1);
+  assert.equal(snapshot.truncated, false);
   assert.equal(snapshot.elements[0].elementId, "el_000001");
   assert.equal(findSnapshotElement(snapshot, "el_000001").label, "Submit");
   assert.equal(isSnapshotForTarget(snapshot, "br_000001", 7), true);

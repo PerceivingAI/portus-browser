@@ -335,6 +335,9 @@ test("validates browser session, snapshot, and action shapes", () => {
       state: {}
     }],
     capturedAt: now,
+    candidateCount: 180,
+    matchedElementCount: 12,
+    truncated: true,
     filtered: true,
     filter: {
       query: "submit",
@@ -345,6 +348,9 @@ test("validates browser session, snapshot, and action shapes", () => {
   });
   assert.equal(snapshot.elements[0].elementId, "el_001");
   assert.equal(snapshot.filtered, true);
+  assert.equal(snapshot.candidateCount, 180);
+  assert.equal(snapshot.matchedElementCount, 12);
+  assert.equal(snapshot.truncated, true);
   assert.equal(snapshot.filter.query, "submit");
   assert.deepEqual(SnapshotFilterSchema.parse({ query: "reviews", maxElements: 5 }), {
     query: "reviews",

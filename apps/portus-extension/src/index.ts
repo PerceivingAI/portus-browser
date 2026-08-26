@@ -291,6 +291,7 @@ const DEFAULT_SETTINGS_PROFILE_CONTENT: SettingsProfileContent = SettingsProfile
 });
 const DEFAULT_NATIVE_REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_TERMINAL_REQUEST_TIMEOUT_MS = 15000;
+const SNAPSHOT_COLLECTION_LIMIT = 10000;
 
 function createDefaultSettingsProfileState(): SettingsProfileState {
   return SettingsProfileStateSchema.parse({
@@ -884,7 +885,7 @@ export class PortusExtensionBridge {
         activatedTabBeforeCapture: false
       };
     }
-    const page = await this.executeSnapshotScript(targetTabId);
+    const page = await this.executeSnapshotScript(targetTabId, filter);
     const snapshotInput = {
       snapshotId: createSnapshotId(this.snapshotCounter++),
       browserId: this.requireBrowserId(),
@@ -895,7 +896,14 @@ export class PortusExtensionBridge {
       screenshot,
       visibleText: typeof page.visibleText === "string" ? page.visibleText : "",
       elements: readElementCandidates(page.elements),
-      capturedAt: this.now().toISOString()
+      capturedAt: this.now().toISOString(),
+      ...(typeof page.candidateCount === "number" && Number.isInteger(page.candidateCount) && page.candidateCount >= 0
+        ? { candidateCount: page.candidateCount }
+        : {}),
+      ...(typeof page.matchedElementCount === "number" && Number.isInteger(page.matchedElementCount) && page.matchedElementCount >= 0
+        ? { matchedElementCount: page.matchedElementCount }
+        : {}),
+      ...(typeof page.truncated === "boolean" ? { truncated: page.truncated } : {})
     };
     const snapshot = buildSnapshot(typeof page.cleanedDom === "string"
       ? { ...snapshotInput, cleanedDom: page.cleanedDom }
@@ -2745,7 +2753,7 @@ export class PortusExtensionBridge {
     });
   }
 
-  private async executeSnapshotScript(tabId: number): Promise<Record<string, unknown>> {
+  private async executeSnapshotScript(tabId: number, filter?: SnapshotFilter): Promise<Record<string, unknown>> {
     if (!this.chromeApi.scripting) {
       throw createPortusError({
         code: "CAPABILITY_UNAVAILABLE",
@@ -2755,7 +2763,8 @@ export class PortusExtensionBridge {
     const results = await mapChromeAccessOperation("execute snapshot script", promisifyChromeCall<Array<{ result?: unknown }>>((done) => {
       const result = this.chromeApi.scripting?.executeScript({
         target: { tabId },
-        func: capturePortusSnapshotPayload
+        func: capturePortusSnapshotPayload,
+        args: [filter ?? null, SNAPSHOT_COLLECTION_LIMIT]
       });
       done(result as Promise<Array<{ result?: unknown }>> | Array<{ result?: unknown }> | undefined);
     }));
@@ -3747,9 +3756,11 @@ function readBounds(value: unknown): { x: number; y: number; width: number; heig
   };
 }
 
-function capturePortusSnapshotPayload(): Record<string, unknown> {
-  const candidates = Array.from(document.querySelectorAll("button,a[href],input,textarea,select,[role],[contenteditable],[tabindex]:not([tabindex^=\"-\"]),[onclick]"));
-  const elements = candidates
+export function capturePortusSnapshotPayload(
+  filterInput: Record<string, unknown> | null = null,
+  collectionLimit = 10000
+): Record<string, unknown> {
+  const candidates = Array.from(document.querySelectorAll("button,a[href],input,textarea,select,[role],[contenteditable],[tabindex]:not([tabindex^=\"-\"]),[onclick]"))
     .filter((node): node is HTMLElement => node instanceof HTMLElement)
     .filter((element) => {
       if (element.offsetWidth === 0 || element.offsetHeight === 0) return false;
@@ -3760,41 +3771,60 @@ function capturePortusSnapshotPayload(): Record<string, unknown> {
         && bounds.right >= 0
         && bounds.top <= window.innerHeight
         && bounds.left <= window.innerWidth;
-    })
-    .slice(0, 100)
-    .map((element) => {
-      const bounds = element.getBoundingClientRect();
-      const tagName = element.tagName.toLowerCase();
-      const input = element instanceof HTMLInputElement ? element : null;
-      const role = element.getAttribute("role") ?? roleForElement(element);
-      const editable = tagName === "textarea"
-        || tagName === "select"
-        || element.isContentEditable
-        || (input !== null && input.type !== "button" && input.type !== "submit" && input.type !== "checkbox" && input.type !== "radio");
-      return {
-        role,
-        label: labelForElement(element),
-        text: visibleElementText(element),
-        bounds: {
-          x: bounds.x,
-          y: bounds.y,
-          width: bounds.width,
-          height: bounds.height
-        },
-        state: {
-          checked: input?.checked ?? undefined,
-          value: editable ? (input?.value ?? "") : undefined
-        },
-        selectorHint: selectorForElement(element),
-        tagName,
-        disabled: "disabled" in element ? Boolean((element as HTMLButtonElement).disabled) : false,
-        editable,
-        href: element instanceof HTMLAnchorElement ? element.href : undefined,
-        inputType: input?.type,
-        name: input?.name || undefined,
-        placeholder: input?.placeholder || undefined
-      };
     });
+
+  const candidateCount = candidates.length;
+  let elements = candidates.map((element) => {
+    const bounds = element.getBoundingClientRect();
+    const tagName = element.tagName.toLowerCase();
+    const input = element instanceof HTMLInputElement ? element : null;
+    const role = element.getAttribute("role") ?? roleForElement(element);
+    const editable = tagName === "textarea"
+      || tagName === "select"
+      || element.isContentEditable
+      || (input !== null && input.type !== "button" && input.type !== "submit" && input.type !== "checkbox" && input.type !== "radio");
+    return {
+      role,
+      label: labelForElement(element),
+      text: visibleElementText(element),
+      bounds: {
+        x: bounds.x,
+        y: bounds.y,
+        width: bounds.width,
+        height: bounds.height
+      },
+      state: {
+        checked: input?.checked ?? undefined,
+        value: editable ? (input?.value ?? "") : undefined
+      },
+      selectorHint: selectorForElement(element),
+      tagName,
+      disabled: "disabled" in element ? Boolean((element as HTMLButtonElement).disabled) : false,
+      editable,
+      href: element instanceof HTMLAnchorElement ? element.href : undefined,
+      inputType: input?.type,
+      name: input?.name || undefined,
+      placeholder: input?.placeholder || undefined
+    };
+  });
+
+  const query = typeof filterInput?.query === "string" ? normalizeSearchText(filterInput.query) : "";
+  const roleFilter = typeof filterInput?.role === "string" ? filterInput.role.trim().toLowerCase() : "";
+  const interactiveOnly = filterInput?.interactiveOnly === true;
+  if (query) elements = elements.filter((element) => elementMatchesQuery(element, query));
+  if (roleFilter) elements = elements.filter((element) => element.role.toLowerCase() === roleFilter);
+  if (interactiveOnly) elements = elements.filter(isLikelyInteractiveElement);
+
+  const matchedElementCount = elements.length;
+  const safeCollectionLimit = Number.isInteger(collectionLimit) && collectionLimit > 0 ? collectionLimit : 10000;
+  const requestedMax = typeof filterInput?.maxElements === "number"
+    && Number.isInteger(filterInput.maxElements)
+    && filterInput.maxElements > 0
+    ? filterInput.maxElements
+    : safeCollectionLimit;
+  const effectiveLimit = Math.min(requestedMax, safeCollectionLimit);
+  const truncated = matchedElementCount > effectiveLimit;
+  elements = elements.slice(0, effectiveLimit);
 
   return {
     url: location.href,
@@ -3805,7 +3835,10 @@ function capturePortusSnapshotPayload(): Record<string, unknown> {
       deviceScaleFactor: window.devicePixelRatio || 1
     },
     visibleText: (document.body?.textContent ?? "").slice(0, 20000),
-    elements
+    elements,
+    candidateCount,
+    matchedElementCount,
+    truncated
   };
 
   function roleForElement(element: HTMLElement): string {
@@ -3857,6 +3890,51 @@ function capturePortusSnapshotPayload(): Record<string, unknown> {
       current = current.parentElement;
     }
     return parts.join(" > ");
+  }
+
+  function elementMatchesQuery(element: typeof elements[number], normalizedQuery: string): boolean {
+    const haystack = [
+      element.label,
+      element.text,
+      element.role,
+      element.href ?? "",
+      element.inputType ?? "",
+      element.name ?? "",
+      element.placeholder ?? "",
+      element.selectorHint,
+      element.tagName
+    ].map(normalizeSearchText).join(" ");
+    return haystack.includes(normalizedQuery);
+  }
+
+  function isLikelyInteractiveElement(element: typeof elements[number]): boolean {
+    if (element.disabled === true) return false;
+    if (element.editable === true) return true;
+    const role = element.role.toLowerCase();
+    if ([
+      "button",
+      "link",
+      "textbox",
+      "searchbox",
+      "combobox",
+      "checkbox",
+      "radio",
+      "switch",
+      "tab",
+      "menuitem",
+      "option",
+      "slider",
+      "spinbutton"
+    ].includes(role)) return true;
+    return element.tagName === "a"
+      || element.tagName === "button"
+      || element.tagName === "input"
+      || element.tagName === "textarea"
+      || element.tagName === "select";
+  }
+
+  function normalizeSearchText(value: string): string {
+    return value.toLowerCase().replace(/\s+/g, " ").trim();
   }
 }
 

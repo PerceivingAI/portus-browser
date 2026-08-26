@@ -59,6 +59,9 @@ export interface BuildSnapshotInput {
   elements: SnapshotElementCandidate[];
   capturedAt: string;
   cleanedDom?: string;
+  candidateCount?: number;
+  matchedElementCount?: number;
+  truncated?: boolean;
 }
 
 export function createSnapshotId(sequence: number): string {
@@ -91,6 +94,9 @@ export function buildSnapshot(input: BuildSnapshotInput): Snapshot {
     capturedAt: input.capturedAt
   };
   if (input.cleanedDom !== undefined) snapshotInput.cleanedDom = input.cleanedDom;
+  if (input.candidateCount !== undefined) snapshotInput.candidateCount = input.candidateCount;
+  if (input.matchedElementCount !== undefined) snapshotInput.matchedElementCount = input.matchedElementCount;
+  if (input.truncated !== undefined) snapshotInput.truncated = input.truncated;
   return SnapshotSchema.parse(snapshotInput);
 }
 

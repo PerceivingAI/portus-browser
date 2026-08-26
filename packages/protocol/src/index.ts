@@ -682,6 +682,9 @@ export const SnapshotSchema = z.object({
   elements: z.array(SnapshotElementSchema),
   capturedAt: IsoDateTimeSchema,
   cleanedDom: z.string().optional(),
+  candidateCount: z.number().int().nonnegative().optional(),
+  matchedElementCount: z.number().int().nonnegative().optional(),
+  truncated: z.boolean().optional(),
   filtered: z.boolean().optional(),
   filter: SnapshotFilterSchema.nullable().optional()
 }).strict();

@@ -8,7 +8,8 @@ import { encodeNativeMessage, tryReadNativeMessageFrame } from "@portus/native-m
 import { DEFAULT_COMMAND_POLICY } from "@portus/protocol";
 import { deserializeTransportFrame, serializeTransportFrame } from "@portus/transport";
 import { createNativeHostRelay } from "@portus/native-host";
-import { createPortusExtensionBridge, detectBrowserName } from "../dist/index.js";
+import { capturePortusSnapshotPayload, createPortusExtensionBridge, detectBrowserName } from "../dist/index.js";
+import { JSDOM } from "jsdom";
 
 const TEST_BROKER_TOKEN = "test-broker-token";
 
@@ -1068,7 +1069,7 @@ test("preserves enriched snapshot metadata for links and fields", async () => {
 test("captures filtered snapshots and allows actions with returned element ids", async () => {
   const fixture = createChromeFixture({
     executeScript(injection, actions) {
-      if (Array.isArray(injection.args) && injection.args.length > 0) {
+      if (isActionInjection(injection)) {
         actions.push(injection.args[0]);
         return Promise.resolve([{
           result: {
@@ -1134,6 +1135,67 @@ test("captures filtered snapshots and allows actions with returned element ids",
   assert.equal(fixture.actions[0].target.elementId, "el_000001");
 });
 
+test("snapshot collection filters beyond the first 100 candidates before applying limits", () => {
+  const buttons = Array.from({ length: 150 }, (_, index) => {
+    const label = index === 142 ? "Target after 100" : `Button ${index + 1}`;
+    return `<button>${label}</button>`;
+  }).join("");
+  const dom = new JSDOM(`<!doctype html><html><body>${buttons}</body></html>`, { url: "https://example.com/" });
+  const descriptors = new Map();
+  const globals = {
+    window: dom.window,
+    document: dom.window.document,
+    location: dom.window.location,
+    HTMLElement: dom.window.HTMLElement,
+    HTMLInputElement: dom.window.HTMLInputElement,
+    HTMLAnchorElement: dom.window.HTMLAnchorElement,
+    getComputedStyle: dom.window.getComputedStyle.bind(dom.window)
+  };
+
+  for (const [key, value] of Object.entries(globals)) {
+    descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  }
+  Object.defineProperty(dom.window.HTMLElement.prototype, "offsetWidth", { configurable: true, get: () => 100 });
+  Object.defineProperty(dom.window.HTMLElement.prototype, "offsetHeight", { configurable: true, get: () => 20 });
+  dom.window.HTMLElement.prototype.getBoundingClientRect = () => ({
+    x: 0,
+    y: 0,
+    left: 0,
+    top: 0,
+    right: 100,
+    bottom: 20,
+    width: 100,
+    height: 20,
+    toJSON() { return this; }
+  });
+
+  try {
+    const targeted = capturePortusSnapshotPayload({
+      query: "target after 100",
+      role: "button",
+      maxElements: 10
+    }, 10000);
+    assert.equal(targeted.candidateCount, 150);
+    assert.equal(targeted.matchedElementCount, 1);
+    assert.equal(targeted.truncated, false);
+    assert.equal(targeted.elements.length, 1);
+    assert.equal(targeted.elements[0].label, "Target after 100");
+
+    const capped = capturePortusSnapshotPayload({ role: "button", maxElements: 120 }, 10000);
+    assert.equal(capped.candidateCount, 150);
+    assert.equal(capped.matchedElementCount, 150);
+    assert.equal(capped.elements.length, 120);
+    assert.equal(capped.truncated, true);
+  } finally {
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    }
+    dom.window.close();
+  }
+});
+
 test("performs DOM actions and rejects stale snapshot ids", async () => {
   const fixture = createChromeFixture();
   const bridge = createConnectedBridge(fixture);
@@ -1163,7 +1225,7 @@ test("performs DOM actions and rejects stale snapshot ids", async () => {
 test("fill form remains all-or-nothing when partial mode is not enabled", async () => {
   const fixture = createChromeFixture({
     executeScript(injection, actions) {
-      if (Array.isArray(injection.args) && injection.args.length > 0) {
+      if (isActionInjection(injection)) {
         actions.push(injection.args[0]);
         return Promise.resolve([{ result: { ok: true, details: { action: "fillForm", fields: [] } } }]);
       }
@@ -1207,7 +1269,7 @@ test("fill form remains all-or-nothing when partial mode is not enabled", async 
 test("fill form partial mode returns mixed per-field results", async () => {
   const fixture = createChromeFixture({
     executeScript(injection, actions) {
-      if (Array.isArray(injection.args) && injection.args.length > 0) {
+      if (isActionInjection(injection)) {
         const payload = injection.args[0];
         actions.push(payload);
         assert.equal(payload.action, "fillForm");
@@ -1334,7 +1396,7 @@ test("waits for visible page text", async () => {
 test("surfaces unsupported DOM action failures", async () => {
   const fixture = createChromeFixture({
     executeScript(injection, actions) {
-      if (Array.isArray(injection.args) && injection.args.length > 0) {
+      if (isActionInjection(injection)) {
         actions.push(injection.args[0]);
         return Promise.resolve([{
           result: {
@@ -1470,7 +1532,7 @@ test("detaches debugger sessions when a debugger command fails after attach", as
 test("dismisses cookie banners conservatively and prefers reject controls", async () => {
   const fixture = createChromeFixture({
     executeScript(injection, actions) {
-      if (Array.isArray(injection.args) && injection.args.length > 0) {
+      if (isActionInjection(injection)) {
         actions.push(injection.args[0]);
         return Promise.resolve([{ result: { ok: true, details: { action: injection.args[0].action, targetValidated: true } } }]);
       }
@@ -1934,6 +1996,16 @@ test("disabling terminal kills terminal transport without touching bridge", asyn
   assert.equal((await bridge.getStatus()).terminalNativeHostState, "disconnected");
 });
 
+function isActionInjection(injection) {
+  const payload = Array.isArray(injection.args) ? injection.args[0] : undefined;
+  return payload !== null && typeof payload === "object" && typeof payload.action === "string";
+}
+
+function isHistoryInjection(injection) {
+  const direction = Array.isArray(injection.args) ? injection.args[0] : undefined;
+  return direction === "back" || direction === "forward";
+}
+
 function createChromeFixture(overrides = {}) {
   const ports = [];
   const connectedHostNames = [];
@@ -2016,9 +2088,13 @@ function createChromeFixture(overrides = {}) {
       scripting: {
         executeScript(injection) {
           if (overrides.executeScript) return overrides.executeScript(injection, actions);
-          if (Array.isArray(injection.args) && injection.args.length > 0) {
+          if (isActionInjection(injection)) {
             actions.push(injection.args[0]);
             return Promise.resolve([{ result: { ok: true, details: { action: injection.args[0].action } } }]);
+          }
+          if (isHistoryInjection(injection)) {
+            actions.push(injection.args[0]);
+            return Promise.resolve([{ result: { ok: true } }]);
           }
           return defaultSnapshotScriptResult();
         }
