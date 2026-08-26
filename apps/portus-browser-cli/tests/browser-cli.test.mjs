@@ -556,7 +556,7 @@ test("recipes imports exports and protects overwrites", async () => {
   const duplicateImport = await runPortusBrowserCli(["recipes", "import", sourcePath, "--directory", directory, "--json"], { brokerClient: createMockBroker({}) });
   assert.notEqual(duplicateImport.exitCode, 0);
 
-  const exported = await runPortusBrowserCli(["recipes", "export", "news", "--output", exportPath, "--directory", directory, "--json"], { brokerClient: createMockBroker({}) });
+  const exported = await runPortusBrowserCli(["recipes", "export", "news", "--output", exportPath, "--directory", directory], { brokerClient: createMockBroker({}) });
   assert.equal(exported.exitCode, 0);
   assert.equal(JSON.parse(await readFile(exportPath, "utf8")).id, "news");
   const duplicateExport = await runPortusBrowserCli(["recipes", "export", "news", "--output", exportPath, "--directory", directory, "--json"], { brokerClient: createMockBroker({}) });
@@ -677,6 +677,26 @@ test("invalid usage returns code 2", async () => {
   assert.equal(result.exitCode, 2);
   assert.equal(result.stdout, "");
   assert.equal(JSON.parse(result.stderr).error.code, "INVALID_MESSAGE");
+});
+
+test("rejects unknown flags instead of silently changing command behavior", async () => {
+  const broker = createMockBroker({
+    "tab.open": { tab: tab("br_000001", 33, 10, 2, true, "Example", "https://example.com/") }
+  });
+  const result = await runPortusBrowserCli(["open", "example.com", "--backgroun", "--json"], { brokerClient: broker });
+
+  assert.equal(result.exitCode, 2);
+  assert.match(JSON.parse(result.stderr).error.message, /Unknown flag: --backgroun/);
+  assert.deepEqual(broker.requests, []);
+});
+
+test("rejects duplicate boolean flags instead of disabling them accidentally", async () => {
+  const broker = createMockBroker({ "browser.list": { browsers: [] } });
+  const result = await runPortusBrowserCli(["browsers", "--json", "--json"], { brokerClient: broker });
+
+  assert.equal(result.exitCode, 2);
+  assert.match(JSON.parse(result.stderr).error.message, /--json may only be provided once/);
+  assert.deepEqual(broker.requests, []);
 });
 
 test("settings profile rename and delete are not CLI commands", async () => {

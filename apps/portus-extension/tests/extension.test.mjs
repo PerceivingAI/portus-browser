@@ -779,6 +779,27 @@ test("clears only the requested navigation policy rule list", async () => {
   assert.equal(clearedBlock.policy.blockedNavigationRules.length, 0);
 });
 
+test("migrates legacy terminal profile ids from extension local storage", async () => {
+  const fixture = createChromeFixture({
+    storage: {
+      "portus.terminalPreferences": terminalSettingsFixture({
+        defaultProfileId: "PowerShell 7",
+        fontSize: 19,
+        startupCommand: "codex"
+      })
+    }
+  });
+  const bridge = createPortusExtensionBridge(fixture.chrome);
+
+  const status = await bridge.getStatus();
+
+  assert.equal(status.terminalPreferences.defaultProfileId, "auto");
+  assert.equal(status.terminalPreferences.fontSize, 19);
+  assert.equal(status.terminalPreferences.startupCommand, "codex");
+  assert.equal(fixture.storage["portus.terminalPreferences"].defaultProfileId, "auto");
+  assert.equal(fixture.storage["portus.terminalPreferences"].fontSize, 19);
+});
+
 test("migrates legacy origin preferences from extension local storage", async () => {
   const fixture = createChromeFixture({
     storage: {
@@ -887,6 +908,23 @@ test("exports, imports, and resets policy, UX, and terminal settings together", 
   assert.equal(reset.terminal.manualTerminalPath, null);
   status = await bridge.getStatus();
   assert.equal(status.settingsProfiles.content.policyPreferences.sessionStepRetentionLimit, 10);
+});
+
+test("migrates legacy invalid terminal profile ids in direct settings imports", async () => {
+  const fixture = createChromeFixture();
+  const bridge = createPortusExtensionBridge(fixture.chrome);
+  const imported = await bridge.handleRuntimeMessage({
+    type: "portus.settings.import",
+    terminalPreferences: terminalSettingsFixture({
+      defaultProfileId: "PowerShell 7",
+      fontSize: 18,
+      startupCommand: "codex"
+    })
+  });
+
+  assert.equal(imported.terminal.defaultProfileId, "auto");
+  assert.equal(imported.terminal.fontSize, 18);
+  assert.equal(imported.terminal.startupCommand, "codex");
 });
 
 test("rejects invalid imported terminal preferences", async () => {

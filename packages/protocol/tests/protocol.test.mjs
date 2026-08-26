@@ -5,19 +5,22 @@ import {
   BrowserSessionSchema,
   CommandTypeSchema,
   DEFAULT_COMMAND_POLICY,
+  DEFAULT_TERMINAL_PROFILE_ID,
   ErrorCodeSchema,
   RegistrationResultSchema,
   SessionStepSchema,
   PolicyPreferencesSchema,
   migrateLegacyPolicyPreferences,
   migrateLegacySettingsProfileCatalog,
+  migrateLegacyTerminalPreferences,
   navigationPolicyAllowsUrl,
   normalizeNavigationRulePattern,
   RequestEnvelopeSchema,
   safeParseProtocolMessage,
   ResponseEnvelopeSchema,
   SnapshotFilterSchema,
-  SnapshotSchema
+  SnapshotSchema,
+  TerminalProfileIdSchema
 } from "../dist/index.js";
 
 const now = "2026-04-28T00:00:00.000Z";
@@ -36,6 +39,16 @@ test("validates request envelopes", () => {
   assert.equal(request.auth.brokerToken, "test-token");
   assert.throws(() => RequestEnvelopeSchema.parse({ ...request, protocolVersion: "1" }));
   assert.throws(() => RequestEnvelopeSchema.parse({ ...request, auth: { brokerToken: "test-token", extra: true } }));
+});
+
+test("defines the canonical terminal profile id contract", () => {
+  assert.equal(DEFAULT_TERMINAL_PROFILE_ID, "auto");
+  for (const profileId of ["auto", "powershell", "pwsh", "wsl-default", "wsl:ubuntu-24.04", "my_terminal"]) {
+    assert.equal(TerminalProfileIdSchema.safeParse(profileId).success, true, profileId);
+  }
+  for (const profileId of ["", "PowerShell 7", "my/profile", "terminal name", ":terminal"]) {
+    assert.equal(TerminalProfileIdSchema.safeParse(profileId).success, false, profileId);
+  }
 });
 
 test("validates bridge registration results with profile state", () => {
@@ -235,12 +248,29 @@ test("migrates persisted origin policies and settings catalogs", () => {
       content: {
         policyPreferences: {
           blockedOrigins: [{ origin: "https://blocked.example", source: "config" }]
+        },
+        terminalPreferences: {
+          defaultProfileId: "PowerShell 7",
+          fontSize: 18
         }
       }
     }]
   });
   assert.equal(migratedCatalog.version, 2);
   assert.equal(migratedCatalog.profiles[0].content.policyPreferences.blockedNavigationRules[0].value, "https://blocked.example");
+  assert.equal(migratedCatalog.profiles[0].content.terminalPreferences.defaultProfileId, "auto");
+  assert.equal(migratedCatalog.profiles[0].content.terminalPreferences.fontSize, 18);
+
+  const terminalPreferences = { defaultProfileId: "PowerShell 7", fontSize: 20, startupCommand: "codex" };
+  const migratedTerminal = migrateLegacyTerminalPreferences(terminalPreferences);
+  assert.deepEqual(migratedTerminal, { defaultProfileId: "auto", fontSize: 20, startupCommand: "codex" });
+  assert.notEqual(migratedTerminal, terminalPreferences);
+
+  const healthyCatalog = {
+    version: 2,
+    profiles: [{ content: { terminalPreferences: { defaultProfileId: "wsl:ubuntu-24.04" } } }]
+  };
+  assert.equal(migrateLegacySettingsProfileCatalog(healthyCatalog), healthyCatalog);
 });
 
 test("validates session steps and Phase 14 command policy defaults", () => {

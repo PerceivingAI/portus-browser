@@ -1,14 +1,15 @@
 import { z } from "zod";
+import { DEFAULT_TERMINAL_PROFILE_ID, TerminalProfileIdSchema, type TerminalProfileId } from "@portus/protocol";
+
+export { DEFAULT_TERMINAL_PROFILE_ID, TerminalProfileIdSchema, type TerminalProfileId };
 
 export const TERMINAL_NATIVE_HOST_NAME = "com.portus.browser.terminal" as const;
-export const DEFAULT_TERMINAL_PROFILE_ID = "auto" as const;
 export const DEFAULT_TERMINAL_WORKING_DIRECTORY = "Downloads/portus-session" as const;
 export const DEFAULT_TERMINAL_STARTUP_COMMAND = null;
 export const TERMINAL_OUTPUT_CHUNK_MAX_LENGTH = 64 * 1024;
 
 export const TerminalIdSchema = z.string().regex(/^term_[A-Za-z0-9_-]+$/);
 export const TerminalRequestIdSchema = z.string().regex(/^treq_[A-Za-z0-9_-]+$/);
-export const TerminalProfileIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/);
 
 export const TerminalProfileKindSchema = z.enum(["shell", "wsl", "custom"]);
 export const TerminalProfileSourceSchema = z.enum(["detected", "manual", "config"]);
@@ -259,7 +260,6 @@ export const TerminalServerMessageSchema = z.discriminatedUnion("type", [
 
 export type TerminalId = z.infer<typeof TerminalIdSchema>;
 export type TerminalRequestId = z.infer<typeof TerminalRequestIdSchema>;
-export type TerminalProfileId = z.infer<typeof TerminalProfileIdSchema>;
 export type TerminalProfileCapability = z.infer<typeof TerminalProfileCapabilitySchema>;
 export type TerminalProfile = z.infer<typeof TerminalProfileSchema>;
 export type TerminalSettings = z.infer<typeof TerminalSettingsSchema>;

@@ -205,7 +205,9 @@ export function resolveTerminalSessionDirectory(
   if (isTargetAbsolute(input, platform)) return resolveInstallPath(input, platform);
   if (input !== DEFAULT_TERMINAL_WORKING_DIRECTORY) return resolveInstallPath(input, platform);
 
-  const home = env.USERPROFILE ?? env.HOME;
+  const home = platform === "win32"
+    ? env.USERPROFILE ?? env.HOME
+    : env.HOME ?? env.USERPROFILE;
   if (!home) throw new Error("Cannot resolve Downloads/portus-session without USERPROFILE or HOME.");
   return joinTargetPath(platform, home, "Downloads", "portus-session");
 }
@@ -659,6 +661,12 @@ async function defaultEnsureDirectory(path: string): Promise<void> {
   await mkdir(path, { recursive: true });
 }
 
+const INSTALLER_VALUE_FLAGS = new Set([
+  "extension-id", "browser", "manifest-path", "native-host-path", "platform", "repo-root",
+  "terminal-manifest-path", "terminal-native-host-path", "terminal-session-directory", "output"
+]);
+const INSTALLER_BOOLEAN_FLAGS = new Set(["apply", "json"]);
+
 function parseArgs(argv: string[]): ParsedArgs {
   const flags = new Map<string, string | boolean>();
   let command = "plan";
@@ -670,12 +678,17 @@ function parseArgs(argv: string[]): ParsedArgs {
       const flag = token.slice(2);
       const [name, inlineValue] = flag.split("=", 2);
       if (!name) throw new Error("Invalid flag.");
+      if (!isKnownFlag(name)) throw new Error(`Unknown flag: --${name}.`);
+      const takesValue = flagTakesValue(name);
       if (inlineValue !== undefined) {
+        if (!takesValue) throw new Error(`--${name} does not take a value.`);
+        if (inlineValue.length === 0) throw new Error(`--${name} requires a value.`);
         flags.set(name, inlineValue);
         continue;
       }
-      const next = argv[index + 1];
-      if (next !== undefined && !next.startsWith("--") && flagTakesValue(name)) {
+      if (takesValue) {
+        const next = argv[index + 1];
+        if (next === undefined || next.startsWith("--")) throw new Error(`--${name} requires a value.`);
         flags.set(name, next);
         index += 1;
       } else {
@@ -693,18 +706,11 @@ function parseArgs(argv: string[]): ParsedArgs {
 }
 
 function flagTakesValue(name: string): boolean {
-  return [
-    "extension-id",
-    "browser",
-    "manifest-path",
-    "native-host-path",
-    "platform",
-    "repo-root",
-    "terminal-manifest-path",
-    "terminal-native-host-path",
-    "terminal-session-directory",
-    "output"
-  ].includes(name);
+  return INSTALLER_VALUE_FLAGS.has(name);
+}
+
+function isKnownFlag(name: string): boolean {
+  return INSTALLER_VALUE_FLAGS.has(name) || INSTALLER_BOOLEAN_FLAGS.has(name);
 }
 
 function readRequiredStringFlag(parsed: ParsedArgs, name: string): string {

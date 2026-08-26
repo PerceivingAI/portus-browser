@@ -1092,6 +1092,25 @@ test("rejects imported custom profiles with invalid terminal settings", async ()
   assert.equal(imported.error.code, "INVALID_MESSAGE");
 });
 
+test("migrates legacy invalid terminal profile ids in imported custom profiles", async () => {
+  const broker = createBroker({ brokerToken: TEST_BROKER_TOKEN, now: fixedClock() });
+  const exported = await broker.handleRequest(request("req_export_profiles", "settings.profiles.export"));
+  const catalog = JSON.parse(JSON.stringify(exported.result.catalog));
+  const customProfile = catalog.profiles.find((profile) => profile.name === "Profile_1");
+  customProfile.content.terminalPreferences.defaultProfileId = "PowerShell 7";
+  customProfile.content.terminalPreferences.fontSize = 18;
+  customProfile.content.terminalPreferences.startupCommand = "codex";
+
+  const imported = await broker.handleRequest(request("req_import_profiles", "settings.profiles.import", { catalog }));
+  const migratedProfile = imported.result.catalog.profiles.find((profile) => profile.name === "Profile_1");
+
+  assert.equal(imported.ok, true);
+  assert.equal(migratedProfile.content.terminalPreferences.defaultProfileId, "auto");
+  assert.equal(migratedProfile.content.terminalPreferences.fontSize, 18);
+  assert.equal(migratedProfile.content.terminalPreferences.startupCommand, "codex");
+  assert.equal(imported.result.catalog.profiles.length, catalog.profiles.length);
+});
+
 test("creates unique profile ids when imported profiles already use generated ids", async () => {
   const broker = createBroker({ brokerToken: TEST_BROKER_TOKEN, now: fixedClock() });
   const exported = await broker.handleRequest(request("req_export_profiles", "settings.profiles.export"));
@@ -1127,6 +1146,31 @@ test("persists Broker-owned settings profile catalog", async () => {
   assert.ok(state.result.settingsProfiles.profiles.some((profile) => profile.name === "Default_Profile"));
   assert.ok(state.result.settingsProfiles.profiles.some((profile) => profile.name === "Profile_1"));
   assert.ok(state.result.settingsProfiles.profiles.some((profile) => profile.name === "Profile_2"));
+});
+
+test("migrates persisted invalid terminal profile ids without resetting profile content", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "portus-settings-profiles-terminal-legacy-"));
+  const settingsProfilesPath = join(directory, "settings-profiles.json");
+  const seedBroker = createRealBroker({ brokerToken: TEST_BROKER_TOKEN, settingsProfilesPath, now: fixedClock() });
+  const exported = await seedBroker.handleRequest(request("req_export_profiles", "settings.profiles.export"));
+  const catalog = JSON.parse(JSON.stringify(exported.result.catalog));
+  const customProfile = catalog.profiles.find((profile) => profile.name === "Profile_1");
+  customProfile.content.terminalPreferences.defaultProfileId = "PowerShell 7";
+  customProfile.content.terminalPreferences.fontSize = 19;
+  customProfile.content.terminalPreferences.startupCommand = "codex";
+  await writeFile(settingsProfilesPath, `${JSON.stringify(catalog, null, 2)}\n`, "utf8");
+
+  const reloaded = createRealBroker({ brokerToken: TEST_BROKER_TOKEN, settingsProfilesPath, now: fixedClock() });
+  const state = await reloaded.handleRequest(request("req_profile_state", "settings.profile.state", { browserName: "Chrome" }));
+  const stored = JSON.parse(await readFile(settingsProfilesPath, "utf8"));
+  const storedProfile = stored.profiles.find((profile) => profile.name === "Profile_1");
+
+  assert.equal(state.result.settingsProfiles.content.terminalPreferences.defaultProfileId, "auto");
+  assert.equal(state.result.settingsProfiles.content.terminalPreferences.fontSize, 19);
+  assert.equal(state.result.settingsProfiles.content.terminalPreferences.startupCommand, "codex");
+  assert.equal(storedProfile.content.terminalPreferences.defaultProfileId, "auto");
+  assert.equal(storedProfile.content.terminalPreferences.fontSize, 19);
+  assert.equal(stored.profiles.length, catalog.profiles.length);
 });
 
 test("migrates persisted version 1 origin profiles to version 2 navigation rules", async () => {

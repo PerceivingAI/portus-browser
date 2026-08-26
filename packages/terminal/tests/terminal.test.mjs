@@ -7,6 +7,7 @@ import {
   TERMINAL_OUTPUT_CHUNK_MAX_LENGTH,
   TerminalClientMessageSchema,
   TerminalOutputChunkSchema,
+  TerminalProfileIdSchema,
   TerminalProfileSchema,
   TerminalServerMessageSchema,
   TerminalSettingsSchema,
@@ -67,6 +68,11 @@ test("terminal settings use Phase 0 defaults and normalize empty startup command
 
   const parsed = TerminalSettingsSchema.parse({ startupCommand: "" });
   assert.equal(parsed.startupCommand, null);
+});
+
+test("terminal settings use the shared profile id grammar", () => {
+  assert.equal(TerminalProfileIdSchema.safeParse("wsl:ubuntu-24.04").success, true);
+  assert.equal(TerminalSettingsSchema.safeParse({ defaultProfileId: "PowerShell 7" }).success, false);
 });
 
 test("terminal profiles require embedded PTY support and reject GUI tab capabilities", () => {

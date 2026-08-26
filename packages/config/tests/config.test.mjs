@@ -91,6 +91,14 @@ test("environment overrides are parsed and validated", () => {
 });
 
 
+test("terminal profile ids use the canonical protocol grammar", () => {
+  assert.equal(parseConfig({ terminal: { defaultProfileId: "wsl:ubuntu-24.04" } }).terminal.defaultProfileId, "wsl:ubuntu-24.04");
+  const invalid = validateConfig({ terminal: { defaultProfileId: "PowerShell 7" } });
+  assert.equal(invalid.ok, false);
+  assert.equal(invalid.error.code, "CONFIG_INVALID");
+  assert.equal(invalid.error.details.issues[0].configPath, "terminal.defaultProfileId");
+});
+
 test("terminal startup command normalizes empty input", () => {
   const parsed = parseConfig({ terminal: { startupCommand: "" } });
   assert.equal(parsed.terminal.startupCommand, null);

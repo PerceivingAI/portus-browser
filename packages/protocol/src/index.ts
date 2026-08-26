@@ -249,6 +249,8 @@ export const DEFAULT_SETTINGS_PROFILE_NAME = "Default_Profile" as const;
 export const INITIAL_CUSTOM_SETTINGS_PROFILE_NAME = "Profile_1" as const;
 export const SETTINGS_PROFILE_CREATE_OPTION = "__portus_create_profile__" as const;
 export const DEFAULT_MAX_CUSTOM_SETTINGS_PROFILES = 10 as const;
+export const DEFAULT_TERMINAL_PROFILE_ID = "auto" as const;
+export const TerminalProfileIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/);
 export const SettingsProfileIdSchema = z.string().regex(/^profile_[A-Za-z0-9_-]+$/);
 export const SettingsProfileNameSchema = z.string().min(1).max(80);
 
@@ -385,24 +387,48 @@ export function migrateLegacyPolicyPreferences(input: unknown): unknown {
   };
 }
 
-export function migrateLegacySettingsProfileCatalog(input: unknown): unknown {
-  if (!isUnknownRecord(input) || input.version !== 1 || !Array.isArray(input.profiles)) return input;
+export function migrateLegacyTerminalPreferences(input: unknown): unknown {
+  if (!isUnknownRecord(input)) return input;
+  const defaultProfileId = input.defaultProfileId;
+  if (defaultProfileId === undefined || TerminalProfileIdSchema.safeParse(defaultProfileId).success) return input;
   return {
     ...input,
-    version: 2,
-    profiles: input.profiles.map((profile) => {
-      if (!isUnknownRecord(profile) || !isUnknownRecord(profile.content)) return profile;
-      const policyPreferences = profile.content.policyPreferences;
-      return {
-        ...profile,
-        content: {
-          ...profile.content,
-          ...(policyPreferences === undefined ? {} : {
-            policyPreferences: migrateLegacyPolicyPreferences(policyPreferences)
-          })
-        }
-      };
-    })
+    defaultProfileId: DEFAULT_TERMINAL_PROFILE_ID
+  };
+}
+
+export function migrateLegacySettingsProfileCatalog(input: unknown): unknown {
+  if (!isUnknownRecord(input) || !Array.isArray(input.profiles) || (input.version !== 1 && input.version !== 2)) return input;
+  const upgradeVersion = input.version === 1;
+  let changed = upgradeVersion;
+  const profiles = input.profiles.map((profile) => {
+    if (!isUnknownRecord(profile) || !isUnknownRecord(profile.content)) return profile;
+    const policyPreferences = profile.content.policyPreferences;
+    const terminalPreferences = profile.content.terminalPreferences;
+    const migratedPolicyPreferences = upgradeVersion && policyPreferences !== undefined
+      ? migrateLegacyPolicyPreferences(policyPreferences)
+      : policyPreferences;
+    const migratedTerminalPreferences = terminalPreferences === undefined
+      ? undefined
+      : migrateLegacyTerminalPreferences(terminalPreferences);
+    const policyChanged = migratedPolicyPreferences !== policyPreferences;
+    const terminalChanged = migratedTerminalPreferences !== terminalPreferences;
+    if (!policyChanged && !terminalChanged) return profile;
+    changed = true;
+    return {
+      ...profile,
+      content: {
+        ...profile.content,
+        ...(policyChanged ? { policyPreferences: migratedPolicyPreferences } : {}),
+        ...(terminalChanged ? { terminalPreferences: migratedTerminalPreferences } : {})
+      }
+    };
+  });
+  if (!changed) return input;
+  return {
+    ...input,
+    ...(upgradeVersion ? { version: 2 } : {}),
+    profiles
   };
 }
 
@@ -811,6 +837,7 @@ export const TerminalMessageSchema = z.object({
   payload: JsonObjectSchema
 }).strict();
 
+export type TerminalProfileId = z.infer<typeof TerminalProfileIdSchema>;
 export type ProtocolVersion = z.infer<typeof ProtocolVersionSchema>;
 export type RequestEnvelope = z.infer<typeof RequestEnvelopeSchema>;
 export type ResponseEnvelope = z.infer<typeof ResponseEnvelopeSchema>;

@@ -290,7 +290,7 @@ test("Linux apply writes launchers and manifests without registry commands", asy
 });
 
 
-test("resolves the default terminal session folder from the user profile", () => {
+test("resolves the default terminal session folder from the platform home directory", () => {
   const userProfileFixture = resolve(tmpdir(), "portus-profile");
   const env = process.platform === "win32"
     ? { USERPROFILE: userProfileFixture }
@@ -298,6 +298,12 @@ test("resolves the default terminal session folder from the user profile", () =>
   const folder = resolveTerminalSessionDirectory(undefined, env);
 
   assert.equal(folder, join(userProfileFixture, "Downloads", "portus-session"));
+
+  const unixFolder = resolveTerminalSessionDirectory(undefined, {
+    HOME: "/home/portus-test",
+    USERPROFILE: "/unexpected/windows-profile"
+  }, "linux");
+  assert.equal(unixFolder, "/home/portus-test/Downloads/portus-session");
 });
 
 test("apply keeps native host registration when terminal session folder creation fails", async () => {
@@ -348,4 +354,13 @@ test("CLI renders plan JSON without applying registry changes", async () => {
   const output = JSON.parse(result.stdout);
   assert.equal(output.ok, true);
   assert.equal(output.plan.extensionId, extensionId);
+});
+
+test("CLI rejects unknown installer flags", async () => {
+  const result = await runDevInstallerCli(["plan", "--extension-id", extensionId, "--browzer", "chrome"], {
+    repoRoot: "C:\\repo\\portus-browser-dev"
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr, /Unknown flag: --browzer/);
 });

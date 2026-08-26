@@ -778,7 +778,8 @@ export class BrokerCore {
 
   private async importSettingsProfiles(request: RequestEnvelope): Promise<Record<string, unknown>> {
     const payload = SettingsProfilesImportPayloadSchema.parse(request.payload);
-    const catalog = this.normalizeSettingsProfileCatalog(payload.catalog);
+    const migrated = migrateLegacySettingsProfileCatalog(payload.catalog);
+    const catalog = this.normalizeSettingsProfileCatalog(SettingsProfileCatalogSchema.parse(migrated));
     this.validateSettingsProfileCatalog(catalog);
     this.settingsProfileCatalog = catalog;
     this.persistSettingsProfileCatalog();

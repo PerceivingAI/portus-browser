@@ -1636,6 +1636,16 @@ function sortTabs(tabs: Tab[]): Tab[] {
   });
 }
 
+const CLI_VALUE_FLAGS = new Set([
+  "output", "browser", "timeout", "tab-id", "index", "element", "snapshot", "from", "to", "fields", "json-fields", "field",
+  "x", "y", "reason", "scheme", "authority", "host-wildcard", "url-exact", "url-prefix", "type", "limit", "kind", "strategy",
+  "query", "role", "max-elements", "state", "url-contains", "text", "element-query", "directory", "file", "json-input", "content",
+  "description", "name", "id"
+]);
+const CLI_BOOLEAN_FLAGS = new Set([
+  "background", "debugger", "json", "partial", "dry-run", "force", "yes", "interactive-only", "quiet"
+]);
+
 function parseArgs(argv: string[]): ParsedArgs {
   const flags = new Map<string, string | boolean>();
   const positionals: string[] = [];
@@ -1648,15 +1658,21 @@ function parseArgs(argv: string[]): ParsedArgs {
       if (flag.length === 0) throw usageError("Invalid flag.");
       const [name, inlineValue] = flag.split("=", 2);
       if (!name) throw usageError("Invalid flag.");
+      if (!isKnownFlag(name)) throw usageError(`Unknown flag: --${name}.`);
+      const takesValue = flagTakesValue(name);
       if (inlineValue !== undefined) {
+        if (!takesValue) throw usageError(`--${name} does not take a value.`);
+        if (inlineValue.length === 0) throw usageError(`--${name} requires a value.`);
         setParsedFlag(flags, name, inlineValue);
         continue;
       }
-      const next = argv[index + 1];
-      if (next !== undefined && !next.startsWith("--") && flagTakesValue(name)) {
+      if (takesValue) {
+        const next = argv[index + 1];
+        if (next === undefined || next.startsWith("--")) throw usageError(`--${name} requires a value.`);
         setParsedFlag(flags, name, next);
         index += 1;
       } else {
+        if (flags.has(name)) throw usageError(`--${name} may only be provided once.`);
         setParsedFlag(flags, name, true);
       }
       continue;
@@ -1672,7 +1688,11 @@ function parseArgs(argv: string[]): ParsedArgs {
 }
 
 function flagTakesValue(name: string): boolean {
-  return ["output", "browser", "timeout", "tab-id", "index", "element", "snapshot", "from", "to", "fields", "json-fields", "field", "x", "y", "reason", "scheme", "authority", "host-wildcard", "url-exact", "url-prefix", "type", "limit", "kind", "strategy", "query", "role", "max-elements", "state", "url-contains", "text", "element-query", "directory", "file", "json-input", "content", "description", "name", "id"].includes(name);
+  return CLI_VALUE_FLAGS.has(name);
+}
+
+function isKnownFlag(name: string): boolean {
+  return CLI_VALUE_FLAGS.has(name) || CLI_BOOLEAN_FLAGS.has(name);
 }
 
 function setParsedFlag(flags: Map<string, string | boolean | string[]>, name: string, value: string | boolean): void {
@@ -1754,7 +1774,9 @@ function parseFillFormFields(input: unknown): Array<{ elementId: string; value: 
 function resolveOutputMode(parsed: ParsedArgs, config: PortusConfig): OutputMode {
   if (hasFlag(parsed, "json")) return "json";
   if (hasFlag(parsed, "quiet")) return "quiet";
-  const output = readOptionalStringFlag(parsed, "output");
+  const output = parsed.command === "recipes" && parsed.positionals[0] === "export"
+    ? undefined
+    : readOptionalStringFlag(parsed, "output");
   if (!output) return config.cli.output;
   if (output === "table" || output === "json" || output === "ndjson" || output === "quiet") return output;
   throw usageError("--output must be table, json, ndjson, or quiet.");

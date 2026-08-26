@@ -40,6 +40,7 @@ import {
   navigationRuleKey,
   migrateLegacyPolicyPreferences,
   migrateLegacySettingsProfileCatalog,
+  migrateLegacyTerminalPreferences,
   normalizeNavigationRulePattern,
   normalizeNavigationUrl,
   type ActionResult,
@@ -2346,7 +2347,9 @@ export class PortusExtensionBridge {
       ? PolicyPreferencesSchema.parse(migrateLegacyPolicyPreferences(readRecord(message, "policyPreferences")))
       : undefined;
     const parsedUx = hasUx ? ExtensionUxPreferencesSchema.parse(readRecord(message, "uxPreferences")) : undefined;
-    const parsedTerminal = hasTerminal ? TerminalSettingsSchema.parse(readRecord(message, "terminalPreferences")) : undefined;
+    const parsedTerminal = hasTerminal
+      ? TerminalSettingsSchema.parse(migrateLegacyTerminalPreferences(readRecord(message, "terminalPreferences")))
+      : undefined;
     const policy = parsedPolicy ? await this.importPolicyPreferences(parsedPolicy) : this.getPolicyPreferences();
     const ux = parsedUx ? await this.importUxPreferences(parsedUx) : this.getUxPreferences();
     const terminal = parsedTerminal ? await this.setTerminalPreferences(parsedTerminal, false) : this.getTerminalPreferences();
@@ -3009,8 +3012,12 @@ export class PortusExtensionBridge {
       const result = storage.get(TERMINAL_PREFERENCES_STORAGE_KEY);
       done(result as Promise<Record<string, unknown>> | Record<string, unknown> | undefined);
     });
-    const parsed = TerminalSettingsSchema.safeParse(stored[TERMINAL_PREFERENCES_STORAGE_KEY]);
-    if (parsed.success) this.terminalPreferences = parsed.data;
+    const current = stored[TERMINAL_PREFERENCES_STORAGE_KEY];
+    const migrated = migrateLegacyTerminalPreferences(current);
+    const parsed = TerminalSettingsSchema.safeParse(migrated);
+    if (!parsed.success) return;
+    this.terminalPreferences = parsed.data;
+    if (migrated !== current) await this.persistTerminalPreferences();
   }
 
   private async persistTerminalPreferences(): Promise<void> {

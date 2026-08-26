@@ -6,10 +6,12 @@ import { z } from "zod";
 import {
   CommandPolicySchema,
   DEFAULT_COMMAND_POLICY,
+  DEFAULT_TERMINAL_PROFILE_ID,
   IconClickBehaviorSchema,
   NavigationRulePatternSchema,
   PortusErrorSchema,
   SidePanelDefaultViewSchema,
+  TerminalProfileIdSchema,
   type PortusError
 } from "@portus/protocol";
 
@@ -143,7 +145,7 @@ const TerminalStartupCommandSchema = z.preprocess((value) => {
 
 export const TerminalConfigSchema = z.object({
   enabled: z.boolean().default(true),
-  defaultProfileId: z.string().min(1).default("auto"),
+  defaultProfileId: TerminalProfileIdSchema.default(DEFAULT_TERMINAL_PROFILE_ID),
   manualTerminalPath: z.string().min(1).nullable().default(null),
   startupCommand: TerminalStartupCommandSchema,
   defaultWorkingDirectory: z.string().min(1).default("Downloads/portus-session"),
