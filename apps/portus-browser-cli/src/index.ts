@@ -70,6 +70,7 @@ import {
   type RecipeManagementIssue,
   type RecipeRecord
 } from "@portus/recipes";
+import { cliFlagTakesValue, getCliFlagSpec, type CliFlagSpec } from "./cli-flags.js";
 import {
   deserializeTransportFrame,
   resolveBrokerEndpoint,
@@ -1636,16 +1637,6 @@ function sortTabs(tabs: Tab[]): Tab[] {
   });
 }
 
-const CLI_VALUE_FLAGS = new Set([
-  "output", "browser", "timeout", "tab-id", "index", "element", "snapshot", "from", "to", "fields", "json-fields", "field",
-  "x", "y", "reason", "scheme", "authority", "host-wildcard", "url-exact", "url-prefix", "type", "limit", "kind", "strategy",
-  "query", "role", "max-elements", "state", "url-contains", "text", "element-query", "directory", "file", "json-input", "content",
-  "description", "name", "id"
-]);
-const CLI_BOOLEAN_FLAGS = new Set([
-  "background", "debugger", "json", "partial", "dry-run", "force", "yes", "interactive-only", "quiet"
-]);
-
 function parseArgs(argv: string[]): ParsedArgs {
   const flags = new Map<string, string | boolean>();
   const positionals: string[] = [];
@@ -1658,22 +1649,22 @@ function parseArgs(argv: string[]): ParsedArgs {
       if (flag.length === 0) throw usageError("Invalid flag.");
       const [name, inlineValue] = flag.split("=", 2);
       if (!name) throw usageError("Invalid flag.");
-      if (!isKnownFlag(name)) throw usageError(`Unknown flag: --${name}.`);
-      const takesValue = flagTakesValue(name);
+      const spec = getCliFlagSpec(name);
+      if (!spec) throw usageError(`Unknown flag: --${name}.`);
+      const takesValue = cliFlagTakesValue(spec);
       if (inlineValue !== undefined) {
         if (!takesValue) throw usageError(`--${name} does not take a value.`);
         if (inlineValue.length === 0) throw usageError(`--${name} requires a value.`);
-        setParsedFlag(flags, name, inlineValue);
+        setParsedFlag(flags, spec, inlineValue);
         continue;
       }
       if (takesValue) {
         const next = argv[index + 1];
         if (next === undefined || next.startsWith("--")) throw usageError(`--${name} requires a value.`);
-        setParsedFlag(flags, name, next);
+        setParsedFlag(flags, spec, next);
         index += 1;
       } else {
-        if (flags.has(name)) throw usageError(`--${name} may only be provided once.`);
-        setParsedFlag(flags, name, true);
+        setParsedFlag(flags, spec, true);
       }
       continue;
     }
@@ -1687,25 +1678,18 @@ function parseArgs(argv: string[]): ParsedArgs {
   return { command, positionals, flags };
 }
 
-function flagTakesValue(name: string): boolean {
-  return CLI_VALUE_FLAGS.has(name);
-}
-
-function isKnownFlag(name: string): boolean {
-  return CLI_VALUE_FLAGS.has(name) || CLI_BOOLEAN_FLAGS.has(name);
-}
-
-function setParsedFlag(flags: Map<string, string | boolean | string[]>, name: string, value: string | boolean): void {
-  const current = flags.get(name);
+function setParsedFlag(flags: Map<string, string | boolean | string[]>, spec: CliFlagSpec, value: string | boolean): void {
+  const current = flags.get(spec.name);
   if (current === undefined) {
-    flags.set(name, value);
+    flags.set(spec.name, value);
     return;
   }
+  if (!spec.repeatable) throw usageError(`--${spec.name} may only be provided once.`);
   if (Array.isArray(current)) {
     current.push(String(value));
     return;
   }
-  flags.set(name, [String(current), String(value)]);
+  flags.set(spec.name, [String(current), String(value)]);
 }
 
 function readSnapshotFilter(parsed: ParsedArgs): Record<string, unknown> | undefined {
