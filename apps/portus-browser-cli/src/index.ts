@@ -70,7 +70,14 @@ import {
   type RecipeManagementIssue,
   type RecipeRecord
 } from "@portus/recipes";
-import { cliFlagTakesValue, getCliFlagSpec, type CliFlagSpec } from "./cli-flags.js";
+import {
+  CLI_FLAGS,
+  CLI_OUTPUT_FLAG,
+  CLI_TIMEOUT_FLAG,
+  cliFlagTakesValue,
+  getCliFlagSpec,
+  type CliFlagSpec
+} from "./cli-flags.js";
 import {
   deserializeTransportFrame,
   resolveBrokerEndpoint,
@@ -443,7 +450,7 @@ export async function runPortusBrowserCli(
     const output = resolveOutputMode(parsed, config);
     outputMode = output;
     broker = options.brokerClient ?? createDefaultBrokerClient(config);
-    const timeoutMs = readOptionalPositiveIntegerFlag(parsed, "timeout") ?? config.commands.timeoutMs;
+    const timeoutMs = readOptionalPositiveIntegerFlag(parsed, CLI_TIMEOUT_FLAG.name) ?? config.commands.timeoutMs;
       const context: CliContext = {
         config,
         output,
@@ -1756,27 +1763,31 @@ function parseFillFormFields(input: unknown): Array<{ elementId: string; value: 
 }
 
 function resolveOutputMode(parsed: ParsedArgs, config: PortusConfig): OutputMode {
-  if (hasFlag(parsed, "json")) return "json";
-  if (hasFlag(parsed, "quiet")) return "quiet";
+  if (hasFlag(parsed, CLI_FLAGS.json.name)) return "json";
+  if (hasFlag(parsed, CLI_FLAGS.quiet.name)) return "quiet";
   const output = parsed.command === "recipes" && parsed.positionals[0] === "export"
     ? undefined
-    : readOptionalStringFlag(parsed, "output");
+    : readOptionalStringFlag(parsed, CLI_OUTPUT_FLAG.name);
   if (!output) return config.cli.output;
   if (output === "table" || output === "json" || output === "ndjson" || output === "quiet") return output;
-  throw usageError("--output must be table, json, ndjson, or quiet.");
+  throw usageError(`--${CLI_OUTPUT_FLAG.name} must be table, json, ndjson, or quiet.`);
 }
 
 function inferOutputMode(argv: string[]): OutputMode {
-  if (argv.includes("--json")) return "json";
-  if (argv.includes("--quiet")) return "quiet";
-  const outputIndex = argv.indexOf("--output");
+  const jsonFlag = `--${CLI_FLAGS.json.name}`;
+  const quietFlag = `--${CLI_FLAGS.quiet.name}`;
+  const outputFlag = `--${CLI_OUTPUT_FLAG.name}`;
+  if (argv.includes(jsonFlag)) return "json";
+  if (argv.includes(quietFlag)) return "quiet";
+  const outputIndex = argv.indexOf(outputFlag);
   if (outputIndex >= 0) {
     const output = argv[outputIndex + 1];
     if (output === "json" || output === "ndjson" || output === "quiet") return output;
   }
-  const inlineOutput = argv.find((value) => value.startsWith("--output="));
+  const inlineOutputPrefix = `${outputFlag}=`;
+  const inlineOutput = argv.find((value) => value.startsWith(inlineOutputPrefix));
   if (inlineOutput) {
-    const output = inlineOutput.slice("--output=".length);
+    const output = inlineOutput.slice(inlineOutputPrefix.length);
     if (output === "json" || output === "ndjson" || output === "quiet") return output;
   }
   return "table";

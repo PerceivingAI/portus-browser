@@ -65,6 +65,36 @@ export const CLI_FLAGS = {
 
 export const CLI_FLAG_SPECS: readonly CliFlagSpec[] = Object.values(CLI_FLAGS);
 
+/**
+ * CLI-2 presentation contract.
+ *
+ * Only --json and --quiet are true presentation globals. They have the same
+ * meaning for every invocation and can therefore be inherited by every
+ * declarative command specification.
+ *
+ * --output is intentionally NOT global: for normal command invocations it
+ * selects the renderer, while `recipes export --output` names the destination
+ * file. The exact invocation must bind that spelling to its meaning.
+ *
+ * --timeout is also intentionally NOT global. Only invocations that actually
+ * perform a timeout-aware Broker/native operation should opt into it.
+ */
+export const CLI_GLOBAL_PRESENTATION_FLAGS = [
+  CLI_FLAGS.json,
+  CLI_FLAGS.quiet
+] as const;
+
+export const CLI_OUTPUT_FLAG = CLI_FLAGS.output;
+export const CLI_TIMEOUT_FLAG = CLI_FLAGS.timeout;
+
+export const CLI_GLOBAL_PRESENTATION_FLAG_NAMES = new Set<string>(
+  CLI_GLOBAL_PRESENTATION_FLAGS.map((spec) => spec.name)
+);
+
+export function isCliGlobalPresentationFlag(name: string): boolean {
+  return CLI_GLOBAL_PRESENTATION_FLAG_NAMES.has(name);
+}
+
 const CLI_FLAG_SPEC_BY_NAME = new Map(CLI_FLAG_SPECS.map((spec) => [spec.name, spec] as const));
 
 export function getCliFlagSpec(name: string): CliFlagSpec | undefined {
