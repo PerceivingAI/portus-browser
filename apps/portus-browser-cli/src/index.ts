@@ -800,14 +800,29 @@ async function handleWatch(context: CliContext, parsed: ParsedArgs): Promise<Rec
 async function handleWait(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
   const tabId = readRequiredIntegerFlag(parsed, "tab-id");
   const state = readOptionalStringFlag(parsed, "state");
+  const elementState = readOptionalStringFlag(parsed, "element-state");
   const urlContains = readOptionalStringFlag(parsed, "url-contains");
   const text = readOptionalStringFlag(parsed, "text");
   const elementQuery = readOptionalStringFlag(parsed, "element-query");
   const role = readOptionalStringFlag(parsed, "role");
-  const isPageWait = text !== undefined || elementQuery !== undefined || role !== undefined;
+  const value = readOptionalStringFlag(parsed, "value");
+  const hasElementCriteria = elementQuery !== undefined || role !== undefined;
+  const hasElementPredicate = elementState !== undefined || value !== undefined;
+  const isPageWait = text !== undefined || hasElementCriteria || hasElementPredicate;
   const isTabWait = state !== undefined || urlContains !== undefined;
-  if (!isPageWait && !isTabWait) throw usageError("wait requires --state, --url-contains, --text, --element-query, or --role.");
+  if (!isPageWait && !isTabWait) {
+    throw usageError("wait requires --state, --url-contains, --text, --element-query, or --role.");
+  }
   if (isPageWait && isTabWait) throw usageError("Use either tab wait flags or page wait flags, not both.");
+  if (hasElementPredicate && !hasElementCriteria) {
+    throw usageError("--element-state and --value require --element-query or --role.");
+  }
+  if (elementState !== undefined && value !== undefined) {
+    throw usageError("Use either --element-state or --value, not both.");
+  }
+  if (text !== undefined && hasElementCriteria && hasElementPredicate) {
+    throw usageError("--text cannot be combined with an element state or value wait.");
+  }
 
   const browserId = await resolveRequiredBrowser(context, parsed);
   const payload: Record<string, unknown> = { browserId, tabId };
@@ -816,6 +831,8 @@ async function handleWait(context: CliContext, parsed: ParsedArgs): Promise<Reco
   if (text !== undefined) payload.text = text;
   if (elementQuery !== undefined) payload.elementQuery = elementQuery;
   if (role !== undefined) payload.role = role;
+  if (elementState !== undefined) payload.elementState = elementState;
+  if (value !== undefined) payload.value = value;
 
   const requestType = isPageWait ? "page.wait" : "tab.wait";
   const result = WaitCommandResultSchema.parse(await context.broker.request(requestType, payload, context.timeoutMs));

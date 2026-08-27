@@ -130,7 +130,19 @@ portus-browser wait --browser 1 --tab-id <tabId> --state complete --json
 portus-browser wait --browser 1 --tab-id <tabId> --url-contains example --json
 portus-browser wait --browser 1 --tab-id <tabId> --text "Reviews" --json
 portus-browser wait --browser 1 --tab-id <tabId> --element-query "Search" --role textbox --json
+portus-browser wait --browser 1 --tab-id <tabId> --element-query "Loading" --element-state absent --json
+portus-browser wait --browser 1 --tab-id <tabId> --element-query "Submit" --element-state enabled --json
+portus-browser wait --browser 1 --tab-id <tabId> --role checkbox --element-state checked --json
+portus-browser wait --browser 1 --tab-id <tabId> --element-query "Status" --value "ready" --json
 ```
+
+Element wait rules:
+
+- `--element-state` accepts `present`, `absent`, `visible`, `hidden`, `enabled`, `disabled`, `checked`, `unchecked`, `selected`, or `unselected`.
+- `--element-state` and `--value` require `--element-query` or `--role`.
+- Use either `--element-state` or `--value`, not both.
+- `absent` matches only when no scriptable frame contains the target.
+- `hidden`, `disabled`, `unchecked`, and `unselected` require every applicable matching target to satisfy the state.
 
 ## Inspecting Pages
 

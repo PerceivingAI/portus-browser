@@ -1501,6 +1501,130 @@ test("page wait preserves Shadow DOM diagnostics inside child frames", async () 
   assert.equal(typeof fixture.scriptInjections[1].func, "function");
 });
 
+test("page wait aggregates inverse element states across every scriptable frame", async () => {
+  let frameResults = [
+    {
+      frameId: 0,
+      documentId: "doc_main",
+      result: {
+        matched: true,
+        targetCount: 0,
+        applicableCount: 0,
+        satisfiedCount: 0,
+        details: { match: "element-state", state: "absent", targetCount: 0, applicableCount: 0, satisfiedCount: 0 }
+      }
+    },
+    {
+      frameId: 11,
+      documentId: "doc_child",
+      result: {
+        matched: false,
+        targetCount: 1,
+        applicableCount: 1,
+        satisfiedCount: 0,
+        details: { match: "element-state", state: "absent", targetCount: 1, applicableCount: 1, satisfiedCount: 0 }
+      }
+    }
+  ];
+  const fixture = createChromeFixture({
+    executeScript(injection) {
+      if (Array.isArray(injection.files)) {
+        return Promise.resolve(frameResults.map(({ frameId, documentId }) => ({ frameId, documentId })));
+      }
+      return Promise.resolve(frameResults);
+    }
+  });
+  const bridge = createConnectedBridge(fixture);
+
+  const presentInChild = await bridge.executePageWaitScript(1, {
+    elementQuery: "Loading",
+    elementState: "absent"
+  });
+  assert.equal(presentInChild.matched, false);
+  assert.equal(presentInChild.details.targetCount, 1);
+
+  frameResults = frameResults.map((entry) => ({
+    ...entry,
+    result: {
+      matched: true,
+      targetCount: 0,
+      applicableCount: 0,
+      satisfiedCount: 0,
+      details: { match: "element-state", state: "absent", targetCount: 0, applicableCount: 0, satisfiedCount: 0 }
+    }
+  }));
+  const absentEverywhere = await bridge.executePageWaitScript(1, {
+    elementQuery: "Loading",
+    elementState: "absent"
+  });
+  assert.equal(absentEverywhere.matched, true);
+  assert.equal(absentEverywhere.details.targetCount, 0);
+
+  frameResults = [
+    {
+      frameId: 0,
+      documentId: "doc_main",
+      result: {
+        matched: true,
+        targetCount: 1,
+        applicableCount: 1,
+        satisfiedCount: 1,
+        details: { match: "element-state", state: "hidden", targetCount: 1, applicableCount: 1, satisfiedCount: 1 }
+      }
+    },
+    {
+      frameId: 11,
+      documentId: "doc_child",
+      result: {
+        matched: false,
+        targetCount: 1,
+        applicableCount: 1,
+        satisfiedCount: 0,
+        details: { match: "element-state", state: "hidden", targetCount: 1, applicableCount: 1, satisfiedCount: 0 }
+      }
+    }
+  ];
+  const visibleInChild = await bridge.executePageWaitScript(1, {
+    elementQuery: "Loading",
+    elementState: "hidden"
+  });
+  assert.equal(visibleInChild.matched, false);
+  assert.equal(visibleInChild.details.applicableCount, 2);
+  assert.equal(visibleInChild.details.satisfiedCount, 1);
+});
+
+test("page wait returns tab metadata from the matched document state", async () => {
+  let tabReadCount = 0;
+  const fixture = createChromeFixture({
+    getTab(tabId) {
+      tabReadCount += 1;
+      return Promise.resolve({
+        ...chromeTab(
+          tabId,
+          tabReadCount === 1 ? "https://example.com/before" : "https://example.com/after",
+          true
+        ),
+        title: tabReadCount === 1 ? "Before" : "After"
+      });
+    },
+    executeScript(injection) {
+      if (Array.isArray(injection.files)) return Promise.resolve([{ frameId: 0, documentId: "doc_main" }]);
+      return Promise.resolve([{
+        frameId: 0,
+        documentId: "doc_main",
+        result: { matched: true, details: { match: "text", text: "Ready" } }
+      }]);
+    }
+  });
+  const bridge = createConnectedBridge(fixture);
+
+  const wait = await bridge.waitForPage({ tabId: 1, text: "Ready", timeoutMs: 500 });
+
+  assert.equal(wait.url, "https://example.com/after");
+  assert.equal(wait.title, "After");
+  assert.equal(tabReadCount, 2);
+});
+
 test("page wait evaluator matches text and elements inside nested Shadow DOM", () => {
   const dom = new JSDOM(`<!doctype html><html><body>
     <div>Light content</div>
@@ -1519,8 +1643,11 @@ test("page wait evaluator matches text and elements inside nested Shadow DOM", (
     window: dom.window,
     document,
     ShadowRoot: dom.window.ShadowRoot,
+    HTMLElement: dom.window.HTMLElement,
     HTMLInputElement: dom.window.HTMLInputElement,
-    HTMLTextAreaElement: dom.window.HTMLTextAreaElement
+    HTMLTextAreaElement: dom.window.HTMLTextAreaElement,
+    HTMLOptionElement: dom.window.HTMLOptionElement,
+    getComputedStyle: dom.window.getComputedStyle.bind(dom.window)
   };
   for (const [key, value] of Object.entries(globals)) {
     descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
@@ -1564,6 +1691,71 @@ test("page wait evaluator matches text and elements inside nested Shadow DOM", (
     ]);
     assert.equal(elementWait.details.shadowPath[0].hostInstanceId, textWait.details.shadowPath[0].hostInstanceId);
     assert.match(elementWait.details.shadowPath[1].hostInstanceId, /^sh_\d{6}$/);
+  } finally {
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    }
+    dom.window.close();
+  }
+});
+
+test("page wait evaluator reports presence visibility control state selection and exact value", () => {
+  const dom = new JSDOM(`<!doctype html><html><body>
+    <button id="submit" aria-label="Submit order" disabled>Submit</button>
+    <input id="terms" type="checkbox" aria-label="Terms accepted" checked>
+    <select id="country" aria-label="Country"><option value="us" selected>United States</option><option value="ca">Canada</option></select>
+    <input id="status" aria-label="Status" value="ready">
+    <div id="hidden-spinner" aria-label="Loading results" style="display:none"></div>
+    <div id="visible-spinner" aria-label="Loading results"></div>
+  </body></html>`, { url: "https://example.com/" });
+  const document = dom.window.document;
+  const descriptors = new Map();
+  const globals = {
+    window: dom.window,
+    document,
+    ShadowRoot: dom.window.ShadowRoot,
+    HTMLElement: dom.window.HTMLElement,
+    HTMLInputElement: dom.window.HTMLInputElement,
+    HTMLTextAreaElement: dom.window.HTMLTextAreaElement,
+    HTMLOptionElement: dom.window.HTMLOptionElement,
+    getComputedStyle: dom.window.getComputedStyle.bind(dom.window)
+  };
+  for (const [key, value] of Object.entries(globals)) {
+    descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  }
+  descriptors.set("__portusComposedDom", Object.getOwnPropertyDescriptor(globalThis, "__portusComposedDom"));
+  installPortusComposedDomRuntime(globalThis);
+  dom.window.HTMLElement.prototype.getBoundingClientRect = () => ({
+    x: 0, y: 0, left: 0, top: 0, right: 100, bottom: 24, width: 100, height: 24,
+    toJSON() { return this; }
+  });
+
+  try {
+    assert.equal(evaluatePortusPageWait({ elementQuery: "Submit order", elementState: "present" }).matched, true);
+    assert.equal(evaluatePortusPageWait({ elementQuery: "Missing control", elementState: "absent" }).matched, true);
+    assert.equal(evaluatePortusPageWait({ elementQuery: "Submit order", elementState: "disabled" }).matched, true);
+    assert.equal(evaluatePortusPageWait({ elementQuery: "Submit order", elementState: "enabled" }).matched, false);
+    document.querySelector("#submit").disabled = false;
+    assert.equal(evaluatePortusPageWait({ elementQuery: "Submit order", elementState: "enabled" }).matched, true);
+
+    const mixedVisibility = evaluatePortusPageWait({ elementQuery: "Loading results", elementState: "hidden" });
+    assert.equal(mixedVisibility.matched, false);
+    assert.equal(mixedVisibility.targetCount, 2);
+    document.querySelector("#visible-spinner").style.display = "none";
+    assert.equal(evaluatePortusPageWait({ elementQuery: "Loading results", elementState: "hidden" }).matched, true);
+
+    assert.equal(evaluatePortusPageWait({ role: "checkbox", elementState: "checked" }).matched, true);
+    document.querySelector("#terms").checked = false;
+    assert.equal(evaluatePortusPageWait({ role: "checkbox", elementState: "unchecked" }).matched, true);
+    assert.equal(evaluatePortusPageWait({ elementQuery: "United States", role: "option", elementState: "selected" }).matched, true);
+    document.querySelectorAll("#country option")[1].selected = true;
+    assert.equal(evaluatePortusPageWait({ elementQuery: "United States", role: "option", elementState: "unselected" }).matched, true);
+
+    assert.equal(evaluatePortusPageWait({ elementQuery: "Status", value: "ready" }).matched, true);
+    assert.equal(evaluatePortusPageWait({ elementQuery: "Status", value: "pending" }).matched, false);
+    assert.equal(evaluatePortusPageWait({ role: "textbox" }).matched, true);
   } finally {
     for (const [key, descriptor] of descriptors) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor);

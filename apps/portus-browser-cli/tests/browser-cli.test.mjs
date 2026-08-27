@@ -433,14 +433,41 @@ test("wait routes tab and page conditions to broker commands", async () => {
 
   const tabWait = await runPortusBrowserCli(["wait", "--browser", "br_000001", "--tab-id", "11", "--state", "complete", "--url-contains", "example", "--json"], { brokerClient: broker });
   const pageWait = await runPortusBrowserCli(["wait", "--browser", "br_000001", "--tab-id", "11", "--text", "Reviews", "--json"], { brokerClient: broker });
+  const stateWait = await runPortusBrowserCli(["wait", "--browser", "br_000001", "--tab-id", "11", "--element-query", "Submit", "--element-state", "enabled", "--json"], { brokerClient: broker });
+  const valueWait = await runPortusBrowserCli(["wait", "--browser", "br_000001", "--tab-id", "11", "--role", "textbox", "--value", "ready", "--json"], { brokerClient: broker });
 
   assert.equal(tabWait.exitCode, 0);
   assert.equal(pageWait.exitCode, 0);
+  assert.equal(stateWait.exitCode, 0);
+  assert.equal(valueWait.exitCode, 0);
   assert.equal(broker.requests[0].type, "tab.wait");
   assert.equal(broker.requests[0].payload.urlContains, "example");
   assert.equal(broker.requests[1].type, "page.wait");
   assert.equal(broker.requests[1].payload.text, "Reviews");
   assert.equal(JSON.parse(pageWait.stdout).wait.source, "page-script");
+  assert.equal(broker.requests[2].type, "page.wait");
+  assert.equal(broker.requests[2].payload.elementQuery, "Submit");
+  assert.equal(broker.requests[2].payload.elementState, "enabled");
+  assert.equal(broker.requests[3].payload.role, "textbox");
+  assert.equal(broker.requests[3].payload.value, "ready");
+});
+
+test("wait rejects ambiguous page predicate combinations before Broker dispatch", async () => {
+  const broker = createMockBroker({});
+  const missingCriteria = await runPortusBrowserCli([
+    "wait", "--browser", "br_000001", "--tab-id", "11", "--element-state", "hidden"
+  ], { brokerClient: broker });
+  const competingPredicates = await runPortusBrowserCli([
+    "wait", "--browser", "br_000001", "--tab-id", "11", "--role", "textbox", "--element-state", "enabled", "--value", "ready"
+  ], { brokerClient: broker });
+  const mixedTabAndPage = await runPortusBrowserCli([
+    "wait", "--browser", "br_000001", "--tab-id", "11", "--state", "complete", "--role", "button", "--element-state", "visible"
+  ], { brokerClient: broker });
+
+  assert.equal(missingCriteria.exitCode, 2);
+  assert.equal(competingPredicates.exitCode, 2);
+  assert.equal(mixedTabAndPage.exitCode, 2);
+  assert.deepEqual(broker.requests, []);
 });
 
 test("press and scroll send action payloads including optional element targets", async () => {

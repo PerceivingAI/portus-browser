@@ -51,6 +51,23 @@ On `snapshot`, `--debugger` is valid only together with `--screenshot`; it selec
 
 Structural snapshots and element actions cover regular DOM, scriptable iframes, and recursively nested open/closed Shadow DOM. Agents continue to target returned elements only through `snapshotId` + `elementId`; Portus keeps frame, document, and Shadow DOM identity internal and rejects actions with `SNAPSHOT_STALE` when the captured document has been replaced.
 
+## Page waits
+
+`page.wait` can synchronize on element presence, visibility, control state, selection, or an exact field value while preserving frame and Shadow DOM matching:
+
+```powershell
+portus-browser wait --browser 1 --tab-id <tabId> --element-query "Loading" --element-state absent --json
+portus-browser wait --browser 1 --tab-id <tabId> --element-query "Submit" --element-state enabled --json
+portus-browser wait --browser 1 --tab-id <tabId> --role checkbox --element-state checked --json
+portus-browser wait --browser 1 --tab-id <tabId> --role option --element-query "United States" --element-state selected --json
+portus-browser wait --browser 1 --tab-id <tabId> --element-query "Status" --value "ready" --json
+```
+
+Supported element states are `present`, `absent`, `visible`, `hidden`, `enabled`, `disabled`, `checked`, `unchecked`, `selected`, and `unselected`. `--element-state` and `--value` require `--element-query` or `--role`, and they cannot be used together.
+
+Positive states match when any applicable target satisfies the condition. `absent` requires no matching target in any scriptable frame. `hidden`, `disabled`, `unchecked`, and `unselected` require at least one applicable target and require every applicable target to satisfy the condition. Evaluation retains the existing 250 ms polling loop.
+
+
 ## File uploads
 
 Browser upload has two independent gates. The Broker must have one or more allowed local roots, and the active extension settings profile must enable **Upload Files** under **CLI Commands**.

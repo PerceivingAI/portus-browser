@@ -706,12 +706,63 @@ export const SnapshotSchema = z.object({
   filter: SnapshotFilterSchema.nullable().optional()
 }).strict();
 
+export const ElementWaitStateSchema = z.enum([
+  "present",
+  "absent",
+  "visible",
+  "hidden",
+  "enabled",
+  "disabled",
+  "checked",
+  "unchecked",
+  "selected",
+  "unselected"
+]);
+
+const PageWaitConditionShape = {
+  text: z.string().min(1).optional(),
+  elementQuery: z.string().min(1).optional(),
+  role: z.string().min(1).optional(),
+  elementState: ElementWaitStateSchema.optional(),
+  value: z.string().optional()
+};
+
+export const PageWaitConditionSchema = z.object(PageWaitConditionShape).strict().superRefine((condition, context) => {
+  const hasText = condition.text !== undefined;
+  const hasElementCriteria = condition.elementQuery !== undefined || condition.role !== undefined;
+  if (!hasText && !hasElementCriteria) {
+    context.addIssue({
+      code: "custom",
+      message: "page wait requires text, elementQuery, or role criteria"
+    });
+  }
+  if ((condition.elementState !== undefined || condition.value !== undefined) && !hasElementCriteria) {
+    context.addIssue({
+      code: "custom",
+      path: [condition.elementState !== undefined ? "elementState" : "value"],
+      message: "element state and value waits require elementQuery or role criteria"
+    });
+  }
+  if (condition.elementState !== undefined && condition.value !== undefined) {
+    context.addIssue({
+      code: "custom",
+      path: ["value"],
+      message: "use either elementState or value, not both"
+    });
+  }
+  if (hasText && hasElementCriteria && (condition.elementState !== undefined || condition.value !== undefined)) {
+    context.addIssue({
+      code: "custom",
+      path: ["text"],
+      message: "text cannot be combined with an element state or value wait"
+    });
+  }
+});
+
 export const WaitConditionSchema = z.object({
   state: z.enum(["loading", "complete"]).optional(),
   urlContains: z.string().min(1).optional(),
-  text: z.string().min(1).optional(),
-  elementQuery: z.string().min(1).optional(),
-  role: z.string().min(1).optional()
+  ...PageWaitConditionShape
 }).strict();
 
 export const WaitResultSchema = z.object({
@@ -727,6 +778,8 @@ export const WaitResultSchema = z.object({
   details: JsonObjectSchema.optional()
 }).strict();
 
+export type ElementWaitState = z.infer<typeof ElementWaitStateSchema>;
+export type PageWaitCondition = z.infer<typeof PageWaitConditionSchema>;
 export type WaitResult = z.infer<typeof WaitResultSchema>;
 
 export const ActionBackendSchema = z.enum(["extension-api", "content-script-dom", "debugger-cdp"]);

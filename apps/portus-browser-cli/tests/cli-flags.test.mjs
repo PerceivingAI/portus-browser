@@ -6,7 +6,7 @@ import { runPortusBrowserCli } from "../dist/index.js";
 const LEGACY_FLAG_NAMES = [
   "output", "browser", "timeout", "tab-id", "index", "element", "snapshot", "from", "to", "fields", "json-fields", "field",
   "x", "y", "reason", "scheme", "authority", "host-wildcard", "url-exact", "url-prefix", "type", "limit", "kind", "strategy",
-  "query", "role", "max-elements", "state", "url-contains", "text", "element-query", "directory", "file", "json-input", "content",
+  "query", "role", "max-elements", "state", "element-state", "url-contains", "text", "element-query", "value", "directory", "file", "json-input", "content",
   "description", "name", "id", "background", "debugger", "screenshot", "json", "partial", "dry-run", "force", "yes", "interactive-only", "quiet"
 ].sort();
 

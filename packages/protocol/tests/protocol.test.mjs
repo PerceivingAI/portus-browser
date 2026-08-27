@@ -7,9 +7,11 @@ import {
   DEFAULT_COMMAND_POLICY,
   DEFAULT_TERMINAL_PROFILE_ID,
   ErrorCodeSchema,
+  ElementWaitStateSchema,
   RegistrationResultSchema,
   SessionStepSchema,
   PolicyPreferencesSchema,
+  PageWaitConditionSchema,
   migrateLegacyPolicyPreferences,
   migrateLegacySettingsProfileCatalog,
   migrateLegacyTerminalPreferences,
@@ -132,6 +134,34 @@ test("validates bounded upload action requests", () => {
   assert.throws(() => UploadRequestSchema.parse({ ...request, files: [] }));
   assert.throws(() => UploadRequestSchema.parse({ ...request, files: Array.from({ length: 101 }, (_, index) => `file-${index}`) }));
   assert.throws(() => UploadRequestSchema.parse({ ...request, extra: true }));
+});
+
+test("validates page wait element states and exact values", () => {
+  for (const state of [
+    "present",
+    "absent",
+    "visible",
+    "hidden",
+    "enabled",
+    "disabled",
+    "checked",
+    "unchecked",
+    "selected",
+    "unselected"
+  ]) {
+    assert.equal(ElementWaitStateSchema.parse(state), state);
+    assert.equal(PageWaitConditionSchema.parse({ role: "button", elementState: state }).elementState, state);
+  }
+
+  assert.equal(PageWaitConditionSchema.parse({ elementQuery: "Email", value: "" }).value, "");
+  assert.throws(() => PageWaitConditionSchema.parse({ elementState: "visible" }));
+  assert.throws(() => PageWaitConditionSchema.parse({ text: "Saved", elementState: "visible" }));
+  assert.throws(() => PageWaitConditionSchema.parse({ role: "textbox", elementState: "enabled", value: "ready" }));
+  assert.throws(() => PageWaitConditionSchema.parse({
+    text: "Saved",
+    role: "status",
+    elementState: "visible"
+  }));
 });
 
 test("maps invalid protocol messages to typed Portus errors", () => {

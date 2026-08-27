@@ -22,6 +22,7 @@ import {
   NavigationUrlSchema,
   PolicyModeSchema,
   PolicyPreferencesSchema,
+  PageWaitConditionSchema,
   PortusErrorSchema,
   RequestEnvelopeSchema,
   ResponseEnvelopeSchema,
@@ -367,6 +368,9 @@ export function evaluatePortusPageWait(condition: Record<string, unknown>): Reco
   const text = normalize(condition.text);
   const elementQuery = normalize(condition.elementQuery);
   const role = normalize(condition.role);
+  const elementState = normalize(condition.elementState);
+  const hasExpectedValue = typeof condition.value === "string";
+  const expectedValue = hasExpectedValue ? condition.value as string : "";
   const runtime = (globalThis as typeof globalThis & {
     __portusComposedDom?: {
       collect(root?: Document | ShadowRoot): WaitComposedEntry[];
@@ -407,46 +411,194 @@ export function evaluatePortusPageWait(condition: Record<string, unknown>): Reco
     }
   }
 
-  if (!elementQuery && !role) {
-    return { matched: false };
-  }
+  if (!elementQuery && !role) return { matched: false };
 
-  const candidateSelector = "a, button, input, textarea, select, [role], [aria-label], [title]";
+  const candidateSelector = "a, button, input, textarea, select, option, [role], [aria-label], [title], [aria-disabled], [aria-checked], [aria-selected]";
+  let targetCount = 0;
+  let applicableCount = 0;
+  let satisfiedCount = 0;
+  let firstTargetDetails: Record<string, unknown> | undefined;
+  let firstSatisfiedDetails: Record<string, unknown> | undefined;
   for (const entry of entries) {
     const element = entry.element;
     if (!element.matches(candidateSelector)) continue;
-    const rect = element.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) continue;
     const ariaLabel = element.getAttribute("aria-label") ?? "";
     const title = element.getAttribute("title") ?? "";
+    const tagName = element.tagName.toLowerCase();
     const placeholder = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement ? element.placeholder : "";
     const candidateText = [
       element.textContent ?? "",
       ariaLabel,
       title,
       placeholder,
-      element.getAttribute("href") ?? ""
+      element.getAttribute("href") ?? "",
+      element.getAttribute("name") ?? "",
+      element.id
     ].join(" ").toLowerCase();
-    const tagName = element.tagName.toLowerCase();
-    const candidateRole = normalize(element.getAttribute("role") ?? (tagName === "a" ? "link" : tagName === "button" ? "button" : ""));
+    const candidateRole = normalize(element.getAttribute("role") ?? implicitRole(element, tagName));
     if (elementQuery && !candidateText.includes(elementQuery)) continue;
     if (role && candidateRole !== role) continue;
-    return {
-      matched: true,
-      details: {
-        match: "element",
-        role: candidateRole || tagName,
-        tagName,
-        text: (element.textContent ?? "").trim().slice(0, 200),
-        label: (ariaLabel || title || placeholder || (element.textContent ?? "")).trim().slice(0, 200),
-        selectorHint: entry.selectorHint,
-        shadowDepth: entry.shadowPath?.length ?? 0,
-        ...(entry.shadowPath === undefined ? {} : { shadowPath: entry.shadowPath })
-      }
+
+    targetCount += 1;
+    const details = {
+      match: elementState || hasExpectedValue ? "element-state" : "element",
+      role: candidateRole || tagName,
+      tagName,
+      text: (element.textContent ?? "").trim().slice(0, 200),
+      label: (ariaLabel || title || placeholder || (element.textContent ?? "")).trim().slice(0, 200),
+      selectorHint: entry.selectorHint,
+      shadowDepth: entry.shadowPath?.length ?? 0,
+      ...(entry.shadowPath === undefined ? {} : { shadowPath: entry.shadowPath })
     };
+    firstTargetDetails ??= details;
+
+    const visible = isVisible(element);
+    let applicable = true;
+    let satisfied = false;
+    if (hasExpectedValue) {
+      const value = elementValue(element, tagName);
+      applicable = value !== undefined;
+      satisfied = value === expectedValue;
+    } else {
+      switch (elementState) {
+        case "present":
+          satisfied = true;
+          break;
+        case "absent":
+          satisfied = false;
+          break;
+        case "visible":
+          satisfied = visible;
+          break;
+        case "hidden":
+          satisfied = !visible;
+          break;
+        case "enabled":
+        case "disabled": {
+          const disabled = disabledState(element, tagName, candidateRole);
+          applicable = disabled !== undefined;
+          satisfied = disabled === (elementState === "disabled");
+          break;
+        }
+        case "checked":
+        case "unchecked": {
+          const checked = checkedState(element, tagName, candidateRole);
+          applicable = checked !== undefined;
+          satisfied = checked === (elementState === "checked");
+          break;
+        }
+        case "selected":
+        case "unselected": {
+          const selected = selectedState(element, tagName, candidateRole);
+          applicable = selected !== undefined;
+          satisfied = selected === (elementState === "selected");
+          break;
+        }
+        default:
+          satisfied = visible;
+          break;
+      }
+    }
+    if (!applicable) continue;
+    applicableCount += 1;
+    if (!satisfied) continue;
+    satisfiedCount += 1;
+    firstSatisfiedDetails ??= details;
   }
 
-  return { matched: false };
+  const requireEveryApplicable = elementState === "hidden"
+    || elementState === "disabled"
+    || elementState === "unchecked"
+    || elementState === "unselected";
+  const matched = elementState === "absent"
+    ? targetCount === 0
+    : requireEveryApplicable
+      ? applicableCount > 0 && satisfiedCount === applicableCount
+      : satisfiedCount > 0;
+  const stateName = hasExpectedValue ? "value" : elementState || "visible";
+  const details = {
+    ...(matched ? firstSatisfiedDetails ?? firstTargetDetails ?? {} : {}),
+    match: elementState || hasExpectedValue ? "element-state" : "element",
+    state: stateName,
+    targetCount,
+    applicableCount,
+    satisfiedCount,
+    ...(hasExpectedValue ? { value: expectedValue } : {})
+  };
+  return {
+    matched,
+    targetCount,
+    applicableCount,
+    satisfiedCount,
+    details
+  };
+
+  function implicitRole(element: Element, tagName: string): string {
+    if (tagName === "a") return "link";
+    if (tagName === "button") return "button";
+    if (tagName === "textarea") return "textbox";
+    if (tagName === "select") return "combobox";
+    if (tagName === "option") return "option";
+    if (tagName !== "input") return "";
+    const type = (element as HTMLInputElement).type.toLowerCase();
+    if (type === "checkbox") return "checkbox";
+    if (type === "radio") return "radio";
+    if (type === "button" || type === "submit" || type === "reset") return "button";
+    if (type === "range") return "slider";
+    if (type === "number") return "spinbutton";
+    if (type === "search") return "searchbox";
+    return "textbox";
+  }
+
+  function isVisible(element: Element): boolean {
+    if (element instanceof HTMLElement && element.hidden) return false;
+    const rect = element.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    const style = getComputedStyle(element);
+    if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") return false;
+    const opacity = Number.parseFloat(style.opacity);
+    return !Number.isFinite(opacity) || opacity > 0;
+  }
+
+  function disabledState(element: Element, tagName: string, candidateRole: string): boolean | undefined {
+    const ariaDisabled = element.getAttribute("aria-disabled");
+    if (ariaDisabled !== null) return ariaDisabled.toLowerCase() === "true";
+    if (["button", "input", "select", "textarea", "option", "optgroup", "fieldset"].includes(tagName)) {
+      return (element as Element & { disabled?: boolean }).disabled === true;
+    }
+    if (["button", "checkbox", "combobox", "link", "radio", "searchbox", "slider", "spinbutton", "switch", "tab", "textbox"].includes(candidateRole)) {
+      return false;
+    }
+    return undefined;
+  }
+
+  function checkedState(element: Element, tagName: string, candidateRole: string): boolean | undefined {
+    if (tagName === "input") {
+      const input = element as HTMLInputElement;
+      if (input.type === "checkbox" || input.type === "radio") return input.checked;
+    }
+    const ariaChecked = element.getAttribute("aria-checked");
+    if (ariaChecked !== null || ["checkbox", "radio", "switch"].includes(candidateRole)) {
+      return ariaChecked?.toLowerCase() === "true";
+    }
+    return undefined;
+  }
+
+  function selectedState(element: Element, tagName: string, candidateRole: string): boolean | undefined {
+    if (tagName === "option") return (element as HTMLOptionElement).selected;
+    const ariaSelected = element.getAttribute("aria-selected");
+    if (ariaSelected !== null || ["option", "row", "tab"].includes(candidateRole)) {
+      return ariaSelected?.toLowerCase() === "true";
+    }
+    return undefined;
+  }
+
+  function elementValue(element: Element, tagName: string): string | undefined {
+    if (tagName === "input" || tagName === "textarea" || tagName === "select" || tagName === "option") {
+      return String((element as Element & { value?: unknown }).value ?? "");
+    }
+    return undefined;
+  }
 }
 
 function capturePortusConsoleMessages(): Record<string, unknown>[] {
@@ -1574,16 +1726,26 @@ export class PortusExtensionBridge {
     const targetTab = await this.getChromeTab(tabId);
     this.ensureTabPolicyAllowed(targetTab);
 
-    const condition: Record<string, unknown> = {};
-    copyOptional(payload, condition, "text");
-    copyOptional(payload, condition, "elementQuery");
-    copyOptional(payload, condition, "role");
-    if (Object.keys(condition).length === 0) {
+    const conditionInput: Record<string, unknown> = {};
+    copyOptional(payload, conditionInput, "text");
+    copyOptional(payload, conditionInput, "elementQuery");
+    copyOptional(payload, conditionInput, "role");
+    copyOptional(payload, conditionInput, "elementState");
+    copyOptional(payload, conditionInput, "value");
+    const parsedCondition = PageWaitConditionSchema.safeParse(conditionInput);
+    if (!parsedCondition.success) {
       throw createPortusError({
         code: "INVALID_MESSAGE",
-        message: "page.wait requires text or element query criteria."
+        message: "page.wait has invalid page criteria.",
+        details: {
+          issues: parsedCondition.error.issues.map((issue) => ({
+            path: issue.path.join("."),
+            message: issue.message
+          }))
+        }
       });
     }
+    const condition = parsedCondition.data;
 
     const timeoutMs = readOptionalNumber(payload, "timeoutMs") ?? 30000;
     const startedAt = Date.now();
@@ -1592,6 +1754,8 @@ export class PortusExtensionBridge {
       const evaluation = await this.executePageWaitScript(tabId, condition);
       if (isRecord(evaluation.details)) lastDetails = evaluation.details;
       if (evaluation.matched === true) {
+        const completedTab = await this.getChromeTab(tabId);
+        this.ensureTabPolicyAllowed(completedTab);
         return WaitResultSchema.parse({
           browserId: this.requireBrowserId(),
           tabId,
@@ -1599,8 +1763,8 @@ export class PortusExtensionBridge {
           source: "page-script",
           condition,
           completedAt: this.now().toISOString(),
-          url: targetTab.url ?? "",
-          title: targetTab.title ?? "",
+          url: completedTab.url ?? "",
+          title: completedTab.title ?? "",
           ...(lastDetails === undefined ? {} : { details: lastDetails })
         });
       }
@@ -3388,28 +3552,97 @@ export class PortusExtensionBridge {
       done(result as Promise<ChromeScriptInjectionResult[]> | ChromeScriptInjectionResult[] | undefined);
     }));
 
-    let sawValidResult = false;
+    const aggregateElementState = typeof condition.elementState === "string" || typeof condition.value === "string";
+    if (!aggregateElementState) {
+      let sawValidResult = false;
+      for (const injection of results) {
+        const waitResult = injection.result;
+        if (!isRecord(waitResult) || typeof waitResult.matched !== "boolean") continue;
+        sawValidResult = true;
+        if (waitResult.matched !== true) continue;
+        return {
+          ...waitResult,
+          details: {
+            ...(isRecord(waitResult.details) ? waitResult.details : {}),
+            frameId: injection.frameId,
+            documentId: injection.documentId
+          }
+        };
+      }
+      if (!sawValidResult) {
+        throw createPortusError({
+          code: "ACTION_FAILED",
+          message: "Page wait script returned no valid frame results."
+        });
+      }
+      return { matched: false };
+    }
+
+    let validResultCount = 0;
+    let statsResultCount = 0;
+    let targetCount = 0;
+    let applicableCount = 0;
+    let satisfiedCount = 0;
+    let firstTargetDetails: Record<string, unknown> | undefined;
+    let firstSatisfiedDetails: Record<string, unknown> | undefined;
     for (const injection of results) {
       const waitResult = injection.result;
       if (!isRecord(waitResult) || typeof waitResult.matched !== "boolean") continue;
-      sawValidResult = true;
-      if (waitResult.matched !== true) continue;
-      return {
-        ...waitResult,
-        details: {
-          ...(isRecord(waitResult.details) ? waitResult.details : {}),
-          frameId: injection.frameId,
-          documentId: injection.documentId
-        }
-      };
+      validResultCount += 1;
+      const frameTargetCount = readNonnegativeInteger(waitResult.targetCount);
+      const frameApplicableCount = readNonnegativeInteger(waitResult.applicableCount);
+      const frameSatisfiedCount = readNonnegativeInteger(waitResult.satisfiedCount);
+      if (frameTargetCount === null || frameApplicableCount === null || frameSatisfiedCount === null) continue;
+      statsResultCount += 1;
+      targetCount += frameTargetCount;
+      applicableCount += frameApplicableCount;
+      satisfiedCount += frameSatisfiedCount;
+      const frameDetails = isRecord(waitResult.details)
+        ? {
+            ...waitResult.details,
+            frameId: injection.frameId,
+            documentId: injection.documentId
+          }
+        : undefined;
+      if (frameTargetCount > 0 && frameDetails && firstTargetDetails === undefined) {
+        firstTargetDetails = frameDetails;
+      }
+      if (frameSatisfiedCount > 0 && frameDetails && firstSatisfiedDetails === undefined) {
+        firstSatisfiedDetails = frameDetails;
+      }
     }
-    if (!sawValidResult) {
+    if (validResultCount === 0 || statsResultCount !== validResultCount) {
       throw createPortusError({
         code: "ACTION_FAILED",
-        message: "Page wait script returned no valid frame results."
+        message: "Page wait script returned incomplete element-state results."
       });
     }
-    return { matched: false };
+
+    const elementState = typeof condition.elementState === "string" ? condition.elementState : "value";
+    const requireEveryApplicable = elementState === "hidden"
+      || elementState === "disabled"
+      || elementState === "unchecked"
+      || elementState === "unselected";
+    const matched = elementState === "absent"
+      ? targetCount === 0
+      : requireEveryApplicable
+        ? applicableCount > 0 && satisfiedCount === applicableCount
+        : satisfiedCount > 0;
+    return {
+      matched,
+      targetCount,
+      applicableCount,
+      satisfiedCount,
+      details: {
+        ...(matched ? firstSatisfiedDetails ?? firstTargetDetails ?? {} : {}),
+        match: "element-state",
+        state: elementState,
+        targetCount,
+        applicableCount,
+        satisfiedCount,
+        ...(typeof condition.value === "string" ? { value: condition.value } : {})
+      }
+    };
   }
 
   private async executeConsoleListScript(tabId: number): Promise<Record<string, unknown>[]> {

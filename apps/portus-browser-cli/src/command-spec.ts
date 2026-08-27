@@ -146,14 +146,21 @@ export const CLI_INVOCATIONS = [
       CLI_FLAGS.browser,
       CLI_FLAGS.tabId,
       CLI_FLAGS.state,
+      CLI_FLAGS.elementState,
       CLI_FLAGS.urlContains,
       CLI_FLAGS.text,
       CLI_FLAGS.elementQuery,
-      CLI_FLAGS.role
+      CLI_FLAGS.role,
+      CLI_FLAGS.value,
     ),
     positionals: noArgs,
     flagEnums: [
-      { flag: CLI_FLAGS.state, values: ["loading", "complete"], validationMessage: "--state must be loading or complete." }
+      { flag: CLI_FLAGS.state, values: ["loading", "complete"], validationMessage: "--state must be loading or complete." },
+      {
+        flag: CLI_FLAGS.elementState,
+        values: ["present", "absent", "visible", "hidden", "enabled", "disabled", "checked", "unchecked", "selected", "unselected"],
+        validationMessage: "--element-state must be present, absent, visible, hidden, enabled, disabled, checked, unchecked, selected, or unselected."
+      }
     ]
   },
   { path: ["watch"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.type), positionals: noArgs },
