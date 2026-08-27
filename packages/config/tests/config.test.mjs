@@ -15,11 +15,21 @@ import {
   validateConfig
 } from "../dist/index.js";
 
-test("default config is valid and keeps fixed security constraints", () => {
-  assert.equal(DEFAULT_PORTUS_CONFIG.broker.transport, "local");
-  assert.equal(DEFAULT_PORTUS_CONFIG.broker.allowRemoteConnections, false);
-  assert.equal(DEFAULT_PORTUS_CONFIG.extension.bridgeAutoConnect, true);
-  assert.equal(DEFAULT_PORTUS_CONFIG.extension.enableTerminalPanel, true);
+test("default config contains only production-backed settings", () => {
+  assert.deepEqual(DEFAULT_PORTUS_CONFIG.broker, {
+    transport: "local",
+    pipeName: "portus-browser-broker",
+    heartbeatIntervalMs: 5000,
+    sessionTimeoutMs: 20000
+  });
+  assert.deepEqual(DEFAULT_PORTUS_CONFIG.cli, { output: "table" });
+  assert.deepEqual(DEFAULT_PORTUS_CONFIG.sessions, { defaultTargetStrategy: "oldest" });
+  assert.deepEqual(DEFAULT_PORTUS_CONFIG.commands, { timeoutMs: 15000, normalizeUrls: true });
+  assert.deepEqual(DEFAULT_PORTUS_CONFIG.security.allowedUploadRoots, []);
+  assert.deepEqual(DEFAULT_PORTUS_CONFIG.events, { retentionLimit: 1000 });
+  assert.deepEqual(DEFAULT_PORTUS_CONFIG.logging, { redactUrls: false, redactTitles: false });
+  assert.equal("extension" in DEFAULT_PORTUS_CONFIG, false);
+  assert.equal("tabs" in DEFAULT_PORTUS_CONFIG, false);
   assert.equal(DEFAULT_PORTUS_CONFIG.terminal.enabled, true);
   assert.equal(DEFAULT_PORTUS_CONFIG.terminal.defaultProfileId, "auto");
   assert.equal(DEFAULT_PORTUS_CONFIG.terminal.manualTerminalPath, null);
@@ -29,7 +39,6 @@ test("default config is valid and keeps fixed security constraints", () => {
   assert.equal(DEFAULT_PORTUS_CONFIG.policy.defaultPolicyMode, "blocklist");
   assert.deepEqual(DEFAULT_PORTUS_CONFIG.policy.defaultBlockedNavigationRules, []);
   assert.equal(DEFAULT_PORTUS_CONFIG.policy.defaultCommandPolicy["screenshot.capture"], true);
-  assert.deepEqual(DEFAULT_PORTUS_CONFIG.security.allowedUploadRoots, []);
   assert.equal(DEFAULT_PORTUS_CONFIG.policy.defaultCommandPolicy["snapshot.capture"], true);
   assert.equal(DEFAULT_PORTUS_CONFIG.policy.defaultCommandPolicy["action.click"], true);
   assert.equal(DEFAULT_PORTUS_CONFIG.policy.defaultCommandPolicy["tab.open"], true);
@@ -39,12 +48,12 @@ test("default config is valid and keeps fixed security constraints", () => {
 test("partial config merges over defaults", () => {
   const merged = mergeConfig(DEFAULT_PORTUS_CONFIG, {
     cli: { output: "json" },
-    logging: { level: "debug" }
+    logging: { redactUrls: true }
   });
   const parsed = parseConfig(merged);
   assert.equal(parsed.cli.output, "json");
-  assert.equal(parsed.cli.color, "auto");
-  assert.equal(parsed.logging.level, "debug");
+  assert.equal(parsed.logging.redactUrls, true);
+  assert.equal(parsed.logging.redactTitles, false);
 });
 
 test("arrays replace instead of concatenate", () => {
@@ -61,29 +70,32 @@ test("arrays replace instead of concatenate", () => {
   assert.equal(parsed.policy.sessionStepRetentionLimit, 25);
 });
 
-test("unknown keys and fixed security constraints fail validation", () => {
+test("removed and unknown config keys fail validation", () => {
   assert.equal(PortusConfigSchema.safeParse({ unknown: true }).success, false);
-  assert.equal(PortusConfigSchema.safeParse({ security: { allowPageScriptExecution: true } }).success, false);
-  assert.equal(PortusConfigSchema.safeParse({ broker: { allowRemoteConnections: true } }).success, false);
-  assert.equal(PortusConfigSchema.safeParse({ permissions: {} }).success, false);
-  assert.equal(PortusConfigSchema.safeParse({ extension: { permissionsMode: "minimal" } }).success, false);
+  assert.equal(PortusConfigSchema.safeParse({ extension: {} }).success, false);
+  assert.equal(PortusConfigSchema.safeParse({ tabs: {} }).success, false);
+  assert.equal(PortusConfigSchema.safeParse({ broker: { host: "127.0.0.1" } }).success, false);
+  assert.equal(PortusConfigSchema.safeParse({ nativeHost: { allowedExtensionOrigins: [] } }).success, false);
+  assert.equal(PortusConfigSchema.safeParse({ cli: { color: "auto" } }).success, false);
+  assert.equal(PortusConfigSchema.safeParse({ commands: { openUrlActiveByDefault: true } }).success, false);
+  assert.equal(PortusConfigSchema.safeParse({ security: { allowPageScriptExecution: false } }).success, false);
+  assert.equal(PortusConfigSchema.safeParse({ events: { enabled: true } }).success, false);
+  assert.equal(PortusConfigSchema.safeParse({ logging: { level: "debug" } }).success, false);
   assert.equal(PortusConfigSchema.safeParse({ security: { allowedUploadRoots: ["relative/path"] } }).success, false);
 });
 
 test("invalid config maps to typed Portus error", () => {
-  const result = validateConfig({ security: { allowPageScriptExecution: true } });
+  const result = validateConfig({ cli: { color: "auto" } });
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "CONFIG_INVALID");
-  assert.equal(result.error.details.issues[0].configPath, "security.allowPageScriptExecution");
+  assert.equal(result.error.details.issues[0].configPath, "cli");
 });
 
 test("environment overrides are parsed and validated", () => {
   const parsed = applyEnvironmentOverrides(DEFAULT_PORTUS_CONFIG, {
-    PORTUS_LOG_LEVEL: "warn",
     PORTUS_CLI_OUTPUT: "ndjson",
     PORTUS_BROKER_PIPE_NAME: "custom-portus-pipe"
   });
-  assert.equal(parsed.logging.level, "warn");
   assert.equal(parsed.cli.output, "ndjson");
   assert.equal(parsed.broker.pipeName, "custom-portus-pipe");
   assert.equal(parsed.nativeHost.brokerPipeName, "custom-portus-pipe");
@@ -93,9 +105,6 @@ test("environment overrides are parsed and validated", () => {
     PORTUS_UPLOAD_ALLOWED_ROOTS: [firstUploadRoot, secondUploadRoot].join(delimiter)
   });
   assert.deepEqual(uploadConfig.security.allowedUploadRoots, [firstUploadRoot, secondUploadRoot]);
-  assert.throws(() => applyEnvironmentOverrides(DEFAULT_PORTUS_CONFIG, {
-    PORTUS_LOG_LEVEL: "verbose"
-  }));
 });
 
 

@@ -26,6 +26,27 @@ The Extension permanently requests Chrome host access for normal web pages throu
 
 Navigation rules can match a URL by scheme, authority, wildcard host, exact URL, or URL prefix. Portus does not impose a built-in scheme restriction: users decide which browser-supported URLs to allow or block. A denied URL returns `NAVIGATION_BLOCKED`; protected pages and other targets the browser cannot expose return `BROWSER_ACCESS_DENIED`.
 
+## Root configuration
+
+Production entrypoints use `DEFAULT_PORTUS_CONFIG` plus supported environment overrides. `config/default.config.json` and `config/production.config.json` are validated examples; Portus does not load either file automatically.
+
+The supported root configuration contract is:
+
+- `broker`: `transport`, `pipeName`, `heartbeatIntervalMs`, `sessionTimeoutMs`
+- `nativeHost`: `name`, `brokerPipeName`, `startBrokerIfMissing`, `connectTimeoutMs`
+- `cli`: `output`
+- `sessions`: `defaultTargetStrategy`
+- `commands`: `timeoutMs`, `normalizeUrls`
+- `security`: `allowedUploadRoots`, `requireBrokerToken`
+- `policy`: `defaultPolicyMode`, `defaultAllowedNavigationRules`, `defaultBlockedNavigationRules`, `defaultCommandPolicy`, `sessionStepRetentionLimit`
+- `events`: `retentionLimit`
+- `logging`: `redactUrls`, `redactTitles`
+- `terminal`: `enabled`, `defaultProfileId`, `manualTerminalPath`, `startupCommand`, `defaultWorkingDirectory`, `fontSize`, `maxSessions`, `idleTimeoutMs`
+
+The former root `extension` and `tabs` subsections and other unconsumed legacy keys are rejected as `CONFIG_INVALID`. This is a hard cutover; no deprecated aliases are retained.
+
+Supported environment overrides are `PORTUS_CLI_OUTPUT`, `PORTUS_BROKER_PIPE_NAME`, and `PORTUS_UPLOAD_ALLOWED_ROOTS`.
+
 ## Snapshots And Screenshots
 
 Snapshots are structural by default. A normal `snapshot` command returns targeting data without capturing an image and without activating or focusing the target tab.

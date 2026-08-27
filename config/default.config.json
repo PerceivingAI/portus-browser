@@ -1,71 +1,29 @@
 {
   "broker": {
-    "host": "127.0.0.1",
-    "port": 17345,
     "transport": "local",
     "pipeName": "portus-browser-broker",
-    "sessionIdPrefix": "br",
     "heartbeatIntervalMs": 5000,
-    "sessionTimeoutMs": 20000,
-    "commandTimeoutMs": 15000,
-    "defaultTargetStrategy": "oldest",
-    "allowRemoteConnections": false,
-    "logLevel": "info"
+    "sessionTimeoutMs": 20000
   },
   "nativeHost": {
     "name": "com.portus.browser",
     "brokerPipeName": "portus-browser-broker",
     "startBrokerIfMissing": true,
-    "connectTimeoutMs": 5000,
-    "allowedExtensionOrigins": []
+    "connectTimeoutMs": 5000
   },
   "cli": {
-    "output": "table",
-    "color": "auto",
-    "defaultBrowser": null,
-    "failWhenMultipleBrowsers": false,
-    "showUrls": true,
-    "truncateTitles": true,
-    "truncateWidth": 80
-  },
-  "extension": {
-    "autoRegister": true,
-    "bridgeAutoConnect": false,
-    "heartbeatEnabled": true,
-    "showSidePanelStatus": true,
-    "enableTerminalPanel": true,
-    "browserLabel": null
+    "output": "table"
   },
   "sessions": {
-    "idFormat": "prefix-counter",
-    "defaultTargetStrategy": "oldest",
-    "sortBrowsersBy": "connectedAt",
-    "expireDisconnectedAfterMs": 20000,
-    "rememberBrowserAliases": true
-  },
-  "tabs": {
-    "ordering": "window-order-then-tab-index",
-    "indexBase": 1,
-    "includePinnedTabs": true,
-    "includeDiscardedTabs": true,
-    "showWindowId": true
+    "defaultTargetStrategy": "oldest"
   },
   "commands": {
     "timeoutMs": 15000,
-    "confirmCloseWindow": true,
-    "confirmCloseMultipleTabs": true,
-    "openUrlActiveByDefault": true,
     "normalizeUrls": true
   },
   "security": {
-    "allowedOrigins": [
-      "chrome-extension://<extension-id>"
-    ],
     "allowedUploadRoots": [],
-    "requireLocalhost": true,
-    "requireBrokerToken": true,
-    "tokenStorage": "user-config",
-    "allowPageScriptExecution": false
+    "requireBrokerToken": true
   },
   "policy": {
     "defaultPolicyMode": "blocklist",
@@ -74,17 +32,11 @@
     "sessionStepRetentionLimit": 10
   },
   "events": {
-    "enabled": true,
-    "retentionLimit": 1000,
-    "includeSnapshotInvalidation": true
+    "retentionLimit": 1000
   },
   "logging": {
-    "level": "info",
-    "file": true,
-    "console": true,
     "redactUrls": false,
-    "redactTitles": false,
-    "maxLogFiles": 5
+    "redactTitles": false
   },
   "terminal": {
     "enabled": true,
