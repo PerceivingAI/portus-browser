@@ -262,8 +262,6 @@ export interface PortusExtensionBridgeOptions {
   terminalNativeHostName?: string;
   browserName?: BrowserName;
   extensionVersion?: string;
-  browserLabel?: string;
-  profileLabel?: string;
   now?: () => Date;
   setInterval?: (callback: () => void, timeoutMs: number) => unknown;
   clearInterval?: (handle: unknown) => void;
@@ -676,8 +674,6 @@ export class PortusExtensionBridge {
   readonly terminalNativeHostName: string;
   readonly browserName: BrowserName;
   readonly extensionVersion: string;
-  readonly browserLabel: string | undefined;
-  readonly profileLabel: string | undefined;
 
   private readonly now: () => Date;
   private readonly setTimer: (callback: () => void, timeoutMs: number) => unknown;
@@ -724,8 +720,6 @@ export class PortusExtensionBridge {
     this.terminalNativeHostName = options.terminalNativeHostName ?? TERMINAL_NATIVE_HOST_NAME;
     this.browserName = options.browserName ?? detectBrowserName();
     this.extensionVersion = options.extensionVersion ?? "0.1.0";
-    this.browserLabel = options.browserLabel;
-    this.profileLabel = options.profileLabel;
     this.now = options.now ?? (() => new Date());
     this.setTimer = options.setInterval ?? ((callback, timeoutMs) => globalThis.setInterval(callback, timeoutMs));
     this.clearTimer = options.clearInterval ?? ((handle) => globalThis.clearInterval(handle as ReturnType<typeof setInterval>));
@@ -3259,8 +3253,6 @@ export class PortusExtensionBridge {
       policyPreferences: this.policyPreferences,
       settingsProfileContent: this.createCurrentSettingsProfileContent()
     };
-    if (this.browserLabel) payload.browserLabel = this.browserLabel;
-    if (this.profileLabel) payload.profileLabel = this.profileLabel;
     return payload;
   }
 

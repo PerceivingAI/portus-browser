@@ -523,8 +523,6 @@ export class BrokerCore {
       capabilities: registration.capabilities,
       bridgeStatus: "connected",
       status: "available",
-      browserLabel: registration.browserLabel,
-      profileLabel: registration.profileLabel,
       extensionId: registration.extensionId
     });
 

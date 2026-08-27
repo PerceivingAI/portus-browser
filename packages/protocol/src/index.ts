@@ -110,8 +110,6 @@ export const BrowserSessionSchema = z.object({
   capabilities: z.array(CapabilitySchema),
   bridgeStatus: BridgeStatusSchema,
   status: BrowserSessionStatusSchema,
-  browserLabel: z.string().min(1).optional(),
-  profileLabel: z.string().min(1).optional(),
   extensionId: z.string().min(1).optional(),
   nativeHostId: z.string().min(1).optional()
 }).strict();
@@ -514,8 +512,6 @@ export const RegistrationRequestSchema = z.object({
   extensionId: z.string().min(1),
   bridgeStatus: z.literal("connected"),
   capabilities: z.array(CapabilitySchema),
-  browserLabel: z.string().min(1).optional(),
-  profileLabel: z.string().min(1).optional(),
   policyPreferences: PolicyPreferencesSchema.optional(),
   settingsProfileContent: SettingsProfileContentSchema.optional()
 }).strict();

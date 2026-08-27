@@ -12,8 +12,8 @@ import { deserializeTransportFrame, getWindowsNamedPipePath, serializeTransportF
 import { NamedPipeBrokerClient, runPortusBrowserCli } from "../dist/index.js";
 
 const browsers = [
-  browser("br_000001", "Chrome", "Main", "2026-04-28T00:00:00.000Z"),
-  browser("br_000002", "Edge", "Work", "2026-04-28T00:01:00.000Z")
+  browser("br_000001", "Chrome", "2026-04-28T00:00:00.000Z"),
+  browser("br_000002", "Edge", "2026-04-28T00:01:00.000Z")
 ];
 
 const tabs = [
@@ -31,7 +31,7 @@ test("browsers renders bridge-connected browsers as table", async () => {
   assert.equal(result.exitCode, 0);
   assert.equal(result.stderr, "");
   assert.match(result.stdout, /INDEX\s+BROWSER_ID\s+BROWSER/);
-  assert.match(result.stdout, /1\s+br_000001\s+Chrome\s+Main\s+connected/);
+  assert.match(result.stdout, /1\s+br_000001\s+Chrome\s+connected/);
   assert.deepEqual(broker.requests.map((request) => request.type), ["browser.list"]);
 });
 
@@ -1183,7 +1183,7 @@ function mockRecipeMatches(recipe, query) {
   ].some((value) => typeof value === "string" && value.toLocaleLowerCase().includes(query));
 }
 
-function browser(browserId, browserName, browserLabel, connectedAt) {
+function browser(browserId, browserName, connectedAt) {
   return {
     browserId,
     browserName,
@@ -1192,8 +1192,7 @@ function browser(browserId, browserName, browserLabel, connectedAt) {
     lastHeartbeat: connectedAt,
     capabilities: ["tabs", "windows", "policy", "events"],
     bridgeStatus: "connected",
-    status: "available",
-    browserLabel
+    status: "available"
   };
 }
 

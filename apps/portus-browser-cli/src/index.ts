@@ -1476,12 +1476,11 @@ function renderBrowserTable(browsers: BrowserSession[]): string {
     INDEX: String(index + 1),
     BROWSER_ID: browser.browserId,
     BROWSER: browser.browserName,
-    LABEL: browser.browserLabel ?? "",
     BRIDGE: browser.bridgeStatus,
     CONNECTED_AT: browser.connectedAt,
     LAST_HEARTBEAT: browser.lastHeartbeat
   }));
-  return renderTable(["INDEX", "BROWSER_ID", "BROWSER", "LABEL", "BRIDGE", "CONNECTED_AT", "LAST_HEARTBEAT"], rows);
+  return renderTable(["INDEX", "BROWSER_ID", "BROWSER", "BRIDGE", "CONNECTED_AT", "LAST_HEARTBEAT"], rows);
 }
 
 function renderTabTable(tabs: Tab[]): string {
