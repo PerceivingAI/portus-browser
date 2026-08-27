@@ -97,6 +97,7 @@ export const CapabilitySchema = z.enum([
   "advanced-debugger",
   "policy",
   "events",
+  "downloads",
   "terminal"
 ]);
 
@@ -180,6 +181,9 @@ export const CommandTypeSchema = z.enum([
   "console.clear",
   "network.list",
   "network.get",
+  "download.list",
+  "download.get",
+  "download.wait",
   "recipe.list",
   "recipe.get",
   "recipe.search",
@@ -225,6 +229,9 @@ export const DEFAULT_COMMAND_POLICY = {
   "console.clear": false,
   "network.list": false,
   "network.get": false,
+  "download.list": false,
+  "download.get": false,
+  "download.wait": false,
   "recipe.list": true,
   "recipe.get": true,
   "recipe.search": true,
@@ -884,6 +891,45 @@ export const NetworkGetResultSchema = z.object({
   request: NetworkRecordSchema
 }).strict();
 
+export const DownloadStateSchema = z.enum(["in_progress", "interrupted", "complete"]);
+
+export const DownloadRecordSchema = z.object({
+  downloadId: z.number().int().nonnegative(),
+  url: z.string(),
+  finalUrl: z.string().optional(),
+  filename: z.string().min(1),
+  finalPath: z.string().min(1).optional(),
+  state: DownloadStateSchema,
+  receivedBytes: z.number().int().nonnegative(),
+  totalBytes: z.number().int().nonnegative().optional(),
+  startedAt: IsoDateTimeSchema,
+  completedAt: IsoDateTimeSchema.optional(),
+  interruptedReason: z.string().min(1).optional()
+}).strict();
+
+export const DownloadListResultSchema = z.object({
+  downloads: z.array(DownloadRecordSchema),
+  captureStartedAt: IsoDateTimeSchema.optional()
+}).strict();
+
+export const DownloadGetResultSchema = z.object({
+  download: DownloadRecordSchema
+}).strict();
+
+export const DownloadWaitConditionSchema = z.object({
+  downloadId: z.number().int().nonnegative().optional(),
+  urlContains: z.string().min(1).optional(),
+  filenameContains: z.string().min(1).optional()
+}).strict();
+
+export const DownloadWaitResultSchema = z.object({
+  browserId: BrowserIdSchema,
+  matched: z.boolean(),
+  condition: DownloadWaitConditionSchema,
+  completedAt: IsoDateTimeSchema,
+  download: DownloadRecordSchema
+}).strict();
+
 export const DismissKindSchema = z.enum(["any", "popup", "cookie"]);
 export const DismissStrategySchema = z.enum(["conservative", "accept"]);
 
@@ -963,6 +1009,12 @@ export type ConsoleListResult = z.infer<typeof ConsoleListResultSchema>;
 export type NetworkRecord = z.infer<typeof NetworkRecordSchema>;
 export type NetworkListResult = z.infer<typeof NetworkListResultSchema>;
 export type NetworkGetResult = z.infer<typeof NetworkGetResultSchema>;
+export type DownloadState = z.infer<typeof DownloadStateSchema>;
+export type DownloadRecord = z.infer<typeof DownloadRecordSchema>;
+export type DownloadListResult = z.infer<typeof DownloadListResultSchema>;
+export type DownloadGetResult = z.infer<typeof DownloadGetResultSchema>;
+export type DownloadWaitCondition = z.infer<typeof DownloadWaitConditionSchema>;
+export type DownloadWaitResult = z.infer<typeof DownloadWaitResultSchema>;
 export type DismissKind = z.infer<typeof DismissKindSchema>;
 export type DismissStrategy = z.infer<typeof DismissStrategySchema>;
 export type DismissResult = z.infer<typeof DismissResultSchema>;

@@ -283,6 +283,20 @@ portus-browser network get --browser 1 --tab-id <tabId> <requestId> --json
 
 Do not use diagnostics as a substitute for user-visible verification when the user asked about rendered behavior.
 
+## Download Monitoring
+
+Download commands expose only downloads observed during the current Bridge session:
+
+```powershell
+portus-browser downloads list --browser 1 --limit 50 --json
+portus-browser downloads get <downloadId> --browser 1 --json
+portus-browser downloads wait <downloadId> --browser 1 --json
+portus-browser downloads wait --url-contains report --browser 1 --json
+portus-browser downloads wait --filename-contains report.pdf --browser 1 --json
+```
+
+Waiting by ID follows an already observed download until it settles. URL and filename criteria wait for the next matching session download; they do not return an older match. Download monitoring is read-only and may be disabled by command policy.
+
 ## Policy
 
 The user controls Portus policy from the extension UI. Do not pre-check or second-guess policy before executing a direct user request. Try the command and report policy errors plainly.

@@ -14,7 +14,7 @@ Portus Browser lets an agent:
 - click, type, upload files, press keys, scroll, hover, and drag
 - take page snapshots and screenshots
 - observe, wait for, and act on controls in regular DOM, scriptable iframes, and recursively nested open/closed Shadow DOM while keeping those details transparent to CLI callers
-- inspect console and network data
+- inspect console and network data, and monitor downloads observed during the current Bridge session
 - use saved browser recipes
 - work across multiple Chrome, Edge, Brave, and Chromium windows at the same time.
 

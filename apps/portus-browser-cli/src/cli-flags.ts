@@ -47,6 +47,7 @@ export const CLI_FLAGS = {
   state: { name: "state", kind: "string", repeatable: false },
   elementState: { name: "element-state", kind: "string", repeatable: false },
   urlContains: { name: "url-contains", kind: "string", repeatable: false },
+  filenameContains: { name: "filename-contains", kind: "string", repeatable: false },
   text: { name: "text", kind: "string", repeatable: false },
   elementQuery: { name: "element-query", kind: "string", repeatable: false },
   value: { name: "value", kind: "string", repeatable: false },

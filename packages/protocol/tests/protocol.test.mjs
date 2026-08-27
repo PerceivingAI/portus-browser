@@ -6,6 +6,11 @@ import {
   CommandTypeSchema,
   DEFAULT_COMMAND_POLICY,
   DEFAULT_TERMINAL_PROFILE_ID,
+  DownloadGetResultSchema,
+  DownloadListResultSchema,
+  DownloadRecordSchema,
+  DownloadWaitConditionSchema,
+  DownloadWaitResultSchema,
   ErrorCodeSchema,
   ElementWaitStateSchema,
   RegistrationResultSchema,
@@ -428,4 +433,51 @@ test("validates browser session, snapshot, and action shapes", () => {
     elementId: "el_001"
   });
   assert.equal(action.action, "click");
+});
+
+test("validates session download monitoring shapes", () => {
+  const now = "2026-04-28T00:00:00.000Z";
+  const record = DownloadRecordSchema.parse({
+    downloadId: 7,
+    url: "https://example.com/report.pdf",
+    finalUrl: "https://example.com/report.pdf",
+    filename: "report.pdf",
+    finalPath: "C:/Downloads/report.pdf",
+    state: "complete",
+    receivedBytes: 120,
+    totalBytes: 120,
+    startedAt: now,
+    completedAt: now
+  });
+  assert.equal(record.state, "complete");
+  assert.equal(CommandTypeSchema.safeParse("download.list").success, true);
+  assert.equal(CommandTypeSchema.safeParse("download.get").success, true);
+  assert.equal(CommandTypeSchema.safeParse("download.wait").success, true);
+  assert.equal(DEFAULT_COMMAND_POLICY["download.list"], false);
+  assert.equal(DEFAULT_COMMAND_POLICY["download.get"], false);
+  assert.equal(DEFAULT_COMMAND_POLICY["download.wait"], false);
+
+  assert.deepEqual(DownloadListResultSchema.parse({
+    downloads: [record],
+    captureStartedAt: now
+  }).downloads.length, 1);
+  assert.deepEqual(DownloadGetResultSchema.parse({ download: record }).download.downloadId, 7);
+
+  const wait = DownloadWaitResultSchema.parse({
+    browserId: "br_001",
+    matched: true,
+    condition: { urlContains: "report" },
+    completedAt: now,
+    download: record
+  });
+  assert.equal(wait.matched, true);
+  assert.equal(DownloadWaitConditionSchema.safeParse({ filenameContains: "" }).success, false);
+  assert.throws(() => DownloadRecordSchema.parse({
+    ...record,
+    downloadId: -1
+  }));
+  assert.throws(() => DownloadRecordSchema.parse({
+    ...record,
+    state: "paused"
+  }));
 });

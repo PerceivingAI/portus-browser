@@ -1397,3 +1397,75 @@ function policyEntry(match, value, source) {
     updatedAt: "2026-04-28T00:00:00.000Z"
   };
 }
+
+test("renders session download monitoring output for list, get, and wait", async () => {
+  const download = {
+    downloadId: 7,
+    url: "https://example.com/report.pdf",
+    filename: "report.pdf",
+    finalPath: "C:/Downloads/report.pdf",
+    state: "complete",
+    receivedBytes: 120,
+    totalBytes: 120,
+    startedAt: "2026-04-28T00:00:00.000Z",
+    completedAt: "2026-04-28T00:00:05.000Z"
+  };
+
+  const listBroker = createMockBroker({
+    "download.list": { downloads: [download], captureStartedAt: "2026-04-28T00:00:00.000Z" }
+  });
+  const listResult = await runPortusBrowserCli(["downloads", "list", "--browser", "br_000001"], { brokerClient: listBroker });
+  assert.equal(listResult.exitCode, 0);
+  assert.match(listResult.stdout, /DOWNLOAD_ID/);
+  assert.match(listResult.stdout, /7\s+complete\s+120\s+120\s+https:\/\/example\.com\/report\.pdf/);
+  const listJsonResult = await runPortusBrowserCli([
+    "downloads", "list", "--browser", "br_000001", "--json"
+  ], { brokerClient: listBroker });
+  assert.equal(JSON.parse(listJsonResult.stdout).captureStartedAt, "2026-04-28T00:00:00.000Z");
+
+  const getBroker = createMockBroker({
+    "download.get": { download }
+  });
+  const getResult = await runPortusBrowserCli(["downloads", "get", "7", "--browser", "br_000001", "--json"], { brokerClient: getBroker });
+  assert.equal(getResult.exitCode, 0);
+  assert.deepEqual(JSON.parse(getResult.stdout), { ok: true, download });
+  assert.equal(getBroker.requests[0].type, "download.get");
+  assert.equal(getBroker.requests[0].payload.downloadId, 7);
+
+  const waitBroker = createMockBroker({
+    "download.wait": {
+      browserId: "br_000001",
+      matched: true,
+      condition: { urlContains: "report" },
+      completedAt: "2026-04-28T00:00:06.000Z",
+      download
+    }
+  });
+  const waitResult = await runPortusBrowserCli([
+    "downloads", "wait", "--browser", "br_000001", "--url-contains", "report", "--json"
+  ], { brokerClient: waitBroker });
+  assert.equal(waitResult.exitCode, 0);
+  const waitOutput = JSON.parse(waitResult.stdout);
+  assert.equal(waitOutput.ok, true);
+  assert.equal(waitOutput.downloadWait.matched, true);
+  assert.equal(waitOutput.downloadWait.download.downloadId, 7);
+  assert.equal(waitBroker.requests[0].type, "download.wait");
+  assert.equal(waitBroker.requests[0].payload.urlContains, "report");
+  assert.equal(waitBroker.requests[0].payload.filenameContains, undefined);
+
+  const waitByIdBroker = createMockBroker({
+    "download.wait": {
+      browserId: "br_000001",
+      matched: true,
+      condition: { downloadId: 7 },
+      completedAt: "2026-04-28T00:00:06.000Z",
+      download
+    }
+  });
+  const waitByIdResult = await runPortusBrowserCli([
+    "downloads", "wait", "7", "--browser", "br_000001"
+  ], { brokerClient: waitByIdBroker });
+  assert.equal(waitByIdResult.exitCode, 0);
+  assert.equal(waitByIdBroker.requests[0].payload.downloadId, 7);
+});
+

@@ -39,6 +39,14 @@ export const commandGroups: Array<{ title: string; commands: Array<{ type: Comma
     ]
   },
   {
+    title: "Downloads",
+    commands: [
+      { type: "download.list", label: "List Downloads" },
+      { type: "download.get", label: "Read Download" },
+      { type: "download.wait", label: "Wait for Download" }
+    ]
+  },
+  {
     title: "Recipes",
     commands: [
       { type: "recipe.list", label: "List Recipes" },

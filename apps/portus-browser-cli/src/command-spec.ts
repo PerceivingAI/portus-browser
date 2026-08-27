@@ -178,6 +178,18 @@ export const CLI_INVOCATIONS = [
     positionals: [arg("request-id", true, false, { minLength: 1, validationMessage: "network get requires <request-id>." })]
   },
 
+  { path: ["downloads", "list"], aliases: [["downloads"]], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.limit), positionals: noArgs },
+  {
+    path: ["downloads", "get"],
+    flags: brokerFlags(CLI_FLAGS.browser),
+    positionals: [arg("download-id", true, false, { kind: "integer", min: 0, validationMessage: "downloads get requires a non-negative integer <download-id>." })]
+  },
+  {
+    path: ["downloads", "wait"],
+    flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.urlContains, CLI_FLAGS.filenameContains),
+    positionals: [arg("download-id", false, false, { kind: "integer", min: 0, validationMessage: "downloads wait requires a non-negative integer <download-id> or --url-contains/--filename-contains." })]
+  },
+
   { path: ["events", "recent"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.type, CLI_FLAGS.limit), positionals: noArgs },
   { path: ["session", "steps"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.limit), positionals: noArgs },
   { path: ["bridge", "disconnect"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.reason), positionals: noArgs },
@@ -554,6 +566,7 @@ function unresolvedInvocationMessage(command: string, positionals: readonly stri
   if (command === "broker") return first === undefined ? "Broker subcommand is required." : `Unknown broker subcommand: ${first}.`;
   if (command === "console") return `Unknown console subcommand: ${first ?? "list"}.`;
   if (command === "network") return `Unknown network subcommand: ${first ?? "list"}.`;
+  if (command === "downloads") return `Unknown downloads subcommand: ${first ?? "list"}.`;
   if (command === "recipes") return `Unknown recipes subcommand: ${first ?? "list"}.`;
 
   if (command === "policy") {

@@ -13,6 +13,9 @@ import {
   ConsoleListResultSchema,
   DialogResultSchema,
   DismissResultSchema,
+  DownloadGetResultSchema,
+  DownloadListResultSchema,
+  DownloadWaitResultSchema,
   FillFormResultSchema,
   NetworkGetResultSchema,
   NetworkListResultSchema,
@@ -35,6 +38,10 @@ import {
   type ConsoleListResult,
   type DialogResult,
   type DismissResult,
+  type DownloadGetResult,
+  type DownloadListResult,
+  type DownloadRecord,
+  type DownloadWaitResult,
   type ErrorCode,
   type EventEnvelope,
   type FillFormResult,
@@ -142,6 +149,7 @@ type CliTabTarget =
 type DialogCliAction = "accept" | "dismiss";
 type ConsoleCliAction = "list" | "clear";
 type NetworkCliAction = "list" | "get";
+type DownloadsCliAction = "list" | "get" | "wait";
 type BrokerCliAction = "status" | "stop";
 type NavigationPolicyArea = "allow" | "block";
 type NavigationPolicyAction = "list" | "add" | "remove";
@@ -559,6 +567,9 @@ const CLI_HANDLERS = {
   "console clear": outputHandler((context, parsed) => handleConsole(context, parsed, "clear")),
   "network list": outputHandler((context, parsed) => handleNetwork(context, parsed, "list")),
   "network get": outputHandler((context, parsed) => handleNetwork(context, parsed, "get")),
+  "downloads list": outputHandler((context, parsed) => handleDownloads(context, parsed, "list")),
+  "downloads get": outputHandler((context, parsed) => handleDownloads(context, parsed, "get")),
+  "downloads wait": outputHandler((context, parsed) => handleDownloads(context, parsed, "wait")),
   "events recent": outputHandler(handleEvents),
   "session steps": outputHandler(handleSession),
   "bridge disconnect": outputHandler(handleBridge),
@@ -1039,6 +1050,60 @@ async function handleNetwork(context: CliContext, parsed: ParsedArgs, action: Ne
   };
 }
 
+async function handleDownloads(context: CliContext, parsed: ParsedArgs, action: DownloadsCliAction): Promise<Record<string, unknown>> {
+  const browserId = await resolveRequiredBrowser(context, parsed);
+  if (action === "get") {
+    const downloadId = Number(parsed.positionals[1]);
+    if (!Number.isInteger(downloadId) || downloadId < 0) {
+      throw createPortusError({
+        code: "INVALID_MESSAGE",
+        message: "downloads get requires a non-negative integer <download-id>."
+      });
+    }
+    const result = DownloadGetResultSchema.parse(await context.broker.request("download.get", { browserId, downloadId }, context.timeoutMs));
+    return {
+      ok: true,
+      download: result.download
+    };
+  }
+
+  const payload: Record<string, unknown> = { browserId };
+  if (action === "wait") {
+    const positional = parsed.positionals[1] !== undefined ? Number(parsed.positionals[1]) : undefined;
+    if (positional !== undefined && (!Number.isInteger(positional) || positional < 0)) {
+      throw createPortusError({
+        code: "INVALID_MESSAGE",
+        message: "downloads wait requires a non-negative integer <download-id> or --url-contains/--filename-contains."
+      });
+    }
+    const urlContains = readOptionalStringFlag(parsed, "url-contains");
+    const filenameContains = readOptionalStringFlag(parsed, "filename-contains");
+    if (positional === undefined && urlContains === undefined && filenameContains === undefined) {
+      throw createPortusError({
+        code: "INVALID_MESSAGE",
+        message: "downloads wait requires <download-id> or --url-contains or --filename-contains."
+      });
+    }
+    if (positional !== undefined) payload.downloadId = positional;
+    if (urlContains !== undefined) payload.urlContains = urlContains;
+    if (filenameContains !== undefined) payload.filenameContains = filenameContains;
+    const waitResult = DownloadWaitResultSchema.parse(await context.broker.request("download.wait", payload, context.timeoutMs));
+    return {
+      ok: true,
+      downloadWait: waitResult
+    };
+  }
+
+  const limit = readOptionalIntegerFlag(parsed, "limit");
+  if (limit !== undefined) payload.limit = limit;
+  const listResult = DownloadListResultSchema.parse(await context.broker.request("download.list", payload, context.timeoutMs));
+  return {
+    ok: true,
+    downloads: listResult.downloads,
+    ...(listResult.captureStartedAt === undefined ? {} : { captureStartedAt: listResult.captureStartedAt })
+  };
+}
+
 async function handleRecipes(context: CliContext, parsed: ParsedArgs, action: RecipeCliAction): Promise<Record<string, unknown>> {
   const directory = readOptionalStringFlag(parsed, "directory");
 
@@ -1433,6 +1498,9 @@ function renderSuccess(output: OutputMode, result: Record<string, unknown>): str
   if (isRecord(result.dialog)) return renderDialogTable(result.dialog as DialogResult);
   if (isRecord(result.console)) return renderConsoleTable(result.console as ConsoleListResult);
   if (isRecord(result.network)) return renderNetworkTable(result.network as NetworkListResult | NetworkGetResult);
+  if (Array.isArray(result.downloads)) return renderDownloadTable(result.downloads as unknown as DownloadRecord[]);
+  if (isRecord(result.download)) return renderDownloadTable([result.download as unknown as DownloadRecord]);
+  if (isRecord(result.downloadWait)) return renderDownloadWaitTable(result.downloadWait as unknown as DownloadWaitResult);
   if (Array.isArray(result.recipes)) return renderRecipeTable(result.recipes as Array<Record<string, unknown>>);
   if (isRecord(result.recipe)) return `${JSON.stringify(result.recipe, null, 2)}\n`;
   if (Array.isArray(result.entries)) return renderPolicyEntryTable(result.entries as PolicyPreferences["allowedNavigationRules"]);
@@ -1591,6 +1659,34 @@ function renderNetworkTable(result: NetworkListResult | NetworkGetResult): strin
     URL: request.url
   }));
   return renderTable(["REQUEST_ID", "TAB_ID", "METHOD", "STATUS", "TYPE", "URL"], rows);
+}
+
+function renderDownloadTable(downloads: DownloadRecord[]): string {
+  const rows = downloads.map((download) => ({
+    DOWNLOAD_ID: String(download.downloadId),
+    STATE: download.state,
+    RECEIVED: String(download.receivedBytes),
+    TOTAL: download.totalBytes === undefined ? "" : String(download.totalBytes),
+    URL: download.url,
+    FILENAME: download.filename,
+    LOCAL_PATH: download.finalPath ?? ""
+  }));
+  return renderTable(["DOWNLOAD_ID", "STATE", "RECEIVED", "TOTAL", "URL", "FILENAME", "LOCAL_PATH"], rows);
+}
+
+function renderDownloadWaitTable(result: DownloadWaitResult): string {
+  const download = result.download;
+  const condition = Object.entries(result.condition)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(", ");
+  return renderTable(["MATCHED", "CONDITION", "DOWNLOAD_ID", "STATE", "LOCAL_PATH", "COMPLETED_AT"], [{
+    MATCHED: String(result.matched),
+    CONDITION: condition,
+    DOWNLOAD_ID: String(download.downloadId),
+    STATE: download.state,
+    LOCAL_PATH: download.finalPath ?? "",
+    COMPLETED_AT: result.completedAt
+  }]);
 }
 
 function renderRecipeTable(recipes: Array<Record<string, unknown>>): string {

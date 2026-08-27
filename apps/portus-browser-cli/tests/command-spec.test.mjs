@@ -324,7 +324,7 @@ test("CLI-8 keeps overloaded recipe --kind outside dismiss enum semantics", asyn
 
 test("CLI-10 handler map exactly matches the declarative invocation registry", () => {
   const registryPaths = CLI_INVOCATIONS.map(cliInvocationPath);
-  assert.equal(CLI_HANDLER_PATHS.length, 54);
+  assert.equal(CLI_HANDLER_PATHS.length, 57);
   assert.deepEqual(CLI_HANDLER_PATHS, registryPaths);
   assert.equal(new Set(CLI_HANDLER_PATHS).size, CLI_HANDLER_PATHS.length);
 
@@ -336,6 +336,7 @@ test("CLI-10 aliases resolve to canonical handler paths", () => {
   for (const [command, canonical] of [
     ["console", "console list"],
     ["network", "network list"],
+    ["downloads", "downloads list"],
     ["recipes", "recipes list"]
   ]) {
     const resolution = resolveCliInvocation(command, []);

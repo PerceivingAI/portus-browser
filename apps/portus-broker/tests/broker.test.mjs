@@ -1996,3 +1996,61 @@ function readOneTransportFrame(socket) {
     socket.on("data", onData);
   });
 }
+
+test("gates download commands by policy and capability before routing", async () => {
+  const routed = [];
+  const bridgeClient = {
+    sendCommand: async (command) => {
+      routed.push(command);
+      return command.type === "download.list"
+        ? { downloads: [], captureStartedAt: "2026-04-28T00:00:00.000Z" }
+        : { download: { downloadId: 7 } };
+    }
+  };
+
+  const capabilityBroker = createBroker({ brokerToken: TEST_BROKER_TOKEN, now: fixedClock() });
+  const capabilityRegister = await capabilityBroker.handleRequest(request("req_dl_cap_reg", "bridge.register", {
+    ...registrationWithCommandPolicy({ "download.list": true, "download.get": true, "download.wait": true }),
+    capabilities: ["tabs", "events", "screenshots", "snapshots", "actions", "policy"]
+  }), { bridgeClient });
+  const capabilityBlocked = await capabilityBroker.handleRequest(request("req_dl_capability", "download.list", {
+    browserId: capabilityRegister.result.browserId
+  }));
+  assert.equal(capabilityBlocked.ok, false);
+  assert.equal(capabilityBlocked.error.code, "CAPABILITY_UNAVAILABLE");
+  assert.equal(routed.length, 0);
+
+  const defaultPolicyBroker = createBroker({ brokerToken: TEST_BROKER_TOKEN, now: fixedClock() });
+  const defaultPolicyRegister = await defaultPolicyBroker.handleRequest(request("req_dl_policy_def_reg", "bridge.register", {
+    ...registration,
+    capabilities: ["tabs", "events", "screenshots", "snapshots", "actions", "policy", "downloads"]
+  }), { bridgeClient });
+  const policyDenied = await defaultPolicyBroker.handleRequest(request("req_dl_policy_def", "download.list", {
+    browserId: defaultPolicyRegister.result.browserId
+  }));
+  assert.equal(policyDenied.ok, false);
+  assert.equal(policyDenied.error.code, "COMMAND_DISABLED_BY_POLICY");
+  assert.equal(routed.length, 0);
+
+  const routedBroker = createBroker({ brokerToken: TEST_BROKER_TOKEN, now: fixedClock() });
+  const routedRegister = await routedBroker.handleRequest(request("req_dl_ok_reg", "bridge.register", {
+    ...registrationWithCommandPolicy({ "download.list": true, "download.get": true, "download.wait": true }),
+    capabilities: ["tabs", "events", "screenshots", "snapshots", "actions", "policy", "downloads"]
+  }), { bridgeClient });
+  const routedResponse = await routedBroker.handleRequest(request("req_dl_ok", "download.list", {
+    browserId: routedRegister.result.browserId
+  }));
+  assert.equal(routedResponse.ok, true);
+  const routedGet = await routedBroker.handleRequest(request("req_dl_get", "download.get", {
+    browserId: routedRegister.result.browserId,
+    downloadId: 7
+  }));
+  const routedWait = await routedBroker.handleRequest(request("req_dl_wait", "download.wait", {
+    browserId: routedRegister.result.browserId,
+    filenameContains: "report.pdf"
+  }));
+  assert.equal(routedGet.ok, true);
+  assert.equal(routedWait.ok, true);
+  assert.deepEqual(routed.map((command) => command.type), ["download.list", "download.get", "download.wait"]);
+  assert.equal(routed[0].targetBrowserId, routedRegister.result.browserId);
+});

@@ -9,6 +9,10 @@ import {
   DialogResultSchema,
   DismissKindSchema,
   DismissStrategySchema,
+  DownloadGetResultSchema,
+  DownloadListResultSchema,
+  DownloadWaitConditionSchema,
+  DownloadWaitResultSchema,
   ExtensionUxPreferencesSchema,
   FillFormRequestSchema,
   FillFormResultSchema,
@@ -53,6 +57,7 @@ import {
   type DismissKind,
   type DismissResult,
   type DismissStrategy,
+  type DownloadWaitCondition,
   type ExtensionUxPreferences,
   type IconClickBehavior,
   type PortusError,
@@ -235,6 +240,11 @@ export interface PortusChromeApi {
     onCompleted?: ChromeWebRequestEvent;
     onErrorOccurred?: ChromeWebRequestEvent;
   };
+  downloads?: {
+    search(query: { id: number }): Promise<ChromeDownloadItem[]> | void;
+    onCreated?: ChromeEvent<(item: ChromeDownloadItem) => void>;
+    onChanged?: ChromeEvent<(delta: ChromeDownloadDelta) => void>;
+  };
 }
 
 export interface ChromeDebuggerTarget {
@@ -255,6 +265,30 @@ export interface ChromeWebRequestDetails {
   statusCode?: number;
   error?: string;
   timeStamp?: number;
+}
+
+export interface ChromeDownloadItem {
+  id?: number;
+  url?: string;
+  finalUrl?: string;
+  filename?: string;
+  state?: string;
+  bytesReceived?: number;
+  totalBytes?: number;
+  startTime?: string;
+  endTime?: string;
+  error?: string;
+}
+
+export interface ChromeDownloadDelta {
+  id?: number;
+  url?: { current?: string };
+  finalUrl?: { current?: string };
+  filename?: { current?: string };
+  state?: { current?: string };
+  totalBytes?: { current?: number };
+  endTime?: { current?: string };
+  error?: { current?: string };
 }
 
 export interface PortusExtensionBridgeOptions {
@@ -707,6 +741,10 @@ export class PortusExtensionBridge {
   private readonly snapshots = new Map<string, SnapshotStoreEntry>();
   private readonly debuggerSnapshotTargets = new Map<string, Map<string, DebuggerSnapshotTarget>>();
   private readonly networkRecords = new Map<string, Record<string, unknown>>();
+  private readonly downloads = new Map<number, Record<string, unknown>>();
+  private readonly downloadObservationOrder = new Map<number, number>();
+  private downloadObservationCounter = 0;
+  private downloadsCaptureStartedAt: string;
 
   bridgeState: BridgeState = "disconnected";
   nativeHostState: NativeHostState = "disconnected";
@@ -721,6 +759,7 @@ export class PortusExtensionBridge {
     this.browserName = options.browserName ?? detectBrowserName();
     this.extensionVersion = options.extensionVersion ?? "0.1.0";
     this.now = options.now ?? (() => new Date());
+    this.downloadsCaptureStartedAt = this.now().toISOString();
     this.setTimer = options.setInterval ?? ((callback, timeoutMs) => globalThis.setInterval(callback, timeoutMs));
     this.clearTimer = options.clearInterval ?? ((handle) => globalThis.clearInterval(handle as ReturnType<typeof setInterval>));
     this.setRequestTimer = options.setTimeout ?? ((callback, timeoutMs) => globalThis.setTimeout(callback, timeoutMs));
@@ -730,6 +769,7 @@ export class PortusExtensionBridge {
     this.ready = this.restoreExtensionState();
     this.installTabLifecycleListeners();
     this.installNetworkListeners();
+    this.installDownloadsListeners();
   }
 
   async initializeBridge(): Promise<PortusExtensionStatus> {
@@ -793,6 +833,7 @@ export class PortusExtensionBridge {
       }
       const browserId = readString(result, "browserId");
       const heartbeatIntervalMs = readNumber(result, "heartbeatIntervalMs");
+      this.resetDownloadsForSession();
       this.browserId = browserId;
       const registeredProfiles = SettingsProfileStateSchema.safeParse(result.settingsProfiles);
       if (registeredProfiles.success) {
@@ -957,6 +998,24 @@ export class PortusExtensionBridge {
       record.error = details.error ?? "request failed";
       record.completedAt = isoFromChromeTimestamp(details.timeStamp, this.now());
     }, filter);
+  }
+
+  private installDownloadsListeners(): void {
+    const downloads = this.chromeApi.downloads;
+    if (!downloads) return;
+    downloads.onCreated?.addListener((item) => {
+      if (item.id === undefined || item.id < 0) return;
+      this.downloads.set(item.id, this.createDownloadRecord(item));
+      this.downloadObservationCounter += 1;
+      this.downloadObservationOrder.set(item.id, this.downloadObservationCounter);
+      trimMap(this.downloads, 1000);
+      trimMap(this.downloadObservationOrder, 1000);
+    });
+    downloads.onChanged?.addListener((delta) => {
+      const record = delta.id === undefined ? undefined : this.downloads.get(delta.id);
+      if (!record) return;
+      applyDownloadDelta(record, delta, this.now());
+    });
   }
 
   async listTabs(): Promise<Tab[]> {
@@ -1858,6 +1917,162 @@ export class PortusExtensionBridge {
     return NetworkGetResultSchema.parse({ request: record });
   }
 
+  async listDownloads(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    await this.ready;
+    this.ensureDownloadsApiAvailable();
+    const limit = readOptionalNumber(payload, "limit") ?? 50;
+    const downloadIds = [...this.downloads.keys()].slice(Math.max(0, this.downloads.size - limit));
+    await Promise.all(downloadIds.map((downloadId) => this.refreshDownloadRecord(downloadId)));
+    const downloads: Array<Record<string, unknown>> = [];
+    for (const downloadId of downloadIds) {
+      const record = this.downloads.get(downloadId);
+      if (record !== undefined) downloads.push(record);
+    }
+    return DownloadListResultSchema.parse({
+      downloads,
+      captureStartedAt: this.downloadsCaptureStartedAt
+    });
+  }
+
+  async getDownload(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    await this.ready;
+    this.ensureDownloadsApiAvailable();
+    const downloadId = readNumber(payload, "downloadId");
+    if (!this.downloads.has(downloadId)) {
+      throw createPortusError({
+        code: "TARGET_NOT_FOUND",
+        message: `Download is unavailable: ${downloadId}.`,
+        details: { downloadId }
+      });
+    }
+    await this.refreshDownloadRecord(downloadId);
+    return DownloadGetResultSchema.parse({ download: this.downloads.get(downloadId) });
+  }
+
+  async waitForDownload(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    await this.ready;
+    this.ensureDownloadsApiAvailable();
+    const conditionInput: Record<string, unknown> = {};
+    copyOptional(payload, conditionInput, "downloadId");
+    copyOptional(payload, conditionInput, "urlContains");
+    copyOptional(payload, conditionInput, "filenameContains");
+    const parsedCondition = DownloadWaitConditionSchema.safeParse(conditionInput);
+    if (!parsedCondition.success) {
+      throw createPortusError({
+        code: "INVALID_MESSAGE",
+        message: "download.wait has invalid download criteria.",
+        details: {
+          issues: parsedCondition.error.issues.map((issue) => ({
+            path: issue.path.join("."),
+            message: issue.message
+          }))
+        }
+      });
+    }
+    const condition = parsedCondition.data;
+    if (condition.downloadId === undefined && condition.urlContains === undefined && condition.filenameContains === undefined) {
+      throw createPortusError({
+        code: "INVALID_MESSAGE",
+        message: "download.wait requires a download id or URL/filename criteria."
+      });
+    }
+
+    const minimumObservationOrder = condition.downloadId === undefined ? this.downloadObservationCounter + 1 : 0;
+    const timeoutMs = readOptionalNumber(payload, "timeoutMs") ?? 30000;
+    const startedAt = Date.now();
+    while (Date.now() - startedAt <= timeoutMs) {
+      const matched = this.matchSettledDownload(condition, minimumObservationOrder);
+      if (matched !== null) {
+        const downloadId = readNumber(matched, "downloadId");
+        await this.refreshDownloadRecord(downloadId);
+        const refreshed = this.matchSettledDownload(condition, minimumObservationOrder);
+        if (refreshed !== null) {
+          return DownloadWaitResultSchema.parse({
+            browserId: this.requireBrowserId(),
+            matched: true,
+            condition,
+            completedAt: this.now().toISOString(),
+            download: refreshed
+          });
+        }
+      }
+      await delay(250);
+    }
+
+    throw createPortusError({
+      code: "COMMAND_TIMEOUT",
+      message: "Timed out waiting for the matching download to finish.",
+      retryable: true,
+      details: {
+        browserId: this.browserId,
+        condition
+      }
+    });
+  }
+
+  private matchSettledDownload(
+    condition: DownloadWaitCondition,
+    minimumObservationOrder: number
+  ): Record<string, unknown> | null {
+    for (const [downloadId, record] of this.downloads) {
+      if ((this.downloadObservationOrder.get(downloadId) ?? 0) < minimumObservationOrder) continue;
+      if (record.state === "in_progress") continue;
+      if (condition.downloadId !== undefined && record.downloadId !== condition.downloadId) continue;
+      if (condition.urlContains !== undefined
+        && !String(record.url).includes(condition.urlContains)
+        && !String(record.finalUrl ?? "").includes(condition.urlContains)) continue;
+      if (condition.filenameContains !== undefined && !String(record.filename).includes(condition.filenameContains)) continue;
+      return record;
+    }
+    return null;
+  }
+
+  private ensureDownloadsApiAvailable(): void {
+    if (!this.chromeApi.downloads) {
+      throw createPortusError({
+        code: "CAPABILITY_UNAVAILABLE",
+        message: "The downloads browser API is unavailable for this extension."
+      });
+    }
+  }
+
+  private async refreshDownloadRecord(downloadId: number): Promise<void> {
+    if (!this.downloads.has(downloadId)) return;
+    const downloadsApi = this.chromeApi.downloads;
+    if (!downloadsApi) return;
+    const items = await promisifyChromeCall<ChromeDownloadItem[]>((done) => {
+      const result = downloadsApi.search({ id: downloadId });
+      done(result as Promise<ChromeDownloadItem[]> | ChromeDownloadItem[] | undefined);
+    });
+    const item = items.find((candidate) => candidate.id === downloadId);
+    if (item) this.downloads.set(downloadId, this.createDownloadRecord(item));
+  }
+
+  private resetDownloadsForSession(): void {
+    this.downloads.clear();
+    this.downloadObservationOrder.clear();
+    this.downloadObservationCounter = 0;
+    this.downloadsCaptureStartedAt = this.now().toISOString();
+  }
+
+  private createDownloadRecord(item: ChromeDownloadItem): Record<string, unknown> {
+    const state = normalizeDownloadState(item.state);
+    const record: Record<string, unknown> = {
+      downloadId: item.id ?? -1,
+      url: item.url ?? "",
+      filename: downloadFilename(item.filename, item.finalUrl ?? item.url, item.id),
+      state,
+      receivedBytes: Math.max(0, Math.floor(item.bytesReceived ?? 0)),
+      startedAt: chromeIsoTimestamp(item.startTime, this.now())
+    };
+    copyOptionalString(record, "finalUrl", item.finalUrl);
+    if (state === "complete") copyOptionalString(record, "finalPath", item.filename);
+    if (item.totalBytes !== undefined && item.totalBytes >= 0) record.totalBytes = Math.floor(item.totalBytes);
+    if (state !== "in_progress") record.completedAt = chromeIsoTimestamp(item.endTime, this.now());
+    if (item.error) record.interruptedReason = item.error;
+    return record;
+  }
+
   getPolicyPreferences(): PolicyPreferences {
     return this.policyPreferences;
   }
@@ -2456,6 +2671,10 @@ export class PortusExtensionBridge {
         return { status: await this.disconnectBridge("runtime-message") };
       case "portus.tabs.list":
         return { tabs: await this.listTabs() };
+      case "portus.download.list":
+        return this.listDownloads(isRecord(message) ? message : {});
+      case "portus.download.get":
+        return this.getDownload(isRecord(message) ? message : {});
       case "portus.screenshot.capture":
         return { screenshot: await this.captureScreenshot(readOptionalNumber(message, "tabId")) };
       case "portus.snapshot.capture":
@@ -2888,6 +3107,15 @@ export class PortusExtensionBridge {
         return { network: await this.listNetworkRecords(request.payload) };
       case "network.get":
         return { network: await this.getNetworkRecord(request.payload) };
+      case "download.list":
+        return this.listDownloads(request.payload);
+      case "download.get":
+        return this.getDownload(request.payload);
+      case "download.wait":
+        return this.waitForDownload({
+          ...request.payload,
+          ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs })
+        });
       case "policy.get":
         return { policy: this.getPolicyPreferences() };
       case "policy.allow.add":
@@ -3220,14 +3448,16 @@ export class PortusExtensionBridge {
   }
 
   private registrationPayload(): Record<string, unknown> {
+    const capabilities = ["tabs", "screenshots", "snapshots", "actions"];
+    if (this.chromeApi.debugger) capabilities.push("advanced-debugger");
+    if (this.chromeApi.downloads) capabilities.push("downloads");
+    capabilities.push("policy", "events");
     const payload: Record<string, unknown> = {
       browserName: this.browserName,
       extensionVersion: this.extensionVersion,
       extensionId: this.chromeApi.runtime.id ?? "portus-extension-development",
       bridgeStatus: "connected",
-      capabilities: this.chromeApi.debugger
-        ? ["tabs", "screenshots", "snapshots", "actions", "advanced-debugger", "policy", "events"]
-        : ["tabs", "screenshots", "snapshots", "actions", "policy", "events"],
+      capabilities,
       policyPreferences: this.policyPreferences,
       settingsProfileContent: this.createCurrentSettingsProfileContent()
     };
@@ -5119,6 +5349,60 @@ function copyOptional(source: Record<string, unknown>, target: Record<string, un
 function isoFromChromeTimestamp(timeStamp: number | undefined, fallback: Date): string {
   if (typeof timeStamp === "number" && Number.isFinite(timeStamp)) return new Date(timeStamp).toISOString();
   return fallback.toISOString();
+}
+
+function chromeIsoTimestamp(value: string | undefined, fallback: Date): string {
+  if (typeof value === "string" && value.length > 0 && !Number.isNaN(Date.parse(value))) return new Date(value).toISOString();
+  return fallback.toISOString();
+}
+
+function normalizeDownloadState(state: string | undefined): "in_progress" | "interrupted" | "complete" {
+  if (state === "complete") return "complete";
+  if (state === "interrupted") return "interrupted";
+  return "in_progress";
+}
+function downloadFilename(localPath: string | undefined, url: string | undefined, downloadId: number | undefined): string {
+  if (localPath) {
+    const separatorIndex = Math.max(localPath.lastIndexOf("/"), localPath.lastIndexOf("\\"));
+    const filename = localPath.slice(separatorIndex + 1);
+    if (filename) return filename;
+  }
+  if (url) {
+    try {
+      const pathname = new URL(url).pathname;
+      const filename = pathname.slice(pathname.lastIndexOf("/") + 1);
+      if (filename) return decodeURIComponent(filename);
+    } catch {
+      // Fall back to a stable identifier when the browser supplies malformed metadata.
+    }
+  }
+  return `download-${downloadId ?? "unknown"}`;
+}
+
+
+function copyOptionalString(target: Record<string, unknown>, key: string, value: string | undefined): void {
+  if (typeof value === "string" && value.length > 0) target[key] = value;
+}
+
+function applyDownloadDelta(record: Record<string, unknown>, delta: ChromeDownloadDelta, observedAt: Date): void {
+  if (delta.url?.current !== undefined) record.url = delta.url.current;
+  if (delta.finalUrl?.current !== undefined) record.finalUrl = delta.finalUrl.current;
+  if (delta.filename?.current !== undefined) {
+    record.filename = downloadFilename(delta.filename.current, undefined, readNumber(record, "downloadId"));
+  }
+  if (delta.state?.current !== undefined) record.state = normalizeDownloadState(delta.state.current);
+  if (delta.totalBytes?.current !== undefined) {
+    if (delta.totalBytes.current >= 0) record.totalBytes = Math.floor(delta.totalBytes.current);
+    else delete record.totalBytes;
+  }
+  if (delta.endTime?.current !== undefined) {
+    record.completedAt = chromeIsoTimestamp(delta.endTime.current, observedAt);
+  } else if (record.state !== "in_progress") {
+    record.completedAt = observedAt.toISOString();
+  }
+  if (record.state === "complete" && delta.filename?.current) record.finalPath = delta.filename.current;
+  if (record.state === "interrupted") delete record.finalPath;
+  if (delta.error?.current) record.interruptedReason = delta.error.current;
 }
 
 function trimMap<K, V>(map: Map<K, V>, limit: number): void {

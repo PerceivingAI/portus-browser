@@ -25,6 +25,7 @@ test("packages an action popup for bridge visibility controls", async () => {
   assert.equal(manifest.side_panel.default_path, "sidepanel.html");
   assert.ok(manifest.permissions.includes("sidePanel"));
   assert.ok(manifest.permissions.includes("debugger"));
+  assert.ok(manifest.permissions.includes("downloads"));
   assert.deepEqual(manifest.host_permissions, ["<all_urls>"]);
   assert.equal("optional_host_permissions" in manifest, false);
   assert.equal(manifest.permissions.includes("activeTab"), false);
@@ -97,7 +98,7 @@ test("connects bridge through native messaging only when requested", async () =>
   assert.ok(port);
   assert.equal(port.messages[0].type, "bridge.register");
   assert.equal(port.messages[0].payload.browserName, "Chrome");
-  assert.deepEqual(port.messages[0].payload.capabilities, ["tabs", "screenshots", "snapshots", "actions", "advanced-debugger", "policy", "events"]);
+  assert.deepEqual(port.messages[0].payload.capabilities, ["tabs", "screenshots", "snapshots", "actions", "advanced-debugger", "downloads", "policy", "events"]);
   assert.deepEqual(port.messages[0].payload.policyPreferences, {
     navigationPolicyEnabled: true,
     policyMode: "blocklist",
@@ -4982,12 +4983,40 @@ function createChromeFixture(overrides = {}) {
     onActivated: createEvent(),
     onRemoved: createEvent()
   };
+  const downloadItems = new Map();
+  const downloadCreatedEvent = createEvent();
+  const emitDownloadCreated = downloadCreatedEvent.emit;
+  downloadCreatedEvent.emit = (item) => {
+    if (Number.isInteger(item.id)) downloadItems.set(item.id, { ...item });
+    emitDownloadCreated(item);
+  };
+  const downloadChangedEvent = createEvent();
+  const emitDownloadChanged = downloadChangedEvent.emit;
+  downloadChangedEvent.emit = (delta) => {
+    const item = downloadItems.get(delta.id);
+    if (item) {
+      for (const key of ["url", "finalUrl", "filename", "state", "totalBytes", "endTime", "error"]) {
+        if (delta[key]?.current !== undefined) item[key] = delta[key].current;
+      }
+    }
+    emitDownloadChanged(delta);
+  };
+  const downloadEvents = {
+    search({ id }) {
+      const item = downloadItems.get(id);
+      return Promise.resolve(item === undefined ? [] : [{ ...item }]);
+    },
+    onCreated: downloadCreatedEvent,
+    onChanged: downloadChangedEvent
+  };
   const storage = { ...(overrides.storage ?? {}) };
   const fixture = {
     ports,
     connectedHostNames,
     capturedWindows,
     tabUpdates,
+    downloadEvents,
+    downloadItems,
     activeTabId: () => activeTabId,
     actions,
     scriptInjections,
@@ -5083,6 +5112,7 @@ function createChromeFixture(overrides = {}) {
           return Promise.resolve({ id: windowId, focused: true });
         }
       },
+      downloads: downloadEvents,
       storage: {
         local: {
           get(key) {
@@ -5181,6 +5211,12 @@ function createConnectedBridge(fixture) {
   bridge.nativeHostState = "connected";
   bridge.brokerState = "connected";
   return bridge;
+}
+
+async function enableDownloadCommands(bridge) {
+  for (const commandType of ["download.list", "download.get", "download.wait"]) {
+    await bridge.setCommandPolicyEnabled(commandType, true, false, false);
+  }
 }
 
 function chromeTab(id, url, active) {
@@ -5305,3 +5341,142 @@ async function waitFor(predicate) {
   }
   assert.ok(predicate());
 }
+
+test("tracks observed session downloads for download.list and download.get", async () => {
+  const fixture = createChromeFixture();
+  const bridge = createConnectedBridge(fixture);
+  await enableDownloadCommands(bridge);
+
+  fixture.downloadEvents.onCreated.emit({
+    id: 7,
+    url: "https://example.com/report.pdf",
+    finalUrl: "https://example.com/report.pdf",
+    filename: "C:/Downloads/report.pdf",
+    state: "in_progress",
+    bytesReceived: 10,
+    totalBytes: 120,
+    startTime: "2026-04-28T00:00:00.000Z"
+  });
+
+  const listed = await bridge.dispatchNativeRequest(request("req_dl_list", "download.list"));
+  assert.equal(listed.downloads.length, 1);
+  assert.equal(listed.downloads[0].downloadId, 7);
+  assert.equal(listed.downloads[0].state, "in_progress");
+  assert.equal(listed.downloads[0].filename, "report.pdf");
+  assert.equal(listed.downloads[0].finalPath, undefined);
+  assert.ok(typeof listed.captureStartedAt === "string");
+
+  Object.assign(fixture.downloadItems.get(7), {
+    state: "complete",
+    bytesReceived: 120,
+    filename: "C:/Downloads/report.pdf",
+    endTime: "2026-04-28T00:00:05.000Z"
+  });
+  fixture.downloadEvents.onChanged.emit({
+    id: 7,
+    state: { current: "complete" },
+    filename: { current: "C:/Downloads/report.pdf" },
+    endTime: { current: "2026-04-28T00:00:05.000Z" }
+  });
+
+  const got = await bridge.dispatchNativeRequest(request("req_dl_get", "download.get", { downloadId: 7 }));
+  assert.equal(got.download.state, "complete");
+  assert.equal(got.download.finalPath, "C:/Downloads/report.pdf");
+  assert.equal(got.download.receivedBytes, 120);
+  assert.equal(got.download.completedAt, "2026-04-28T00:00:05.000Z");
+
+  await assert.rejects(
+    () => bridge.dispatchNativeRequest(request("req_dl_missing", "download.get", { downloadId: 99 })),
+    { code: "TARGET_NOT_FOUND" }
+  );
+});
+
+test("resets observed downloads when a new Bridge session registers", async () => {
+  const fixture = createChromeFixture();
+  const bridge = createPortusExtensionBridge(fixture.chrome, {
+    now: () => new Date("2026-04-28T00:00:00.000Z"),
+    setInterval: () => 0,
+    clearInterval: () => undefined
+  });
+  fixture.downloadEvents.onCreated.emit({
+    id: 1,
+    url: "https://example.com/before-session.pdf",
+    filename: "C:/Downloads/before-session.pdf",
+    state: "complete",
+    bytesReceived: 1,
+    startTime: "2026-04-28T00:00:00.000Z",
+    endTime: "2026-04-28T00:00:00.000Z"
+  });
+
+  const connectPromise = bridge.connectBridge();
+  await waitFor(() => fixture.ports.length > 0);
+  const port = fixture.ports[0];
+  port.emitMessage(response(port.messages[0].requestId, {
+    browserId: "br_000001",
+    heartbeatIntervalMs: 5000
+  }));
+  await connectPromise;
+
+  fixture.downloadEvents.onCreated.emit({
+    id: 2,
+    url: "https://example.com/current-session.pdf",
+    filename: "C:/Downloads/current-session.pdf",
+    state: "complete",
+    bytesReceived: 2,
+    startTime: "2026-04-28T00:00:01.000Z",
+    endTime: "2026-04-28T00:00:01.000Z"
+  });
+  const listed = await bridge.listDownloads({});
+  assert.deepEqual(listed.downloads.map((download) => download.downloadId), [2]);
+});
+
+test("resolves download.wait against session downloads matching criteria", async () => {
+  const fixture = createChromeFixture();
+  const bridge = createConnectedBridge(fixture);
+  await enableDownloadCommands(bridge);
+
+  fixture.downloadEvents.onCreated.emit({
+    id: 3,
+    url: "https://example.com/archive.zip?token=old",
+    filename: "C:/Downloads/archive.zip",
+    state: "complete",
+    bytesReceived: 512,
+    startTime: "2026-04-28T00:00:00.000Z",
+    endTime: "2026-04-28T00:00:01.000Z"
+  });
+
+  const known = await bridge.dispatchNativeRequest(request("req_dl_wait_id", "download.wait", { downloadId: 3 }));
+  assert.equal(known.download.downloadId, 3);
+
+  const matchingNextDownload = bridge.dispatchNativeRequest(request(
+    "req_dl_wait",
+    "download.wait",
+    { urlContains: "archive.zip" }
+  ));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  fixture.downloadEvents.onCreated.emit({
+    id: 4,
+    url: "https://example.com/archive.zip?token=new",
+    filename: "C:/Downloads/archive (1).zip",
+    state: "complete",
+    bytesReceived: 1024,
+    startTime: "2026-04-28T00:00:02.000Z",
+    endTime: "2026-04-28T00:00:03.000Z"
+  });
+
+  const matched = await matchingNextDownload;
+  assert.equal(matched.matched, true);
+  assert.equal(matched.download.downloadId, 4);
+  assert.equal(matched.condition.urlContains, "archive.zip");
+
+  await assert.rejects(
+    () => bridge.dispatchNativeRequest(request("req_dl_wait_empty", "download.wait", {})),
+    { code: "INVALID_MESSAGE" }
+  );
+
+  await assert.rejects(
+    () => bridge.dispatchNativeRequest(request("req_dl_wait_missing_id", "download.wait", { downloadId: 42, timeoutMs: 400 })),
+    { code: "COMMAND_TIMEOUT" }
+  );
+});
+
