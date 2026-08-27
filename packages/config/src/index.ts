@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { delimiter, isAbsolute, join } from "node:path";
 import { z } from "zod";
 import {
   CommandPolicySchema,
@@ -22,6 +22,8 @@ const LocalHostSchema = z.string().refine((value) => {
 const PipeNameSchema = z.string().min(1).refine((value) => {
   return !/[\\/]/.test(value);
 }, "must not contain path separators");
+
+const AbsolutePathSchema = z.string().min(1).refine(isAbsolute, "must be an absolute path");
 
 const ExtensionOriginSchema = z.string().refine((value) => {
   if (value === "chrome-extension://<extension-id>") return true;
@@ -106,6 +108,7 @@ export const CommandConfigSchema = z.object({
 
 export const SecurityConfigSchema = z.object({
   allowedOrigins: z.array(ExtensionOriginSchema).default(["chrome-extension://<extension-id>"]),
+  allowedUploadRoots: z.array(AbsolutePathSchema).max(100).default([]),
   requireLocalhost: z.literal(true).default(true),
   requireBrokerToken: z.boolean().default(true),
   tokenStorage: z.literal("user-config").default("user-config"),
@@ -285,6 +288,13 @@ export function createConfigInvalidError(error: z.ZodError): PortusError {
 export function applyEnvironmentOverrides(config: PortusConfig, env: Record<string, string | undefined>): PortusConfig {
   const overrides: Record<string, unknown> = {};
   if (env.PORTUS_LOG_LEVEL !== undefined) setPath(overrides, ["logging", "level"], env.PORTUS_LOG_LEVEL);
+  if (env.PORTUS_UPLOAD_ALLOWED_ROOTS !== undefined) {
+    setPath(
+      overrides,
+      ["security", "allowedUploadRoots"],
+      env.PORTUS_UPLOAD_ALLOWED_ROOTS.split(delimiter).map((value) => value.trim()).filter(Boolean)
+    );
+  }
   if (env.PORTUS_CLI_OUTPUT !== undefined) setPath(overrides, ["cli", "output"], env.PORTUS_CLI_OUTPUT);
   if (env.PORTUS_BROKER_PIPE_NAME !== undefined) {
     setPath(overrides, ["broker", "pipeName"], env.PORTUS_BROKER_PIPE_NAME);

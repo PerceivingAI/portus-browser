@@ -20,7 +20,8 @@ import {
   ResponseEnvelopeSchema,
   SnapshotFilterSchema,
   SnapshotSchema,
-  TerminalProfileIdSchema
+  TerminalProfileIdSchema,
+  UploadRequestSchema
 } from "../dist/index.js";
 
 const now = "2026-04-28T00:00:00.000Z";
@@ -92,6 +93,7 @@ test("includes existing-tab navigation in default command policy", () => {
   assert.equal(DEFAULT_COMMAND_POLICY["action.hover"], true);
   assert.equal(DEFAULT_COMMAND_POLICY["action.drag"], true);
   assert.equal(DEFAULT_COMMAND_POLICY["action.fillForm"], true);
+  assert.equal(DEFAULT_COMMAND_POLICY["action.upload"], false);
   assert.equal(DEFAULT_COMMAND_POLICY["dialog.dismiss"], false);
   assert.equal(DEFAULT_COMMAND_POLICY["console.list"], false);
   assert.equal(DEFAULT_COMMAND_POLICY["network.list"], false);
@@ -114,6 +116,22 @@ test("includes existing-tab navigation in default command policy", () => {
   assert.equal(policy.commandPolicy["action.fillForm"], false);
   assert.equal(policy.commandPolicy["network.list"], true);
   assert.equal(policy.advancedBackendEnabled, false);
+});
+
+test("validates bounded upload action requests", () => {
+  const request = UploadRequestSchema.parse({
+    action: "upload",
+    browserId: "br_001",
+    tabId: 7,
+    snapshotId: "snap_001",
+    elementId: "el_001",
+    files: ["C:\\approved\\one.txt", "C:\\approved\\two.txt"]
+  });
+
+  assert.equal(request.files.length, 2);
+  assert.throws(() => UploadRequestSchema.parse({ ...request, files: [] }));
+  assert.throws(() => UploadRequestSchema.parse({ ...request, files: Array.from({ length: 101 }, (_, index) => `file-${index}`) }));
+  assert.throws(() => UploadRequestSchema.parse({ ...request, extra: true }));
 });
 
 test("maps invalid protocol messages to typed Portus errors", () => {
@@ -160,10 +178,11 @@ test("validates success and error response envelopes", () => {
 });
 
 test("exports all documented error codes", () => {
-  assert.equal(ErrorCodeSchema.options.length, 23);
+  assert.equal(ErrorCodeSchema.options.length, 24);
   assert.ok(ErrorCodeSchema.options.includes("BROWSER_ACCESS_DENIED"));
   assert.ok(ErrorCodeSchema.options.includes("NAVIGATION_BLOCKED"));
   assert.ok(ErrorCodeSchema.options.includes("COMMAND_DISABLED_BY_POLICY"));
+  assert.ok(ErrorCodeSchema.options.includes("UPLOAD_PATH_DENIED"));
   assert.ok(ErrorCodeSchema.options.includes("DISMISS_TARGET_NOT_FOUND"));
   assert.ok(ErrorCodeSchema.options.includes("TERMINAL_UNAVAILABLE"));
 });

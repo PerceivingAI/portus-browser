@@ -61,6 +61,7 @@
     "allowedOrigins": [
       "chrome-extension://<extension-id>"
     ],
+    "allowedUploadRoots": [],
     "requireLocalhost": true,
     "requireBrokerToken": true,
     "tokenStorage": "user-config",

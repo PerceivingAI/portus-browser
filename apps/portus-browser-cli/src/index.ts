@@ -545,6 +545,7 @@ const CLI_HANDLERS = {
   "hover": outputHandler((context, parsed) => handleAction(context, parsed, "hover")),
   "drag": outputHandler((context, parsed) => handleAction(context, parsed, "drag")),
   "fill-form": outputHandler(handleFillForm),
+  "upload": outputHandler(handleUpload),
   "type": outputHandler((context, parsed) => handleAction(context, parsed, "type")),
   "press": outputHandler((context, parsed) => handleAction(context, parsed, "press")),
   "scroll": outputHandler((context, parsed) => handleAction(context, parsed, "scroll")),
@@ -930,6 +931,26 @@ async function handleFillForm(context: CliContext, parsed: ParsedArgs): Promise<
   return {
     ok: true,
     fillForm: result.fillForm
+  };
+}
+
+async function handleUpload(context: CliContext, parsed: ParsedArgs): Promise<Record<string, unknown>> {
+  const tabId = readRequiredIntegerFlag(parsed, "tab-id");
+  const snapshotId = readOptionalStringFlag(parsed, "snapshot");
+  const elementId = readOptionalStringFlag(parsed, "element");
+  if (!snapshotId) throw usageError("--snapshot is required.");
+  if (!elementId) throw usageError("--element is required.");
+  const browserId = await resolveRequiredBrowser(context, parsed);
+  const result = ActionCommandResultSchema.parse(await context.broker.request("action.upload", {
+    browserId,
+    tabId,
+    snapshotId,
+    elementId,
+    files: parsed.positionals
+  }, context.timeoutMs));
+  return {
+    ok: true,
+    action: result.action
   };
 }
 
@@ -1948,6 +1969,7 @@ function exitCodeForError(error: PortusError): number {
     BROWSER_ACCESS_DENIED: 5,
     NAVIGATION_BLOCKED: 5,
     COMMAND_DISABLED_BY_POLICY: 5,
+    UPLOAD_PATH_DENIED: 5,
     BROWSER_SESSION_UNAVAILABLE: 6,
     BRIDGE_DISCONNECTED: 6,
     TARGET_NOT_FOUND: 6,

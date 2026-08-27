@@ -77,6 +77,22 @@ Remember:
 
 Portus does not use a separate Chrome site-permission request workflow. Do not look for a permission prompt or retry a removed `permissions` CLI command.
 
+## File upload is denied
+
+`COMMAND_DISABLED_BY_POLICY` means **Upload Files** is disabled under **CLI Commands** in the active settings profile.
+
+`UPLOAD_PATH_DENIED` means the Broker has no allowed upload roots, the path is missing or is not a regular file, or the resolved path falls outside every allowed root.
+
+Check that:
+
+1. `PORTUS_UPLOAD_ALLOWED_ROOTS` was set in the environment used to start the Broker.
+2. Each configured root is an existing absolute directory.
+3. The Broker was restarted after changing the environment variable.
+4. The selected file resolves under one of those roots.
+
+Do not approve a broader directory than the upload workflow requires.
+
+
 ## Browser Access Is Denied
 
 `BROWSER_ACCESS_DENIED` means the browser or Extension cannot control the target. Protected browser pages, missing tab URLs, unavailable host access, and Chrome API access failures can produce this error.

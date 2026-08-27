@@ -123,6 +123,11 @@ export const CLI_INVOCATIONS = [
     ),
     positionals: noArgs
   },
+  {
+    path: ["upload"],
+    flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.tabId, CLI_FLAGS.snapshot, CLI_FLAGS.element),
+    positionals: [arg("file", true, true, { minLength: 1, validationMessage: "upload requires at least one <file>." })]
+  },
   { path: ["type"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.tabId, CLI_FLAGS.snapshot, CLI_FLAGS.element), positionals: [arg("text")] },
   { path: ["press"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.tabId, CLI_FLAGS.snapshot, CLI_FLAGS.element), positionals: [arg("key")] },
   { path: ["scroll"], flags: brokerFlags(CLI_FLAGS.browser, CLI_FLAGS.tabId, CLI_FLAGS.snapshot, CLI_FLAGS.element, CLI_FLAGS.x, CLI_FLAGS.y), positionals: noArgs },

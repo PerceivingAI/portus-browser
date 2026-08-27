@@ -324,7 +324,7 @@ test("CLI-8 keeps overloaded recipe --kind outside dismiss enum semantics", asyn
 
 test("CLI-10 handler map exactly matches the declarative invocation registry", () => {
   const registryPaths = CLI_INVOCATIONS.map(cliInvocationPath);
-  assert.equal(CLI_HANDLER_PATHS.length, 53);
+  assert.equal(CLI_HANDLER_PATHS.length, 54);
   assert.deepEqual(CLI_HANDLER_PATHS, registryPaths);
   assert.equal(new Set(CLI_HANDLER_PATHS).size, CLI_HANDLER_PATHS.length);
 

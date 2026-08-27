@@ -390,6 +390,41 @@ test("click, hover, drag, fill-form, and type send DOM action payloads", async (
   assert.equal(broker.requests[4].payload.partial, true);
 });
 
+test("upload sends one or more local paths to a snapshot file input", async () => {
+  const broker = createMockBroker({
+    "action.upload": { action: { ...actionResult("upload"), backend: "debugger-cdp" } }
+  });
+
+  const upload = await runPortusBrowserCli([
+    "upload",
+    "--browser", "br_000001",
+    "--tab-id", "11",
+    "--snapshot", "snap_000001",
+    "--element", "el_000001",
+    "C:\\approved\\one.txt",
+    "C:\\approved\\two.txt",
+    "--json"
+  ], { brokerClient: broker });
+
+  assert.equal(upload.exitCode, 0);
+  assert.equal(broker.requests[0].type, "action.upload");
+  assert.deepEqual(broker.requests[0].payload.files, [
+    "C:\\approved\\one.txt",
+    "C:\\approved\\two.txt"
+  ]);
+  assert.equal(JSON.parse(upload.stdout).action.details.action, "upload");
+
+  const missingFile = await runPortusBrowserCli([
+    "upload",
+    "--browser", "br_000001",
+    "--tab-id", "11",
+    "--snapshot", "snap_000001",
+    "--element", "el_000001"
+  ], { brokerClient: broker });
+  assert.equal(missingFile.exitCode, 2);
+  assert.match(missingFile.stderr, /upload requires <file>/);
+});
+
 test("wait routes tab and page conditions to broker commands", async () => {
   const broker = createMockBroker({
     "tab.wait": { wait: waitResult("current-tab") },

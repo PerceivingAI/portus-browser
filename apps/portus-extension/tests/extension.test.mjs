@@ -2111,6 +2111,85 @@ test("live DOM actions resolve nested Shadow DOM without crossing the captured r
   }
 });
 
+test("upload DOM preparation enforces multiple files and cleans its target marker", () => {
+  const dom = new JSDOM(`<!doctype html><html><body><input id="upload" type="file" aria-label="Documents"></body></html>`, {
+    url: "https://example.com/"
+  });
+  const document = dom.window.document;
+  const input = document.querySelector("#upload");
+  const descriptors = new Map();
+  const globals = {
+    window: dom.window,
+    document,
+    location: dom.window.location,
+    HTMLElement: dom.window.HTMLElement,
+    HTMLInputElement: dom.window.HTMLInputElement,
+    HTMLTextAreaElement: dom.window.HTMLTextAreaElement,
+    HTMLSelectElement: dom.window.HTMLSelectElement,
+    HTMLAnchorElement: dom.window.HTMLAnchorElement,
+    Event: dom.window.Event,
+    InputEvent: dom.window.InputEvent,
+    getComputedStyle: dom.window.getComputedStyle.bind(dom.window)
+  };
+  for (const [key, value] of Object.entries(globals)) {
+    descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  }
+  descriptors.set("__portusComposedDom", Object.getOwnPropertyDescriptor(globalThis, "__portusComposedDom"));
+  installPortusComposedDomRuntime(globalThis);
+  dom.window.HTMLElement.prototype.getBoundingClientRect = () => ({
+    x: 10, y: 20, left: 10, top: 20, right: 170, bottom: 52, width: 160, height: 32,
+    toJSON() { return this; }
+  });
+  const target = {
+    selectorHint: "#upload",
+    tagName: "input",
+    role: "textbox",
+    label: "Documents",
+    text: "",
+    bounds: { x: 10, y: 20, width: 160, height: 32 },
+    state: {},
+    editable: false,
+    inputType: "file"
+  };
+
+  try {
+    const rejected = performPortusDomAction({
+      action: "__portus.prepare-upload",
+      target,
+      markerAttribute: "data-portus-upload-request-one",
+      fileCount: 2
+    });
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.error.code, "ACTION_UNSUPPORTED");
+    assert.equal(input.hasAttribute("data-portus-upload-request-one"), false);
+
+    input.multiple = true;
+    const prepared = performPortusDomAction({
+      action: "__portus.prepare-upload",
+      target,
+      markerAttribute: "data-portus-upload-request-two",
+      fileCount: 2
+    });
+    assert.equal(prepared.ok, true);
+    assert.equal(input.hasAttribute("data-portus-upload-request-two"), true);
+
+    const finalized = performPortusDomAction({
+      action: "__portus.finalize-upload",
+      target,
+      markerAttribute: "data-portus-upload-request-two",
+    });
+    assert.equal(finalized.ok, true);
+    assert.equal(input.hasAttribute("data-portus-upload-request-two"), false);
+  } finally {
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    }
+    dom.window.close();
+  }
+});
+
 test("atomic fill-form validates fields across sibling Shadow DOM roots before mutation", () => {
   const dom = new JSDOM(`<!doctype html><html><body><app-shell id="app"></app-shell></body></html>`, { url: "https://example.com/" });
   const document = dom.window.document;
@@ -2957,6 +3036,91 @@ test("surfaces unsupported DOM action failures", async () => {
     elementId: snapshot.elements[0].elementId,
     text: "Ada"
   }), { code: "ACTION_UNSUPPORTED" });
+});
+
+test("uploads approved files to an exact snapshot file input through CDP", async () => {
+  const fixture = createChromeFixture({
+    executeScript(injection) {
+      if (injection.files) return Promise.resolve([{ result: undefined }]);
+      if (isActionInjection(injection)) {
+        return Promise.resolve([{ result: defaultInternalActionResult(injection.args[0]) }]);
+      }
+      return Promise.resolve([{
+        result: {
+          url: "https://example.com/upload",
+          title: "Upload",
+          viewport: { width: 1200, height: 800, deviceScaleFactor: 1 },
+          visibleText: "Choose files",
+          closedShadowRootAccessAvailable: true,
+          elements: [{
+            role: "textbox",
+            label: "Choose files",
+            text: "",
+            bounds: { x: 10, y: 20, width: 160, height: 32 },
+            state: {},
+            selectorHint: "input[type=file]",
+            tagName: "input",
+            inputType: "file",
+            editable: false
+          }]
+        }
+      }]);
+    },
+    sendDebuggerCommand(_target, method) {
+      if (method === "DOM.performSearch") return Promise.resolve({ searchId: "search-upload", resultCount: 1 });
+      if (method === "DOM.getSearchResults") return Promise.resolve({ nodeIds: [42] });
+      if (method === "DOM.resolveNode") return Promise.resolve({ object: { objectId: "upload-object" } });
+      if (method === "Runtime.callFunctionOn") {
+        return Promise.resolve({ result: { value: { fileInput: true, multiple: true } } });
+      }
+      return Promise.resolve({});
+    }
+  });
+  const bridge = createConnectedBridge(fixture);
+  const snapshot = await bridge.captureSnapshot(1);
+
+  const result = await bridge.uploadFiles({
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    elementId: snapshot.elements[0].elementId,
+    files: ["C:\\approved\\one.txt", "C:\\approved\\two.txt"]
+  });
+
+  assert.equal(result.backend, "debugger-cdp");
+  assert.equal(result.snapshotInvalidated, true);
+  assert.deepEqual(result.details.fileNames, ["one.txt", "two.txt"]);
+  assert.equal(result.details.fileCount, 2);
+  assert.deepEqual(fixture.debuggerCommands.map((command) => command.method), [
+    "DOM.enable",
+    "DOM.performSearch",
+    "DOM.getSearchResults",
+    "DOM.resolveNode",
+    "Runtime.callFunctionOn",
+    "DOM.setFileInputFiles",
+    "DOM.discardSearchResults"
+  ]);
+  const setFiles = fixture.debuggerCommands.find((command) => command.method === "DOM.setFileInputFiles");
+  assert.deepEqual(setFiles.params, {
+    files: ["C:\\approved\\one.txt", "C:\\approved\\two.txt"],
+    nodeId: 42
+  });
+  const uploadActions = fixture.scriptInjections
+    .filter(isActionInjection)
+    .map((injection) => injection.args[0]);
+  assert.deepEqual(uploadActions.map((action) => action.action), [
+    "__portus.prepare-upload",
+    "__portus.finalize-upload"
+  ]);
+  assert.equal(uploadActions[0].markerAttribute, uploadActions[1].markerAttribute);
+  assert.deepEqual(fixture.debuggerAttaches, [{ target: { tabId: 1 }, version: "1.3" }]);
+  assert.deepEqual(fixture.debuggerDetaches, [{ target: { tabId: 1 } }]);
+
+  await assert.rejects(() => bridge.uploadFiles({
+    tabId: 1,
+    snapshotId: snapshot.snapshotId,
+    elementId: snapshot.elements[0].elementId,
+    files: ["C:\\approved\\three.txt"]
+  }), { code: "SNAPSHOT_STALE" });
 });
 
 test("rejects debugger commands only when the Chrome debugger API is unavailable", async () => {
@@ -4149,12 +4313,18 @@ function isActionInjection(injection) {
 }
 
 function isInternalAction(action) {
-  return action === "__portus.inspect-target" || action === "__portus.finalize-type";
+  return action === "__portus.inspect-target"
+    || action === "__portus.finalize-type"
+    || action === "__portus.prepare-upload"
+    || action === "__portus.finalize-upload";
 }
 
 function defaultInternalActionResult(payload) {
   if (payload.action === "__portus.finalize-type") {
     return { ok: true, details: { action: payload.action, targetValidated: true } };
+  }
+  if (payload.action === "__portus.prepare-upload" || payload.action === "__portus.finalize-upload") {
+    return { ok: true, details: { action: payload.action, targetValidated: true, multiple: true } };
   }
   const target = payload.target && typeof payload.target === "object" ? payload.target : {};
   const bounds = target.bounds && typeof target.bounds === "object"

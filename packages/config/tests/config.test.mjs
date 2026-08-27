@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import test from "node:test";
 import {
   DEFAULT_PORTUS_CONFIG,
@@ -29,6 +29,7 @@ test("default config is valid and keeps fixed security constraints", () => {
   assert.equal(DEFAULT_PORTUS_CONFIG.policy.defaultPolicyMode, "blocklist");
   assert.deepEqual(DEFAULT_PORTUS_CONFIG.policy.defaultBlockedNavigationRules, []);
   assert.equal(DEFAULT_PORTUS_CONFIG.policy.defaultCommandPolicy["screenshot.capture"], true);
+  assert.deepEqual(DEFAULT_PORTUS_CONFIG.security.allowedUploadRoots, []);
   assert.equal(DEFAULT_PORTUS_CONFIG.policy.defaultCommandPolicy["snapshot.capture"], true);
   assert.equal(DEFAULT_PORTUS_CONFIG.policy.defaultCommandPolicy["action.click"], true);
   assert.equal(DEFAULT_PORTUS_CONFIG.policy.defaultCommandPolicy["tab.open"], true);
@@ -66,6 +67,7 @@ test("unknown keys and fixed security constraints fail validation", () => {
   assert.equal(PortusConfigSchema.safeParse({ broker: { allowRemoteConnections: true } }).success, false);
   assert.equal(PortusConfigSchema.safeParse({ permissions: {} }).success, false);
   assert.equal(PortusConfigSchema.safeParse({ extension: { permissionsMode: "minimal" } }).success, false);
+  assert.equal(PortusConfigSchema.safeParse({ security: { allowedUploadRoots: ["relative/path"] } }).success, false);
 });
 
 test("invalid config maps to typed Portus error", () => {
@@ -85,6 +87,12 @@ test("environment overrides are parsed and validated", () => {
   assert.equal(parsed.cli.output, "ndjson");
   assert.equal(parsed.broker.pipeName, "custom-portus-pipe");
   assert.equal(parsed.nativeHost.brokerPipeName, "custom-portus-pipe");
+  const firstUploadRoot = join(tmpdir(), "portus-upload-one");
+  const secondUploadRoot = join(tmpdir(), "portus-upload-two");
+  const uploadConfig = applyEnvironmentOverrides(DEFAULT_PORTUS_CONFIG, {
+    PORTUS_UPLOAD_ALLOWED_ROOTS: [firstUploadRoot, secondUploadRoot].join(delimiter)
+  });
+  assert.deepEqual(uploadConfig.security.allowedUploadRoots, [firstUploadRoot, secondUploadRoot]);
   assert.throws(() => applyEnvironmentOverrides(DEFAULT_PORTUS_CONFIG, {
     PORTUS_LOG_LEVEL: "verbose"
   }));

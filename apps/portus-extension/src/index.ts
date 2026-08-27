@@ -36,6 +36,7 @@ import {
   SnapshotSchema,
   TabSchema,
   WaitResultSchema,
+  UploadRequestSchema,
   createPortusError,
   navigationPolicyAllowsUrl,
   navigationRuleKey,
@@ -1414,6 +1415,114 @@ export class PortusExtensionBridge {
     }
     return fillFormResult;
   }
+
+  async uploadFiles(payload: Record<string, unknown>): Promise<ActionResult> {
+    await this.ready;
+    const tabId = readNumber(payload, "tabId");
+    const targetTab = await this.getChromeTab(tabId);
+    this.ensureTabPolicyAllowed(targetTab);
+    const browserId = this.requireBrowserId();
+    const request = UploadRequestSchema.parse({
+      ...payload,
+      action: "upload",
+      browserId,
+      tabId
+    });
+    const element = resolveActionElement({
+      action: "upload",
+      browserId,
+      tabId,
+      snapshotId: request.snapshotId,
+      elementId: request.elementId
+    }, this.snapshots);
+    if (!element) {
+      throw createPortusError({
+        code: "SNAPSHOT_STALE",
+        message: "Upload target is unavailable in the snapshot."
+      });
+    }
+    if (element.tagName?.toLowerCase() !== "input" || element.inputType?.toLowerCase() !== "file") {
+      throw createPortusError({
+        code: "ACTION_UNSUPPORTED",
+        message: "Upload target is not a file input."
+      });
+    }
+
+    const debuggerSnapshotTarget = this.lookupDebuggerSnapshotTarget(request.snapshotId, request.elementId);
+    const markerAttribute = debuggerSnapshotTarget
+      ? undefined
+      : `data-portus-upload-${this.createRequestId().replaceAll("_", "-").toLowerCase()}`;
+    let markerPrepared = false;
+    let operationError: unknown;
+    try {
+      if (debuggerSnapshotTarget) {
+        await this.ensureDebuggerSnapshotDocumentAvailable(tabId, debuggerSnapshotTarget, "upload target");
+      } else if (markerAttribute) {
+        const preparation = await this.executeActionScript(tabId, {
+          action: "__portus.prepare-upload",
+          target: createDomActionTarget(element),
+          markerAttribute,
+          fileCount: request.files.length
+        }, snapshotElementExecutionTarget(element));
+        if (!preparation.ok) throw createPortusError(preparation.error);
+        markerPrepared = true;
+      }
+
+      await this.withDebuggerSession(tabId, async (debuggerTarget) => {
+        await this.setDebuggerFileInputFiles(
+          debuggerTarget,
+          request.files,
+          debuggerSnapshotTarget,
+          markerAttribute
+        );
+      }, "action.upload");
+
+      if (markerPrepared && markerAttribute) {
+        const finalization = await this.executeActionScript(tabId, {
+          action: "__portus.finalize-upload",
+          target: createDomActionTarget(element),
+          markerAttribute,
+        }, snapshotElementExecutionTarget(element));
+        if (!finalization.ok) throw createPortusError(finalization.error);
+        markerPrepared = false;
+      }
+    } catch (error) {
+      operationError = error;
+      throw error;
+    } finally {
+      if (markerPrepared && markerAttribute) {
+        try {
+          const cleanup = await this.executeActionScript(tabId, {
+            action: "__portus.finalize-upload",
+            target: createDomActionTarget(element),
+            markerAttribute,
+          }, snapshotElementExecutionTarget(element));
+          if (!cleanup.ok && operationError === undefined) throw createPortusError(cleanup.error);
+        } catch (cleanupError) {
+          if (operationError === undefined) throw cleanupError;
+        }
+      }
+    }
+
+    const invalidated = markSnapshotsStaleForTab(this.snapshots, browserId, tabId);
+    this.clearDebuggerTargetsForSnapshots(invalidated);
+    return ActionResultSchema.parse({
+      backend: "debugger-cdp",
+      completedAt: this.now().toISOString(),
+      snapshotInvalidated: true,
+      details: {
+        action: "upload",
+        tabId,
+        snapshotId: request.snapshotId,
+        elementId: request.elementId,
+        fileCount: request.files.length,
+        fileNames: request.files.map((file) => file.split(/[\\/]/).at(-1) ?? file),
+        targetValidated: true,
+        piercedClosedShadowFallback: debuggerSnapshotTarget !== undefined
+      }
+    });
+  }
+
   async dismissPage(payload: Record<string, unknown>): Promise<DismissResult> {
     await this.ready;
     const tabId = readOptionalNumber(payload, "tabId");
@@ -2621,6 +2730,8 @@ export class PortusExtensionBridge {
         return { action: await this.performAction("drag", request.payload) };
       case "action.fillForm":
         return { fillForm: await this.fillForm(request.payload) };
+      case "action.upload":
+        return { action: await this.uploadFiles(request.payload) };
       case "action.type":
         return { action: await this.performAction("type", request.payload) };
       case "action.press":
@@ -3778,6 +3889,111 @@ export class PortusExtensionBridge {
       if (entry.snapshot.tabId !== tabId) continue;
       this.snapshots.delete(snapshotId);
       this.debuggerSnapshotTargets.delete(snapshotId);
+    }
+  }
+
+  private async setDebuggerFileInputFiles(
+    debuggerTarget: ChromeDebuggerTarget,
+    files: string[],
+    snapshotTarget?: DebuggerSnapshotTarget,
+    markerAttribute?: string
+  ): Promise<void> {
+    await this.sendDebuggerCommand(debuggerTarget, "DOM.enable");
+    let searchId: string | undefined;
+    let nodeReference: { nodeId: number } | { backendNodeId: number };
+    try {
+      if (snapshotTarget) {
+        nodeReference = { backendNodeId: snapshotTarget.backendNodeId };
+      } else {
+        if (!markerAttribute) {
+          throw createPortusError({
+            code: "ACTION_FAILED",
+            message: "Upload target marker is unavailable."
+          });
+        }
+        const search = await this.sendDebuggerCommand(debuggerTarget, "DOM.performSearch", {
+          query: `[${markerAttribute}]`,
+          includeUserAgentShadowDOM: true
+        });
+        if (!isRecord(search) || typeof search.searchId !== "string" || search.resultCount !== 1) {
+          throw createPortusError({
+            code: "SNAPSHOT_STALE",
+            message: "Upload target could not be resolved uniquely through CDP."
+          });
+        }
+        searchId = search.searchId;
+        const searchResults = await this.sendDebuggerCommand(debuggerTarget, "DOM.getSearchResults", {
+          searchId,
+          fromIndex: 0,
+          toIndex: 1
+        });
+        const nodeIds = isRecord(searchResults) ? searchResults.nodeIds : undefined;
+        const nodeId = Array.isArray(nodeIds) ? readNonnegativeInteger(nodeIds[0]) : null;
+        if (nodeId === null) {
+          throw createPortusError({
+            code: "SNAPSHOT_STALE",
+            message: "Upload target CDP node is unavailable."
+          });
+        }
+        nodeReference = { nodeId };
+      }
+
+      await this.validateDebuggerFileInput(debuggerTarget, nodeReference, files.length);
+      await this.sendDebuggerCommand(debuggerTarget, "DOM.setFileInputFiles", {
+        files,
+        ...nodeReference
+      });
+    } finally {
+      if (searchId) {
+        try {
+          await this.sendDebuggerCommand(debuggerTarget, "DOM.discardSearchResults", { searchId });
+        } catch {
+          // The debugger session is detached immediately after the operation.
+        }
+      }
+    }
+  }
+
+  private async validateDebuggerFileInput(
+    debuggerTarget: ChromeDebuggerTarget,
+    nodeReference: { nodeId: number } | { backendNodeId: number },
+    fileCount: number
+  ): Promise<void> {
+    let resolved: unknown;
+    try {
+      resolved = await this.sendDebuggerCommand(debuggerTarget, "DOM.resolveNode", nodeReference);
+    } catch {
+      throw createPortusError({
+        code: "SNAPSHOT_STALE",
+        message: "Upload target is no longer available through CDP."
+      });
+    }
+    if (!isRecord(resolved) || !isRecord(resolved.object) || typeof resolved.object.objectId !== "string") {
+      throw createPortusError({
+        code: "SNAPSHOT_STALE",
+        message: "Upload target could not be resolved to a live file input."
+      });
+    }
+    const validation = await this.sendDebuggerCommand(debuggerTarget, "Runtime.callFunctionOn", {
+      objectId: resolved.object.objectId,
+      functionDeclaration: "function(){return{fileInput:String(this.tagName||'').toLowerCase()==='input'&&String(this.type||'').toLowerCase()==='file',multiple:this.multiple===true};}",
+      returnByValue: true,
+      awaitPromise: false
+    });
+    const value = isRecord(validation) && isRecord(validation.result) && isRecord(validation.result.value)
+      ? validation.result.value
+      : undefined;
+    if (!value || value.fileInput !== true) {
+      throw createPortusError({
+        code: "SNAPSHOT_STALE",
+        message: "Upload target is no longer a file input."
+      });
+    }
+    if (fileCount > 1 && value.multiple !== true) {
+      throw createPortusError({
+        code: "ACTION_UNSUPPORTED",
+        message: "Upload target does not accept multiple files."
+      });
     }
   }
 
@@ -5398,6 +5614,38 @@ export function performPortusDomAction(payload: Record<string, unknown>): Record
       return actionError("SNAPSHOT_STALE", "Element target no longer matches the current DOM.");
     }
     const element = resolution.element;
+    if (action === "__portus.prepare-upload") {
+      if (!(element instanceof HTMLInputElement) || element.type.toLowerCase() !== "file") {
+        return actionError("ACTION_UNSUPPORTED", "Upload target is not a file input.");
+      }
+      const markerAttribute = typeof payload.markerAttribute === "string" ? payload.markerAttribute : "";
+      const fileCount = typeof payload.fileCount === "number" && Number.isInteger(payload.fileCount)
+        ? payload.fileCount
+        : 0;
+      if (!/^data-portus-upload-[a-z0-9-]+$/.test(markerAttribute)) {
+        return actionError("ACTION_FAILED", "Upload target marker is invalid.");
+      }
+      if (element.hasAttribute(markerAttribute)) {
+        return actionError("ACTION_FAILED", "Upload target marker already exists.");
+      }
+      if (fileCount < 1) return actionError("ACTION_FAILED", "Upload requires at least one file.");
+      if (fileCount > 1 && !element.multiple) {
+        return actionError("ACTION_UNSUPPORTED", "Upload target does not accept multiple files.");
+      }
+      element.setAttribute(markerAttribute, "");
+      return { ok: true, details: { action, targetValidated: true, multiple: element.multiple } };
+    }
+
+    if (action === "__portus.finalize-upload") {
+      if (!element) return actionError("SNAPSHOT_STALE", "Upload target is no longer available.");
+      const markerAttribute = typeof payload.markerAttribute === "string" ? payload.markerAttribute : "";
+      if (!/^data-portus-upload-[a-z0-9-]+$/.test(markerAttribute) || !element.hasAttribute(markerAttribute)) {
+        return actionError("SNAPSHOT_STALE", "Upload target marker is no longer available.");
+      }
+      element.removeAttribute(markerAttribute);
+      return { ok: true, details: { action, targetValidated: true } };
+    }
+
 
     if (action === "__portus.inspect-target") {
       if (!element) return actionError("SNAPSHOT_STALE", "Target inspection requires an element target.");

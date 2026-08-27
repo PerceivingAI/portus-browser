@@ -23,6 +23,7 @@ export const commandGroups: Array<{ title: string; commands: Array<{ type: Comma
       { type: "action.hover", label: "Hover" },
       { type: "action.drag", label: "Drag" },
       { type: "action.fillForm", label: "Fill Form" },
+      { type: "action.upload", label: "Upload Files" },
       { type: "action.type", label: "Type" },
       { type: "action.press", label: "Press Key" },
       { type: "action.scroll", label: "Scroll" },

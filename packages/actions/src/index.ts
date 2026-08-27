@@ -16,10 +16,12 @@ export {
   ActionResultSchema,
   FillFormRequestSchema,
   FillFormResultSchema,
+  UploadRequestSchema,
   type ActionRequest,
   type ActionResult,
   type FillFormRequest,
-  type FillFormResult
+  type FillFormResult,
+  type UploadRequest,
 } from "@portus/protocol";
 
 export interface SnapshotStoreEntry {

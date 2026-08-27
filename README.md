@@ -11,7 +11,7 @@ Portus Browser lets an agent:
 - list connected browsers
 - list and inspect tabs
 - open and navigate pages
-- click, type, press keys, scroll, hover, and drag
+- click, type, upload files, press keys, scroll, hover, and drag
 - take page snapshots and screenshots
 - observe, wait for, and act on controls in regular DOM, scriptable iframes, and recursively nested open/closed Shadow DOM while keeping those details transparent to CLI callers
 - inspect console and network data
@@ -50,6 +50,29 @@ portus-browser snapshot --browser 1 --tab-id <tabId> --screenshot --debugger --j
 On `snapshot`, `--debugger` is valid only together with `--screenshot`; it selects the screenshot backend and does not control structural page collection. Normal screenshots of an inactive tab may temporarily activate that tab in its existing window, never focus the window, and restore the previous active tab when it is still safe to do so. Debugger screenshots target the tab without activation. Screenshot failures are returned as errors; Portus does not fabricate placeholder images.
 
 Structural snapshots and element actions cover regular DOM, scriptable iframes, and recursively nested open/closed Shadow DOM. Agents continue to target returned elements only through `snapshotId` + `elementId`; Portus keeps frame, document, and Shadow DOM identity internal and rejects actions with `SNAPSHOT_STALE` when the captured document has been replaced.
+
+## File uploads
+
+Browser upload has two independent gates. The Broker must have one or more allowed local roots, and the active extension settings profile must enable **Upload Files** under **CLI Commands**.
+
+Set the allowed roots before starting the Broker:
+
+```powershell
+$env:PORTUS_UPLOAD_ALLOWED_ROOTS = "C:\Users\you\Documents\Approved Uploads"
+pnpm --filter @portus/broker exec node dist/index.js
+```
+
+Use the operating system's path-list delimiter for multiple roots. Windows uses `;`; Linux and macOS use `:`.
+
+Take a snapshot, select an `input[type="file"]` element, then upload one or more files:
+
+```powershell
+portus-browser snapshot --browser 1 --tab-id <tabId> --query "upload" --json
+portus-browser upload --browser 1 --tab-id <tabId> --snapshot <snapshotId> --element <elementId> "C:\Users\you\Documents\Approved Uploads\document.pdf" --json
+```
+
+The Broker resolves each path before sending the command to the extension. It rejects missing paths, directories, symlink escapes, and files outside the configured roots with `UPLOAD_PATH_DENIED`. Multiple files require a file input with the `multiple` attribute. Portus returns selected basenames but never reads or returns file contents.
+
 
 ## Quick Start
 

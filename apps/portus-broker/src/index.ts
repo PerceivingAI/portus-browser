@@ -2,11 +2,11 @@
 
 import { fileURLToPath } from "node:url";
 import { timingSafeEqual } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
-import { dirname } from "node:path";
+import { dirname, isAbsolute, relative, sep } from "node:path";
 import { z } from "zod";
-import { DEFAULT_PORTUS_CONFIG, PortusConfigSchema, TerminalConfigSchema, getSettingsProfilesPath, loadOrCreateBrokerToken, type PortusConfig } from "@portus/config";
+import { DEFAULT_PORTUS_CONFIG, PortusConfigSchema, TerminalConfigSchema, applyEnvironmentOverrides, getSettingsProfilesPath, loadOrCreateBrokerToken, type PortusConfig } from "@portus/config";
 import { BrokerEventBus } from "@portus/events";
 import {
   BrowserIdSchema,
@@ -33,6 +33,7 @@ import {
   SettingsProfileStateSchema,
   TabSchema,
   WaitResultSchema,
+  UploadRequestSchema,
   createInvalidMessageError,
   createPortusError,
   safeParseProtocolMessage,
@@ -182,6 +183,7 @@ const ROUTED_REQUEST_TYPES = new Set([
   "action.hover",
   "action.drag",
   "action.fillForm",
+  "action.upload",
   "action.type",
   "action.press",
   "action.scroll",
@@ -217,6 +219,7 @@ const REQUIRED_CAPABILITY_BY_REQUEST_TYPE = new Map<string, string>([
   ["action.hover", "actions"],
   ["action.drag", "actions"],
   ["action.fillForm", "actions"],
+  ["action.upload", "advanced-debugger"],
   ["action.type", "actions"],
   ["action.press", "actions"],
   ["action.scroll", "actions"],
@@ -282,6 +285,7 @@ export class BrokerCore {
   private readonly recipeLibraryDirectory: string | undefined;
   private readonly brokerToken: string;
   private readonly settingsProfilesPath: string | null;
+  private readonly uploadRoots: string[];
   private readonly sessions = new Map<string, BrowserSessionRecord>();
   private settingsProfileCatalog: SettingsProfileCatalog;
   private settingsProfilePersistenceState: SettingsProfilePersistenceState;
@@ -295,6 +299,7 @@ export class BrokerCore {
 
   constructor(options: BrokerCoreOptions = {}) {
     this.config = PortusConfigSchema.parse(options.config ?? DEFAULT_PORTUS_CONFIG);
+    this.uploadRoots = resolveUploadRoots(this.config.security.allowedUploadRoots);
     this.brokerToken = options.brokerToken ?? (
       this.config.security.requireBrokerToken ? loadOrCreateBrokerToken() : ""
     );
@@ -1512,13 +1517,16 @@ export class BrokerCore {
       }
       throw portusError;
     }
+    const commandArgs = request.type === "action.upload"
+      ? this.authorizeUploadPayload(request.payload, record.session.browserId)
+      : request.payload;
 
     const command = CommandEnvelopeSchema.parse({
       commandId: this.createCommandId(),
       type: request.type,
-      args: request.payload,
+      args: commandArgs,
       targetBrowserId: record.session.browserId,
-      targetTabId: typeof request.payload.tabId === "number" ? request.payload.tabId : undefined,
+      targetTabId: typeof commandArgs.tabId === "number" ? commandArgs.tabId : undefined,
       timeoutMs: request.timeoutMs ?? this.config.commands.timeoutMs
     });
 
@@ -1654,6 +1662,28 @@ export class BrokerCore {
     const available = [...this.sessions.values()]
       .filter((record) => record.session.status === "available" && record.session.bridgeStatus === "connected");
     for (const record of available) this.enforceCommandPolicy(type, record);
+  }
+
+  private authorizeUploadPayload(payload: Record<string, unknown>, browserId: string): Record<string, unknown> {
+    const request = UploadRequestSchema.parse({
+      ...payload,
+      action: "upload",
+      browserId
+    });
+    if (this.uploadRoots.length === 0) {
+      throw brokerError(
+        "UPLOAD_PATH_DENIED",
+        "Browser upload is unavailable because no allowed upload roots are configured.",
+        false
+      );
+    }
+    return {
+      browserId: request.browserId,
+      tabId: request.tabId,
+      snapshotId: request.snapshotId,
+      elementId: request.elementId,
+      files: request.files.map((file) => authorizeUploadFile(file, this.uploadRoots))
+    };
   }
 
   private enforcePolicyBeforeRoute(type: string, payload: Record<string, unknown>, record: BrowserSessionRecord): void {
@@ -2143,7 +2173,9 @@ export function createBrokerNamedPipeServer(options: BrokerCoreOptions = {}): Br
 }
 
 export async function startBrokerCli(): Promise<void> {
-  const server = createBrokerNamedPipeServer();
+  const server = createBrokerNamedPipeServer({
+    config: applyEnvironmentOverrides(DEFAULT_PORTUS_CONFIG, process.env)
+  });
   await server.start();
   process.stdout.write(`Portus Broker listening on ${server.broker.endpointPath}\n`);
 
@@ -2170,6 +2202,51 @@ export function brokerError(code: PortusError["code"], message: string, retryabl
     message,
     retryable
   });
+}
+
+function resolveUploadRoots(roots: string[]): string[] {
+  const resolvedRoots = new Set<string>();
+  for (const root of roots) {
+    try {
+      const resolved = realpathSync(root);
+      if (!statSync(resolved).isDirectory()) throw new Error("not a directory");
+      resolvedRoots.add(resolved);
+    } catch {
+      throw createPortusError({
+        code: "CONFIG_INVALID",
+        message: "An allowed upload root is unavailable or is not a directory.",
+        details: { configPath: "security.allowedUploadRoots" }
+      });
+    }
+  }
+  return [...resolvedRoots];
+}
+
+function authorizeUploadFile(file: string, roots: readonly string[]): string {
+  let resolved: string;
+  try {
+    resolved = realpathSync(file);
+    if (!statSync(resolved).isFile()) throw new Error("not a regular file");
+  } catch {
+    throw brokerError(
+      "UPLOAD_PATH_DENIED",
+      "Upload path is unavailable or is not a regular file.",
+      false
+    );
+  }
+  if (!roots.some((root) => pathIsWithinRoot(resolved, root))) {
+    throw brokerError(
+      "UPLOAD_PATH_DENIED",
+      "Upload path falls outside the configured upload roots.",
+      false
+    );
+  }
+  return resolved;
+}
+
+function pathIsWithinRoot(file: string, root: string): boolean {
+  const suffix = relative(root, file);
+  return suffix === "" || (suffix !== ".." && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix));
 }
 
 function constantTimeStringEqual(left: string, right: string): boolean {
@@ -2331,6 +2408,11 @@ function redactStepArgs(type: CommandType, payload: Record<string, unknown>, red
           valueLength: typeof field.value === "string" ? field.value.length : undefined
         };
       });
+      continue;
+    }
+    if (key === "files" && Array.isArray(value)) {
+      args.files = "[redacted-file-paths]";
+      args.fileCount = value.length;
       continue;
     }
     if (key === "url" && typeof value === "string" && redactUrls) {

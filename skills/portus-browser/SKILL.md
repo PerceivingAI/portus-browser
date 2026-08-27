@@ -1,6 +1,6 @@
 ---
 name: portus-browser
-description: Onboard an AI agent to use Portus Browser CLI (`portus-browser`) for controlling one or several visible, user-approved browser sessions. Use when an agent needs to browse, inspect tabs, open or navigate pages, take screenshots or snapshots, click/type/scroll/hover/drag, dismiss popups, wait for page state, inspect console/network data, use saved browser recipes, or recover from Portus Browser CLI errors.
+description: Onboard an AI agent to use Portus Browser CLI (`portus-browser`) for controlling one or several visible, user-approved browser sessions. Use when an agent needs to browse, inspect tabs, open or navigate pages, take screenshots or snapshots, click/type/upload/scroll/hover/drag, dismiss popups, wait for page state, inspect console/network data, use saved browser recipes, or recover from Portus Browser CLI errors.
 ---
 
 # Portus Browser
@@ -189,6 +189,21 @@ Type:
 portus-browser type --browser 1 --tab-id <tabId> --snapshot <snapshotId> --element <elementId> "text to type" --json
 ```
 
+Upload a local file:
+
+```powershell
+portus-browser upload --browser 1 --tab-id <tabId> --snapshot <snapshotId> --element <fileInputElementId> "<local-file-path>" --json
+```
+
+Upload rules:
+
+- Upload only files the user explicitly selected for the current destination.
+- Use a fresh snapshot element whose `tagName` is `input` and whose `inputType` is `file`.
+- Every path must be under a Broker-approved upload root, and **Upload Files** must be enabled in the active settings profile.
+- Pass more than one file path only when the target input supports `multiple`.
+- Do not ask the user to broaden an upload root or disable command policy as an error workaround.
+
+
 Press a key:
 
 ```powershell
@@ -353,6 +368,7 @@ Common next steps:
 - `BROWSER_SESSION_UNAVAILABLE`: refresh `portus-browser browsers --json`. If the browser reconnected, use its new current `browserId`; if no browser is available, ask the user to connect the Bridge.
 - `BRIDGE_DISCONNECTED`: ask the user to connect the extension Bridge.
 - `COMMAND_DISABLED_BY_POLICY`: tell the user the command is disabled in Settings.
+- `UPLOAD_PATH_DENIED`: tell the user the file is unavailable or outside the Broker-approved upload roots. Do not search for a replacement file or broaden the roots.
 - `NAVIGATION_BLOCKED`: tell the user the active navigation policy blocked the URL.
 - `BROWSER_ACCESS_DENIED`: tell the user the browser or Extension cannot control the target; do not assume a non-HTTP(S) scheme is the cause.
 - `TAB_NOT_FOUND`: refresh `tabs` and target a current tab id.

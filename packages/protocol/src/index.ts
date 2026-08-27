@@ -29,6 +29,7 @@ export const ErrorCodeSchema = z.enum([
   "BROWSER_ACCESS_DENIED",
   "NAVIGATION_BLOCKED",
   "COMMAND_DISABLED_BY_POLICY",
+  "UPLOAD_PATH_DENIED",
   "COMMAND_TIMEOUT",
   "CAPABILITY_UNAVAILABLE",
   "ACTION_UNSUPPORTED",
@@ -171,6 +172,7 @@ export const CommandTypeSchema = z.enum([
   "action.hover",
   "action.drag",
   "action.fillForm",
+  "action.upload",
   "action.type",
   "action.press",
   "action.scroll",
@@ -215,6 +217,7 @@ export const DEFAULT_COMMAND_POLICY = {
   "action.hover": true,
   "action.drag": true,
   "action.fillForm": true,
+  "action.upload": false,
   "action.type": true,
   "action.press": true,
   "action.scroll": true,
@@ -727,7 +730,7 @@ export const WaitResultSchema = z.object({
 export type WaitResult = z.infer<typeof WaitResultSchema>;
 
 export const ActionBackendSchema = z.enum(["extension-api", "content-script-dom", "debugger-cdp"]);
-export const ActionNameSchema = z.enum(["click", "hover", "drag", "fillForm", "type", "press", "scroll"]);
+export const ActionNameSchema = z.enum(["click", "hover", "drag", "fillForm", "upload", "type", "press", "scroll"]);
 
 export const ActionRequestSchema = z.object({
   action: ActionNameSchema,
@@ -755,6 +758,17 @@ export const FillFormRequestSchema = z.object({
   snapshotId: SnapshotIdSchema,
   fields: z.array(FillFormFieldSchema).min(1),
   partial: z.boolean().optional()
+}).strict();
+
+export const MAX_UPLOAD_FILE_COUNT = 100 as const;
+
+export const UploadRequestSchema = z.object({
+  action: z.literal("upload"),
+  browserId: BrowserIdSchema,
+  tabId: TabIdSchema,
+  snapshotId: SnapshotIdSchema,
+  elementId: ElementIdSchema,
+  files: z.array(z.string().min(1)).min(1).max(MAX_UPLOAD_FILE_COUNT)
 }).strict();
 
 export const ActionResultSchema = z.object({
@@ -894,6 +908,7 @@ export type ActionResult = z.infer<typeof ActionResultSchema>;
 export type FillFormField = z.infer<typeof FillFormFieldSchema>;
 export type FillFormRequest = z.infer<typeof FillFormRequestSchema>;
 export type FillFormResult = z.infer<typeof FillFormResultSchema>;
+export type UploadRequest = z.infer<typeof UploadRequestSchema>;
 export type DialogResult = z.infer<typeof DialogResultSchema>;
 export type ConsoleMessage = z.infer<typeof ConsoleMessageSchema>;
 export type ConsoleListResult = z.infer<typeof ConsoleListResultSchema>;

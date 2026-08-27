@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -383,6 +383,85 @@ test("snapshot embedded screenshots require screenshot policy and capability", a
   assert.equal(capabilityBlocked.ok, false);
   assert.equal(capabilityBlocked.error.code, "CAPABILITY_UNAVAILABLE");
   assert.equal(routed.length, 0);
+});
+
+test("authorizes upload files against canonical Broker roots and redacts paths", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "portus-upload-broker-"));
+  const allowedRoot = join(workspace, "approved");
+  const allowedFile = join(allowedRoot, "document.txt");
+  const outsideFile = join(workspace, "outside.txt");
+  await mkdir(allowedRoot);
+  await writeFile(allowedFile, "approved");
+  await writeFile(outsideFile, "outside");
+
+  const routed = [];
+  const bridgeClient = {
+    async sendCommand(command) {
+      routed.push(command);
+      return {
+        action: {
+          backend: "debugger-cdp",
+          completedAt: "2026-04-28T00:00:00.000Z",
+          snapshotInvalidated: true,
+          details: { action: "upload" }
+        }
+      };
+    }
+  };
+  const broker = createBroker({
+    brokerToken: TEST_BROKER_TOKEN,
+    now: fixedClock(),
+    config: { security: { allowedUploadRoots: [allowedRoot] } }
+  });
+  const register = await broker.handleRequest(request("req_upload_register", "bridge.register", {
+    ...registrationWithCommandPolicy({ "action.upload": true }),
+    capabilities: [...registration.capabilities, "advanced-debugger"]
+  }), { bridgeClient });
+  const browserId = register.result.browserId;
+  const uploadPayload = {
+    browserId,
+    tabId: 7,
+    snapshotId: "snap_001",
+    elementId: "el_001",
+    files: [allowedFile]
+  };
+
+  const allowed = await broker.handleRequest(request("req_upload_allowed", "action.upload", uploadPayload));
+  assert.equal(allowed.ok, true);
+  assert.deepEqual(routed[0].args.files, [await realpath(allowedFile)]);
+
+  const outside = await broker.handleRequest(request("req_upload_outside", "action.upload", {
+    ...uploadPayload,
+    files: [join(allowedRoot, "..", "outside.txt")]
+  }));
+  assert.equal(outside.ok, false);
+  assert.equal(outside.error.code, "UPLOAD_PATH_DENIED");
+  assert.equal(routed.length, 1);
+
+  const directory = await broker.handleRequest(request("req_upload_directory", "action.upload", {
+    ...uploadPayload,
+    files: [allowedRoot]
+  }));
+  assert.equal(directory.ok, false);
+  assert.equal(directory.error.code, "UPLOAD_PATH_DENIED");
+
+  const steps = await broker.handleRequest(request("req_upload_steps", "session.steps", { browserId }));
+  assert.equal(steps.ok, true);
+  assert.equal(steps.result.steps[0].args.files, "[redacted-file-paths]");
+  assert.equal(steps.result.steps[0].args.fileCount, 1);
+  assert.doesNotMatch(JSON.stringify(steps.result.steps), /document\.txt/);
+
+  const disabledBroker = createBroker({ brokerToken: TEST_BROKER_TOKEN, now: fixedClock() });
+  const disabledRegister = await disabledBroker.handleRequest(request("req_upload_disabled_register", "bridge.register", {
+    ...registrationWithCommandPolicy({ "action.upload": true }),
+    capabilities: [...registration.capabilities, "advanced-debugger"]
+  }), { bridgeClient });
+  const disabled = await disabledBroker.handleRequest(request("req_upload_disabled", "action.upload", {
+    ...uploadPayload,
+    browserId: disabledRegister.result.browserId
+  }));
+  assert.equal(disabled.ok, false);
+  assert.equal(disabled.error.code, "UPLOAD_PATH_DENIED");
 });
 
 test("terminal-shaped traffic does not register or expose broker browser sessions", async () => {
