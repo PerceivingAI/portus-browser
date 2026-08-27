@@ -1858,23 +1858,6 @@ export class PortusExtensionBridge {
     return NetworkGetResultSchema.parse({ request: record });
   }
 
-  async listWindows(): Promise<Record<string, unknown>[]> {
-    await this.ready;
-    if (!this.chromeApi.windows) return [];
-    const windows = await promisifyChromeCall<ChromeWindow[]>((done) => {
-      const result = this.chromeApi.windows?.getAll({ populate: false });
-      done(result as Promise<ChromeWindow[]> | ChromeWindow[] | undefined);
-    });
-    return windows.map((window) => ({
-      windowId: window.id ?? -1,
-      focused: window.focused ?? false,
-      state: window.state ?? "normal",
-      type: window.type ?? "normal",
-      incognito: window.incognito ?? false
-    }));
-  }
-
-
   getPolicyPreferences(): PolicyPreferences {
     return this.policyPreferences;
   }
@@ -2473,8 +2456,6 @@ export class PortusExtensionBridge {
         return { status: await this.disconnectBridge("runtime-message") };
       case "portus.tabs.list":
         return { tabs: await this.listTabs() };
-      case "portus.windows.list":
-        return { windows: await this.listWindows() };
       case "portus.screenshot.capture":
         return { screenshot: await this.captureScreenshot(readOptionalNumber(message, "tabId")) };
       case "portus.snapshot.capture":
@@ -2867,9 +2848,6 @@ export class PortusExtensionBridge {
       case "tab.close":
       case "tabs.close":
         return await this.closeTab(readNumber(request.payload, "tabId"));
-      case "window.list":
-      case "windows.list":
-        return { windows: await this.listWindows() };
       case "screenshot.capture":
         return { screenshot: await this.captureScreenshot(readOptionalNumber(request.payload, "tabId"), readOptionalBoolean(request.payload, "useDebugger")) };
       case "snapshot.capture":
@@ -3248,8 +3226,8 @@ export class PortusExtensionBridge {
       extensionId: this.chromeApi.runtime.id ?? "portus-extension-development",
       bridgeStatus: "connected",
       capabilities: this.chromeApi.debugger
-        ? ["tabs", "windows", "screenshots", "snapshots", "actions", "advanced-debugger", "policy", "events"]
-        : ["tabs", "windows", "screenshots", "snapshots", "actions", "policy", "events"],
+        ? ["tabs", "screenshots", "snapshots", "actions", "advanced-debugger", "policy", "events"]
+        : ["tabs", "screenshots", "snapshots", "actions", "policy", "events"],
       policyPreferences: this.policyPreferences,
       settingsProfileContent: this.createCurrentSettingsProfileContent()
     };

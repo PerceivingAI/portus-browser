@@ -1190,7 +1190,7 @@ function browser(browserId, browserName, connectedAt) {
     extensionVersion: "0.1.0",
     connectedAt,
     lastHeartbeat: connectedAt,
-    capabilities: ["tabs", "windows", "policy", "events"],
+    capabilities: ["tabs", "policy", "events"],
     bridgeStatus: "connected",
     status: "available"
   };

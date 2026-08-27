@@ -91,7 +91,6 @@ export const BridgeStatusSchema = z.enum(["connected", "disconnecting", "disconn
 export const BrowserSessionStatusSchema = z.enum(["available", "expired", "unavailable"]);
 export const CapabilitySchema = z.enum([
   "tabs",
-  "windows",
   "screenshots",
   "snapshots",
   "actions",

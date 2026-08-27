@@ -97,7 +97,7 @@ test("connects bridge through native messaging only when requested", async () =>
   assert.ok(port);
   assert.equal(port.messages[0].type, "bridge.register");
   assert.equal(port.messages[0].payload.browserName, "Chrome");
-  assert.deepEqual(port.messages[0].payload.capabilities, ["tabs", "windows", "screenshots", "snapshots", "actions", "advanced-debugger", "policy", "events"]);
+  assert.deepEqual(port.messages[0].payload.capabilities, ["tabs", "screenshots", "snapshots", "actions", "advanced-debugger", "policy", "events"]);
   assert.deepEqual(port.messages[0].payload.policyPreferences, {
     navigationPolicyEnabled: true,
     policyMode: "blocklist",
