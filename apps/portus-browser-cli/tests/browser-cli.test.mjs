@@ -922,7 +922,7 @@ test("events recent and session steps render retained history", async () => {
     "session.steps": { steps: [sessionStep("step_000001", "action.type", "completed")] }
   });
 
-  const eventsResult = await runPortusBrowserCli(["events", "recent", "--browser", "1", "--type", "tab.created", "--limit", "5"], { brokerClient: broker });
+  const eventsResult = await runPortusBrowserCli(["events", "recent", "--browser", "1", "--type", "tab.created", "--type", "tab.closed", "--limit", "5"], { brokerClient: broker });
   const stepsResult = await runPortusBrowserCli(["session", "steps", "--browser", "1", "--limit", "5"], { brokerClient: broker });
 
   assert.equal(eventsResult.exitCode, 0);
@@ -930,6 +930,7 @@ test("events recent and session steps render retained history", async () => {
   assert.equal(stepsResult.exitCode, 0);
   assert.match(stepsResult.stdout, /step_000001\s+action.type\s+completed/);
   assert.deepEqual(broker.requests.map((request) => request.type), ["browser.list", "events.recent", "browser.list", "session.steps"]);
+  assert.deepEqual(broker.requests[1].payload.types, ["tab.created", "tab.closed"]);
 });
 
 test("bridge disconnect routes through broker with required browser target", async () => {
@@ -973,11 +974,11 @@ test("broker status and stop route through broker management requests", async ()
   assert.equal(JSON.parse(stop.stdout).broker.stopping, true);
 });
 
-test("watch subscribes to live events and renders ndjson for --json", async () => {
+test("watch subscribes to multiple event types and renders ndjson for --json", async () => {
   const broker = createMockBroker({ "browser.list": { browsers } }, {}, [event("evt_000001", "tab.created", "br_000001")]);
   const chunks = [];
 
-  const result = await runPortusBrowserCli(["watch", "--browser", "1", "--json"], {
+  const result = await runPortusBrowserCli(["watch", "--browser", "1", "--type", "tab.created", "--type", "tab.closed", "--json"], {
     brokerClient: broker,
     stdout: (chunk) => chunks.push(chunk)
   });
@@ -985,7 +986,20 @@ test("watch subscribes to live events and renders ndjson for --json", async () =
   assert.equal(result.exitCode, 0);
   assert.equal(result.stdout, "");
   assert.match(chunks.join(""), /"eventId":"evt_000001"/);
-  assert.deepEqual(broker.subscriptions[0].payload, { browserId: "br_000001" });
+  assert.deepEqual(broker.subscriptions[0].payload, {
+    browserId: "br_000001",
+    types: ["tab.created", "tab.closed"]
+  });
+});
+
+test("watch preserves one event type as a one-element Broker query", async () => {
+  const broker = createMockBroker();
+  const result = await runPortusBrowserCli(["watch", "--type", "tab.updated", "--quiet"], {
+    brokerClient: broker
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(broker.subscriptions[0].payload, { types: ["tab.updated"] });
 });
 
 test("watch honors quiet output for streamed events", async () => {

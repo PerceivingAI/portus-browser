@@ -37,7 +37,7 @@ export const CLI_FLAGS = {
   hostWildcard: { name: "host-wildcard", kind: "string", repeatable: false },
   urlExact: { name: "url-exact", kind: "string", repeatable: false },
   urlPrefix: { name: "url-prefix", kind: "string", repeatable: false },
-  type: { name: "type", kind: "string", repeatable: false },
+  type: { name: "type", kind: "string", repeatable: true },
   limit: { name: "limit", kind: "integer", repeatable: false, positive: true },
   kind: { name: "kind", kind: "string", repeatable: false },
   strategy: { name: "strategy", kind: "string", repeatable: false },

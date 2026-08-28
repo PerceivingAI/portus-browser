@@ -1512,6 +1512,14 @@ test("accepts extension-published tab lifecycle events and streams them to subsc
     "events.recent": true
   })), { bridgeClient });
   const browserId = register.result.browserId;
+  assert.equal(broker.eventMatchesSubscription(
+    { type: "tab.updated", browserId },
+    { browserId, types: ["tab.updated", "tab.closed"] }
+  ), true);
+  assert.equal(broker.eventMatchesSubscription(
+    { type: "action.completed", browserId },
+    { browserId, types: ["tab.updated", "tab.closed"] }
+  ), false);
 
   const published = await broker.handleRequest(request("req_002", "event.publish", {
     browserId,
@@ -1791,7 +1799,7 @@ test("retains bounded redacted session steps and recent events in memory", async
   assert.equal(steps.result.steps[0].args.textLength, 18);
   assert.doesNotMatch(JSON.stringify(steps.result.steps), /secret typed value/);
 
-  const events = await broker.handleRequest(request("req_004", "events.recent", { browserId, type: "session.step.recorded" }));
+  const events = await broker.handleRequest(request("req_004", "events.recent", { browserId, types: ["session.step.recorded"] }));
   assert.equal(events.ok, true);
   assert.equal(events.result.events.length, 1);
   assert.doesNotMatch(JSON.stringify(events.result.events), /secret typed value/);

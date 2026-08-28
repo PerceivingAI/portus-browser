@@ -1418,8 +1418,8 @@ async function buildEventQueryPayload(context: CliContext, parsed: ParsedArgs, i
   const payload: Record<string, unknown> = {};
   const browser = readOptionalStringFlag(parsed, "browser");
   if (browser) payload.browserId = await resolveBrowserTarget(context, browser);
-  const type = readOptionalStringFlag(parsed, "type");
-  if (type) payload.type = type;
+  const types = [...new Set(readStringFlags(parsed, "type"))];
+  if (types.length > 0) payload.types = types;
   if (includeLimit) {
     const limit = readOptionalIntegerFlag(parsed, "limit");
     if (limit !== undefined) payload.limit = limit;

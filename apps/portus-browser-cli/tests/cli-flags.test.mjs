@@ -25,6 +25,7 @@ test("CLI-1 flag definitions encode primitive kind and repeatability", () => {
   assert.deepEqual(CLI_FLAGS.x, { name: "x", kind: "number", repeatable: false });
   assert.deepEqual(CLI_FLAGS.background, { name: "background", kind: "boolean", repeatable: false });
   assert.deepEqual(CLI_FLAGS.field, { name: "field", kind: "string", repeatable: true });
+  assert.deepEqual(CLI_FLAGS.type, { name: "type", kind: "string", repeatable: true });
   assert.equal(cliFlagTakesValue(CLI_FLAGS.background), false);
   assert.equal(cliFlagTakesValue(CLI_FLAGS.browser), true);
   assert.equal(getCliFlagSpec("does-not-exist"), undefined);

@@ -331,12 +331,19 @@ Do not try to manage Settings profiles through the CLI. Profile management is GU
 Use these when the user asks what happened or wants live activity:
 
 ```powershell
+portus-browser watch --json
 portus-browser watch --browser 1 --json
-portus-browser events recent --browser 1 --limit 20 --json
+portus-browser watch --type tab.updated --json
+portus-browser watch --browser 1 --type tab.created --type tab.updated --type tab.closed --json
+portus-browser events recent --browser 1 --type action.completed --type action.failed --limit 20 --json
 portus-browser session steps --browser 1 --limit 20 --json
 ```
 
-These commands may be disabled by command policy.
+Repeated `--type` filters use OR semantics. `--browser` combines with them using AND semantics. Filtering happens in the Broker.
+
+`watch --json` is an NDJSON stream: each line is one complete `EventEnvelope` with `protocolVersion`, `eventId`, `kind`, `type`, `createdAt`, `payload`, and optional `browserId`, `tabId`, and `requestId`. Parse it one line at a time; do not wait for a JSON array or one final JSON document. The stream contains new matching events after subscription and does not backfill retained history; query `events recent` first when history is needed.
+
+`watch` continues until the caller interrupts it or the Broker transport closes. `--timeout` bounds subscription setup, not the lifetime of an established stream. A transport error returns a typed Broker availability error; a normal transport close ends the stream. These commands may be disabled by command policy.
 
 ## Recipes
 

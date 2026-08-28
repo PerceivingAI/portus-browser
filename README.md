@@ -147,6 +147,19 @@ pnpm --filter @portus/browser-cli exec portus-browser browsers --json
 
 If the list is empty, check the Bridge state in the extension popup and the native-host/Broker setup.
 
+## Watch Event Stream
+
+`portus-browser watch --json` emits NDJSON: one complete `EventEnvelope` per line. It streams new events after subscription without replaying retained history. Use `events recent` when history is required.
+
+```powershell
+portus-browser watch --json
+portus-browser watch --browser 1 --json
+portus-browser watch --type tab.updated --json
+portus-browser watch --browser 1 --type tab.created --type tab.updated --type tab.closed --json
+```
+
+Repeated `--type` values use OR semantics; `--browser` combines with them using AND semantics. The Broker applies both filters before sending events to the CLI. `--timeout` bounds subscription setup, not an established stream's lifetime. The stream runs until interrupted or until the Broker transport closes; transport errors are reported as typed Broker availability errors.
+
 ## Main Parts
 
 - Extension: the browser extension UI, popup, side panel, Settings view, Terminal view, and browser bridge.

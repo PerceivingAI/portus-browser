@@ -31,7 +31,7 @@ test("CLI-13 canonical flag definitions are internally consistent", () => {
     }
   }
 
-  assert.deepEqual(CLI_FLAG_SPECS.filter((flag) => flag.repeatable).map((flag) => flag.name), ["field"]);
+  assert.deepEqual(CLI_FLAG_SPECS.filter((flag) => flag.repeatable).map((flag) => flag.name), ["field", "type"]);
   assert.deepEqual(CLI_GLOBAL_PRESENTATION_FLAGS.map((flag) => flag.name), ["json", "quiet"]);
   assert.deepEqual(CLI_INHERITED_GLOBAL_FLAGS, CLI_GLOBAL_PRESENTATION_FLAGS);
   for (const flag of CLI_INHERITED_GLOBAL_FLAGS) assert.equal(flag.kind, "boolean", `global --${flag.name}`);

@@ -71,7 +71,7 @@ test("CLI-12 repeatability matrix follows canonical flag metadata", () => {
     }
   }
 
-  assert.equal(repeatableCount, 1, "only fill-form --field should currently be repeatable");
+  assert.equal(repeatableCount, 3, "fill-form --field and both event-query --type flags should be repeatable");
 });
 
 test("CLI-12 rejects the documented cross-command and nested-subcommand misuse matrix before Broker dispatch", async () => {

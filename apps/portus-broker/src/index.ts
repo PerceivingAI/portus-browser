@@ -91,7 +91,7 @@ const BridgeDisconnectPayloadSchema = z.object({
 
 const EventQueryPayloadSchema = z.object({
   browserId: BrowserIdSchema.optional(),
-  type: BrokerEventTypeSchema.optional(),
+  types: z.array(BrokerEventTypeSchema).min(1).max(BrokerEventTypeSchema.options.length).optional(),
   limit: z.number().int().positive().max(10000).optional()
 }).strict();
 
@@ -1698,7 +1698,7 @@ export class BrokerCore {
 
   private eventMatchesQuery(event: EventEnvelope, query: z.infer<typeof EventQueryPayloadSchema>): boolean {
     if (query.browserId && event.browserId !== query.browserId) return false;
-    if (query.type && event.type !== query.type) return false;
+    if (query.types && !query.types.includes(event.type)) return false;
     return true;
   }
 
