@@ -114,6 +114,32 @@ Portus does not impose a built-in HTTP(S)-only or scheme allowlist. The user con
 
 Approval is off by default and is available only for selected state-changing commands. **Allow** controls whether the command is available at all; **Approve** requires a one-time decision in the Extension popup or side panel after the Broker has applied command, navigation, capability, and upload-path policy. Rejection, timeout, Bridge disconnect, or browser-session replacement fails the pending command without executing it.
 
+### Commands Eligible For Approval
+
+- `tab.open`
+- `tab.navigate`
+- `tab.history.back`
+- `tab.history.forward`
+- `tab.activate`
+- `tab.close`
+- `action.click`
+- `action.hover`
+- `action.drag`
+- `action.fillForm`
+- `action.upload`
+- `action.type`
+- `action.press`
+- `action.scroll`
+- `page.dismiss`
+- `dialog.dismiss`
+- `dialog.accept`
+- `console.clear`
+- `policy.allow.add`
+- `policy.allow.remove`
+- `policy.block.add`
+- `policy.block.remove`
+- `policy.retention.set`
+
 The popup and Settings view report `Agent Access` for the current URL as `allowed`, `blocked`, `disabled`, or `unsupported`.
 
 `Clear Rules` clears the currently selected allow or block rule list after confirmation. These settings are part of the active settings profile.
