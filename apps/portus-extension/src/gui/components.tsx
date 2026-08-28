@@ -1,5 +1,7 @@
 import * as React from "react";
+import type { ApprovalDecision, CommandApprovalRequest } from "@portus/protocol";
 import { Alert } from "../components/ui/alert.js";
+import { Button } from "../components/ui/button.js";
 import { Badge } from "../components/ui/badge.js";
 import { Field, FieldDescription, FieldLabel } from "../components/ui/field.js";
 import { Separator } from "../components/ui/separator.js";
@@ -88,6 +90,52 @@ export function Diagnostics({ message, error }: { message: string; error: boolea
     <p className="text-xs leading-5 text-muted-foreground" role="status">
       {message}
     </p>
+  );
+}
+
+export function ApprovalRequests({
+  requests,
+  busy,
+  onDecision
+}: {
+  requests: CommandApprovalRequest[];
+  busy: boolean;
+  onDecision(approvalId: string, decision: ApprovalDecision): void;
+}): React.JSX.Element | null {
+  if (requests.length === 0) return null;
+  return (
+    <section className="grid gap-[var(--portus-section-gap)] rounded-[var(--radius-md)] border border-destructive/50 bg-destructive/5 p-3" aria-labelledby="command-approvals-title">
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-sm font-bold" id="command-approvals-title">Command approval required</h2>
+        <Badge variant="destructive">{requests.length}</Badge>
+      </div>
+      {requests.map((request) => (
+        <div className="grid gap-2 rounded-[var(--radius-sm)] border bg-background p-3" key={request.approvalId}>
+          <div className="grid gap-1">
+            <p className="break-words text-sm font-semibold">{request.commandType}</p>
+            <p className="break-words text-xs text-muted-foreground">Browser {request.browserId}</p>
+            {Object.keys(request.summary).length > 0 ? (
+              <dl className="grid gap-1 pt-1 text-xs">
+                {Object.entries(request.summary).map(([key, value]) => (
+                  <div className="grid grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)] gap-2" key={key}>
+                    <dt className="font-semibold text-muted-foreground">{key}</dt>
+                    <dd className="break-all text-right">{Array.isArray(value) ? value.join(", ") : String(value)}</dd>
+                  </div>
+                ))}
+              </dl>
+            ) : null}
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Button disabled={busy} onClick={() => onDecision(request.approvalId, "rejected")} size="sm" type="button" variant="destructive">
+              Reject
+            </Button>
+            <Button disabled={busy} onClick={() => onDecision(request.approvalId, "approved")} size="sm" type="button">
+              Approve
+            </Button>
+          </div>
+        </div>
+      ))}
+    </section>
   );
 }
 

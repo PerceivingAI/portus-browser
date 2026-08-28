@@ -105,6 +105,7 @@ test("connects bridge through native messaging only when requested", async () =>
     allowedNavigationRules: [],
     blockedNavigationRules: [],
     commandPolicy: DEFAULT_COMMAND_POLICY,
+    approvalPolicy: {},
     advancedBackendEnabled: false,
     sessionStepRetentionLimit: 10
   });
@@ -4170,6 +4171,18 @@ test("integrates extension bridge with native host and broker visibility", async
   const fixture = createChromeFixture({
     connectNative() {
       return createNativeMessagingPort(input, output);
+    },
+    storage: {
+      "portus.policyPreferences": {
+        navigationPolicyEnabled: true,
+        policyMode: "blocklist",
+        allowedNavigationRules: [],
+        blockedNavigationRules: [],
+        commandPolicy: { ...DEFAULT_COMMAND_POLICY, "tab.navigate": true },
+        approvalPolicy: { "tab.navigate": true },
+        advancedBackendEnabled: false,
+        sessionStepRetentionLimit: 10
+      }
     }
   });
   const bridge = createPortusExtensionBridge(fixture.chrome, {
@@ -4185,6 +4198,20 @@ test("integrates extension bridge with native host and broker visibility", async
     const connectedList = await brokerRequest(cliSocket, request("req_002", "browser.list"));
     assert.equal(connectedList.message.result.browsers.length, 1);
     assert.equal(connectedList.message.result.browsers[0].browserName, "Chrome");
+
+    const navigateResponse = brokerRequest(cliSocket, request("req_approval_integration", "tab.navigate", {
+      browserId: connectedList.message.result.browsers[0].browserId,
+      tabId: 1,
+      url: "https://example.com/approved"
+    }));
+    await waitFor(() => bridge.pendingCommandApprovals.size === 1);
+    const [approval] = bridge.pendingCommandApprovals.values();
+    assert.equal(approval.request.commandType, "tab.navigate");
+    assert.equal(approval.request.summary.url, "https://example.com/approved");
+    await bridge.decideCommandApproval(approval.request.approvalId, "approved");
+    const navigated = await navigateResponse;
+    assert.equal(navigated.message.ok, true);
+    assert.equal(navigated.message.result.tab.url, "https://example.com/approved");
 
     const disconnectPromise = bridge.disconnectBridge();
     await disconnectPromise;
@@ -4243,6 +4270,7 @@ function settingsProfileState(overrides = {}) {
       allowedNavigationRules: [],
       blockedNavigationRules: [],
       commandPolicy: DEFAULT_COMMAND_POLICY,
+      approvalPolicy: {},
       advancedBackendEnabled: false,
       sessionStepRetentionLimit: 10,
       ...(overrides.content?.policyPreferences ?? {})
@@ -5200,11 +5228,12 @@ function defaultSnapshotScriptResult() {
   }]);
 }
 
-function createConnectedBridge(fixture) {
+function createConnectedBridge(fixture, options = {}) {
   const bridge = createPortusExtensionBridge(fixture.chrome, {
     now: () => new Date("2026-04-28T00:00:00.000Z"),
     setInterval: () => 0,
-    clearInterval: () => undefined
+    clearInterval: () => undefined,
+    ...options
   });
   bridge.browserId = "br_000001";
   bridge.bridgeState = "connected";
@@ -5478,5 +5507,83 @@ test("resolves download.wait against session downloads matching criteria", async
     () => bridge.dispatchNativeRequest(request("req_dl_wait_missing_id", "download.wait", { downloadId: 42, timeoutMs: 400 })),
     { code: "COMMAND_TIMEOUT" }
   );
+});
+
+test("requires explicit approval decisions and fails pending approvals closed", async () => {
+  const fixture = createChromeFixture();
+  const requestTimers = createTimeoutFixture();
+  const bridge = createConnectedBridge(fixture, {
+    setTimeout: requestTimers.setTimeout,
+    clearTimeout: requestTimers.clearTimeout
+  });
+  const approvalPayload = {
+    approvalId: "approval_000001",
+    browserId: "br_000001",
+    commandType: "action.click",
+    requestedAt: "2026-04-28T00:00:00.000Z",
+    expiresAt: "2026-04-28T00:00:30.000Z",
+    timeoutMs: 30000,
+    summary: { tabId: 7, elementId: "el_001" }
+  };
+
+  const approvedPending = bridge.dispatchNativeRequest(request(
+    "req_approval_approved",
+    "approval.request",
+    approvalPayload
+  ));
+  await waitFor(() => bridge.pendingCommandApprovals.size === 1);
+  assert.equal((await bridge.getStatus()).pendingApprovals[0].approvalId, approvalPayload.approvalId);
+  const approvedDecision = await bridge.handleRuntimeMessage({
+    type: "portus.approval.decide",
+    approvalId: approvalPayload.approvalId,
+    decision: "approved"
+  });
+  assert.equal(approvedDecision.approval.decision, "approved");
+  assert.equal((await approvedPending).decision, "approved");
+  assert.equal(bridge.pendingCommandApprovals.size, 0);
+
+  const rejectedPending = bridge.dispatchNativeRequest(request(
+    "req_approval_rejected",
+    "approval.request",
+    { ...approvalPayload, approvalId: "approval_000002" }
+  ));
+  await waitFor(() => bridge.pendingCommandApprovals.size === 1);
+  const rejectedAssertion = assert.rejects(rejectedPending, { code: "COMMAND_REJECTED_BY_USER" });
+  await bridge.decideCommandApproval("approval_000002", "rejected");
+  await rejectedAssertion;
+
+  const timedOutPending = bridge.dispatchNativeRequest(request(
+    "req_approval_timeout",
+    "approval.request",
+    { ...approvalPayload, approvalId: "approval_000003" }
+  ));
+  await waitFor(() => bridge.pendingCommandApprovals.size === 1);
+  const timeoutAssertion = assert.rejects(timedOutPending, { code: "COMMAND_TIMEOUT" });
+  requestTimers.callbacks[0]();
+  await timeoutAssertion;
+
+  const disconnectedPending = bridge.dispatchNativeRequest(request(
+    "req_approval_disconnected",
+    "approval.request",
+    { ...approvalPayload, approvalId: "approval_000004" }
+  ));
+  await waitFor(() => bridge.pendingCommandApprovals.size === 1);
+  const disconnectAssertion = assert.rejects(disconnectedPending, { code: "BRIDGE_DISCONNECTED" });
+  bridge.handleBridgeTransportFailure();
+  await disconnectAssertion;
+  assert.equal(bridge.pendingCommandApprovals.size, 0);
+});
+
+test("stores approval requirements independently from command allow policy", async () => {
+  const fixture = createChromeFixture();
+  const bridge = createConnectedBridge(fixture);
+  await bridge.setApprovalPolicyRequired("action.click", true, false, false);
+  assert.equal(bridge.getPolicyPreferences().approvalPolicy["action.click"], true);
+  assert.equal(bridge.getPolicyPreferences().commandPolicy["action.click"], true);
+  await bridge.setCommandPolicyEnabled("action.click", false, false, false);
+  assert.equal(bridge.getPolicyPreferences().approvalPolicy["action.click"], true);
+  assert.equal(bridge.getPolicyPreferences().commandPolicy["action.click"], false);
+  await bridge.setApprovalPolicyRequired("action.click", false, false, false);
+  assert.equal(bridge.getPolicyPreferences().approvalPolicy["action.click"], undefined);
 });
 

@@ -22,7 +22,7 @@ Portus Browser is local first and the Broker runs on the user's machine.
 
 ## Access And Policy
 
-The Extension permanently requests Chrome host access for normal web pages through `"<all_urls>"`; there is no site-by-site Chrome permission request or revoke workflow. While the Bridge is connected, Portus navigation policy and command policy are the authorization boundary for agent actions.
+The Extension permanently requests Chrome host access for normal web pages through `"<all_urls>"`; there is no site-by-site Chrome permission request or revoke workflow. While the Bridge is connected, Portus navigation policy and command policy are the authorization boundary for agent actions. For selected state-changing commands, the active profile can additionally require one-time approval from the Extension popup or side panel. Approval is bound to the exact pending command and never bypasses either policy.
 
 Navigation rules can match a URL by scheme, authority, wildcard host, exact URL, or URL prefix. Portus does not impose a built-in scheme restriction: users decide which browser-supported URLs to allow or block. A denied URL returns `NAVIGATION_BLOCKED`; protected pages and other targets the browser cannot expose return `BROWSER_ACCESS_DENIED`.
 

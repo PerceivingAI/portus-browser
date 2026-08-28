@@ -17,6 +17,7 @@ A settings profile's content contains the user-modifiable values in the Settings
 - allowed navigation rules
 - blocked navigation rules
 - command policy settings
+- per-command approval requirements
 - Advanced Debugger Backend preference
 - retention settings
 - panel and extension-icon preferences
@@ -97,7 +98,7 @@ The Settings view includes:
 - `Blocklist` and `Allowlist` modes
 - a `Match` selector and `Value` field
 - Allowed and Blocked rule lists
-- per-command controls under `CLI Commands`
+- per-command allow and approval controls under `CLI Commands`
 
 Rule match types are:
 
@@ -110,6 +111,8 @@ Rule match types are:
 Portus does not impose a built-in HTTP(S)-only or scheme allowlist. The user controls the rules, and the browser remains the final authority on URLs it supports or protects.
 
 `Enable Policy` is on by default. In blocklist mode, a URL is allowed unless it matches a Blocked rule. In allowlist mode, a URL is blocked unless it matches an Allowed rule. Turning navigation policy off bypasses both rule lists without deleting them or disabling command policy.
+
+Approval is off by default and is available only for selected state-changing commands. **Allow** controls whether the command is available at all; **Approve** requires a one-time decision in the Extension popup or side panel after the Broker has applied command, navigation, capability, and upload-path policy. Rejection, timeout, Bridge disconnect, or browser-session replacement fails the pending command without executing it.
 
 The popup and Settings view report `Agent Access` for the current URL as `allowed`, `blocked`, `disabled`, or `unsupported`.
 

@@ -1,5 +1,7 @@
 import {
   ActionResultSchema,
+  ApprovableCommandTypeSchema,
+  ApprovalDecisionSchema,
   ActionRequestSchema,
   CommandTypeSchema,
   ConsoleListResultSchema,
@@ -9,6 +11,8 @@ import {
   DialogResultSchema,
   DismissKindSchema,
   DismissStrategySchema,
+  CommandApprovalRequestSchema,
+  CommandApprovalResultSchema,
   DownloadGetResultSchema,
   DownloadListResultSchema,
   DownloadWaitConditionSchema,
@@ -50,6 +54,8 @@ import {
   migrateLegacyTerminalPreferences,
   normalizeNavigationRulePattern,
   normalizeNavigationUrl,
+  type ApprovableCommandType,
+  type ApprovalDecision,
   type ActionResult,
   type BrowserName,
   type BrowserSession,
@@ -57,6 +63,8 @@ import {
   type DismissKind,
   type DismissResult,
   type DismissStrategy,
+  type CommandApprovalRequest,
+  type CommandApprovalResult,
   type DownloadWaitCondition,
   type ExtensionUxPreferences,
   type IconClickBehavior,
@@ -319,6 +327,7 @@ export interface PortusExtensionStatus {
   uxPreferences: ExtensionUxPreferences;
   terminalPreferences: TerminalSettings;
   settingsProfiles: SettingsProfileState;
+  pendingApprovals: CommandApprovalRequest[];
 }
 
 interface PendingRequest {
@@ -331,6 +340,13 @@ interface PendingTerminalRequest {
   resolve: (message: TerminalServerMessage) => void;
   reject: (error: Error | PortusError) => void;
   timer?: unknown;
+}
+
+interface PendingCommandApproval {
+  request: CommandApprovalRequest;
+  resolve: (result: CommandApprovalResult) => void;
+  reject: (error: PortusError) => void;
+  timer: unknown;
 }
 
 const POLICY_STORAGE_KEY = "portus.policyPreferences";
@@ -744,6 +760,7 @@ export class PortusExtensionBridge {
   private readonly downloads = new Map<number, Record<string, unknown>>();
   private readonly downloadObservationOrder = new Map<number, number>();
   private downloadObservationCounter = 0;
+  private readonly pendingCommandApprovals = new Map<string, PendingCommandApproval>();
   private downloadsCaptureStartedAt: string;
 
   bridgeState: BridgeState = "disconnected";
@@ -833,6 +850,7 @@ export class PortusExtensionBridge {
       }
       const browserId = readString(result, "browserId");
       const heartbeatIntervalMs = readNumber(result, "heartbeatIntervalMs");
+      this.endPendingCommandApprovals("Browser session was replaced before approval completed.");
       this.resetDownloadsForSession();
       this.browserId = browserId;
       const registeredProfiles = SettingsProfileStateSchema.safeParse(result.settingsProfiles);
@@ -918,6 +936,7 @@ export class PortusExtensionBridge {
       policyPreferences: this.policyPreferences,
       uxPreferences: this.uxPreferences,
       terminalPreferences: this.terminalPreferences,
+      pendingApprovals: [...this.pendingCommandApprovals.values()].map((pending) => pending.request),
       settingsProfiles: this.settingsProfiles
     };
   }
@@ -2502,6 +2521,154 @@ export class PortusExtensionBridge {
     return this.policyPreferences;
   }
 
+  async setApprovalPolicyRequired(
+    commandType: ApprovableCommandType,
+    required: boolean,
+    syncBroker = true,
+    syncProfile = syncBroker
+  ): Promise<PolicyPreferences> {
+    await this.ready;
+    if (syncProfile) await this.prepareSettingsProfileEdit();
+    const approvalPolicy = { ...this.policyPreferences.approvalPolicy };
+    if (required) approvalPolicy[commandType] = true;
+    else delete approvalPolicy[commandType];
+    this.policyPreferences = PolicyPreferencesSchema.parse({
+      ...this.policyPreferences,
+      approvalPolicy
+    });
+    if (!syncProfile) await this.persistPolicyPreferences();
+    if (syncBroker) void this.syncPolicyPreferences();
+    if (syncProfile) await this.afterSettingsProfileChanged();
+    return this.policyPreferences;
+  }
+
+  async requestCommandApproval(payload: Record<string, unknown>): Promise<CommandApprovalResult> {
+    await this.ready;
+    const parsedRequest = CommandApprovalRequestSchema.parse(payload);
+    if (parsedRequest.browserId !== this.browserId || this.bridgeState !== "connected") {
+      throw createPortusError({
+        code: "BROWSER_SESSION_UNAVAILABLE",
+        message: "Command approval targets an unavailable browser session.",
+        retryable: true,
+        details: {
+          approvalId: parsedRequest.approvalId,
+          browserId: parsedRequest.browserId
+        }
+      });
+    }
+    const request = await this.enrichCommandApprovalRequest(parsedRequest);
+    if (this.pendingCommandApprovals.has(request.approvalId)) {
+      throw createPortusError({
+        code: "INVALID_MESSAGE",
+        message: `Command approval is already pending: ${request.approvalId}.`
+      });
+    }
+
+    return new Promise((resolve, reject) => {
+      const timer = this.setRequestTimer(() => {
+        const pending = this.pendingCommandApprovals.get(request.approvalId);
+        if (!pending) return;
+        this.pendingCommandApprovals.delete(request.approvalId);
+        pending.reject(createPortusError({
+          code: "COMMAND_TIMEOUT",
+          message: `Timed out waiting for approval of ${request.commandType}.`,
+          retryable: true,
+          details: {
+            approvalId: request.approvalId,
+            commandType: request.commandType,
+            browserId: request.browserId
+          }
+        }));
+        void this.updateActionState();
+        void this.broadcastStatus();
+      }, request.timeoutMs);
+      this.pendingCommandApprovals.set(request.approvalId, { request, resolve, reject, timer });
+      void this.updateActionState();
+      void this.broadcastStatus();
+    });
+  }
+
+  async decideCommandApproval(
+    approvalId: string,
+    decisionInput: unknown
+  ): Promise<CommandApprovalResult> {
+    await this.ready;
+    const decision = ApprovalDecisionSchema.parse(decisionInput);
+    const pending = this.pendingCommandApprovals.get(approvalId);
+    if (!pending) {
+      throw createPortusError({
+        code: "TARGET_NOT_FOUND",
+        message: `Command approval is unavailable: ${approvalId}.`,
+        details: { approvalId }
+      });
+    }
+    this.pendingCommandApprovals.delete(approvalId);
+    this.clearRequestTimer(pending.timer);
+    const result = CommandApprovalResultSchema.parse({
+      approvalId,
+      decision,
+      decidedAt: this.now().toISOString()
+    });
+    if (decision === "approved") {
+      pending.resolve(result);
+    } else {
+      pending.reject(createPortusError({
+        code: "COMMAND_REJECTED_BY_USER",
+        message: `User rejected command ${pending.request.commandType}.`,
+        details: {
+          approvalId,
+          commandType: pending.request.commandType,
+          browserId: pending.request.browserId
+        }
+      }));
+    }
+    void this.updateActionState();
+    void this.broadcastStatus();
+    return result;
+  }
+
+  private async enrichCommandApprovalRequest(request: CommandApprovalRequest): Promise<CommandApprovalRequest> {
+    const summary = { ...request.summary };
+    const tabId = typeof summary.tabId === "number" ? summary.tabId : undefined;
+    if (tabId !== undefined) {
+      const tab = await this.getChromeTab(tabId).catch(() => undefined);
+      if (tab?.url) summary.currentUrl = sanitizeApprovalUrlForDisplay(tab.url);
+      if (tab?.title) summary.tabTitle = tab.title.slice(0, 200);
+    }
+    const snapshotId = typeof summary.snapshotId === "string" ? summary.snapshotId : undefined;
+    const elementId = typeof summary.elementId === "string" ? summary.elementId : undefined;
+    const snapshotEntry = snapshotId === undefined ? undefined : this.snapshots.get(snapshotId);
+    const element = elementId === undefined
+      ? undefined
+      : snapshotEntry?.snapshot.elements.find((candidate) => candidate.elementId === elementId);
+    if (element) {
+      summary.targetRole = element.role;
+      if (element.label) summary.targetLabel = element.label.slice(0, 200);
+      else if (element.text) summary.targetText = element.text.slice(0, 200);
+    }
+    return CommandApprovalRequestSchema.parse({
+      ...request,
+      summary
+    });
+  }
+
+  private rejectPendingCommandApprovals(error: PortusError): void {
+    for (const pending of this.pendingCommandApprovals.values()) {
+      this.clearRequestTimer(pending.timer);
+      pending.reject(error);
+    }
+    this.pendingCommandApprovals.clear();
+  }
+
+  private endPendingCommandApprovals(message: string): void {
+    if (this.pendingCommandApprovals.size === 0) return;
+    this.rejectPendingCommandApprovals(createPortusError({
+      code: "BRIDGE_DISCONNECTED",
+      message,
+      retryable: true
+    }));
+  }
+
   async setAdvancedBackendEnabled(enabled: boolean, syncBroker = true, syncProfile = syncBroker): Promise<PolicyPreferences> {
     await this.ready;
     if (syncProfile) await this.prepareSettingsProfileEdit();
@@ -2742,6 +2909,20 @@ export class PortusExtensionBridge {
           policy,
           status: await this.getStatus()
         };
+      }
+      case "portus.approval-policy.set": {
+        const policy = await this.setApprovalPolicyRequired(
+          ApprovableCommandTypeSchema.parse(readString(message, "commandType")),
+          readBoolean(message, "required")
+        );
+        return { policy, status: await this.getStatus() };
+      }
+      case "portus.approval.decide": {
+        const approval = await this.decideCommandApproval(
+          readString(message, "approvalId"),
+          message.decision
+        );
+        return { approval, status: await this.getStatus() };
       }
       case "portus.advanced-backend.set": {
         const policy = await this.setAdvancedBackendEnabled(readBoolean(message, "enabled"));
@@ -3045,6 +3226,8 @@ export class PortusExtensionBridge {
     }
 
     switch (request.type) {
+      case "approval.request":
+        return this.requestCommandApproval(request.payload);
       case "tab.list":
       case "tabs.list":
         return { tabs: await this.listTabs() };
@@ -3235,6 +3418,7 @@ export class PortusExtensionBridge {
       policyPreferences: this.policyPreferences,
       uxPreferences: this.uxPreferences,
       terminalPreferences: this.terminalPreferences,
+      pendingApprovals: [...this.pendingCommandApprovals.values()].map((pending) => pending.request),
       settingsProfiles: this.settingsProfiles
     };
   }
@@ -3330,14 +3514,21 @@ export class PortusExtensionBridge {
   private async updateActionState(): Promise<void> {
     const action = this.chromeApi.action;
     if (!action) return;
-    const label = actionLabelForBridgeState(this.bridgeState);
+    const pendingApprovalCount = this.pendingCommandApprovals.size;
+    const label = pendingApprovalCount > 0
+      ? `${pendingApprovalCount} command approval${pendingApprovalCount === 1 ? "" : "s"} pending`
+      : actionLabelForBridgeState(this.bridgeState);
     await promisifyChromeCall<void>((done) => {
       const result = action.setTitle({ title: `Portus: ${label}` });
       done(result as Promise<void> | void);
     }).catch(() => undefined);
     if (action.setBadgeText) {
       await promisifyChromeCall<void>((done) => {
-        const result = action.setBadgeText?.({ text: actionBadgeTextForBridgeState(this.bridgeState) });
+        const result = action.setBadgeText?.({
+          text: pendingApprovalCount > 0
+            ? String(Math.min(pendingApprovalCount, 99))
+            : actionBadgeTextForBridgeState(this.bridgeState)
+        });
         done(result as Promise<void> | void);
       }).catch(() => undefined);
     }
@@ -3374,6 +3565,7 @@ export class PortusExtensionBridge {
 
   private handleNativeDisconnect(disconnectedPort: PortusNativePort): void {
     if (this.port !== disconnectedPort) return;
+    this.endPendingCommandApprovals("Native host disconnected before approval completed.");
     this.port = undefined;
     this.rejectPending(createPortusError({
       code: "NATIVE_HOST_UNAVAILABLE",
@@ -3393,6 +3585,7 @@ export class PortusExtensionBridge {
 
   private handleBridgeTransportFailure(): void {
     if (this.bridgeState !== "connected") return;
+    this.endPendingCommandApprovals("Bridge transport failed before approval completed.");
     this.stopHeartbeat();
     this.bridgeState = "error";
     this.brokerState = "unavailable";
@@ -3426,6 +3619,7 @@ export class PortusExtensionBridge {
   }
 
   private clearConnectionState(): void {
+    this.endPendingCommandApprovals("Bridge disconnected before approval completed.");
     this.rejectPending(createPortusError({
       code: "BRIDGE_DISCONNECTED",
       message: "Portus Bridge disconnected.",
@@ -6813,6 +7007,19 @@ export function performPortusDomAction(payload: Record<string, unknown>): Record
     } catch {
       return value;
     }
+  }
+}
+
+function sanitizeApprovalUrlForDisplay(value: string): string {
+  try {
+    const url = new URL(value);
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return value.slice(0, 200);
   }
 }
 

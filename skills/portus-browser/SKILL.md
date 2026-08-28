@@ -300,6 +300,9 @@ Waiting by ID follows an already observed download until it settles. URL and fil
 ## Policy
 
 The user controls Portus policy from the extension UI. Do not pre-check or second-guess policy before executing a direct user request. Try the command and report policy errors plainly.
+
+Selected state-changing commands may require one-time approval even when command policy allows them. The Broker pauses before execution and the Extension popup or side panel shows the exact pending request with a sanitized target summary. Tell the user that approval is waiting; do not attempt to bypass it, broaden policy, or repeatedly retry. `COMMAND_REJECTED_BY_USER`, approval timeout, Bridge disconnect, and browser-session replacement all mean the command did not execute.
+
 Useful list commands:
 
 ```powershell

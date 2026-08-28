@@ -75,6 +75,8 @@ Remember:
 
 `COMMAND_DISABLED_BY_POLICY` means that command is disabled under **CLI Commands** in Settings.
 
+`COMMAND_REJECTED_BY_USER` means the command required one-time approval and the pending request was rejected in the Extension UI. `COMMAND_TIMEOUT` can mean that an approval request was not decided before the command timeout. Open the Extension popup or side panel, review the exact browser and sanitized target summary, then approve or reject the pending request. Do not retry a rejected command as a workaround.
+
 Portus does not use a separate Chrome site-permission request workflow. Do not look for a permission prompt or retry a removed `permissions` CLI command.
 
 ## File upload is denied

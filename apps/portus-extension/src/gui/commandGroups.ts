@@ -1,4 +1,4 @@
-import type { CommandType } from "@portus/protocol";
+import { APPROVABLE_COMMAND_TYPES, type ApprovableCommandType, type CommandType } from "@portus/protocol";
 
 export const commandGroups: Array<{ title: string; commands: Array<{ type: CommandType; label: string }> }> = [
   {
@@ -97,3 +97,7 @@ export const commandGroups: Array<{ title: string; commands: Array<{ type: Comma
     ]
   }
 ];
+
+export function commandSupportsApproval(commandType: CommandType): commandType is ApprovableCommandType {
+  return (APPROVABLE_COMMAND_TYPES as readonly CommandType[]).includes(commandType);
+}

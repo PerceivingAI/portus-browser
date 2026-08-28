@@ -1,7 +1,7 @@
 import * as React from "react";
 import { createRoot } from "react-dom/client";
 import { ChevronDownIcon, InfoIcon, PencilIcon, PlusIcon, RefreshCwIcon, SettingsIcon, SquareTerminalIcon, Trash2Icon, XIcon } from "lucide-react";
-import { DEFAULT_COMMAND_POLICY, ExtensionUxPreferencesSchema, SETTINGS_PROFILE_CREATE_OPTION, navigationRuleKey, type CommandType, type ExtensionUxPreferences, type NavigationRule, type NavigationRuleMatch, type PolicyPreferences } from "@portus/protocol";
+import { DEFAULT_COMMAND_POLICY, ExtensionUxPreferencesSchema, SETTINGS_PROFILE_CREATE_OPTION, navigationRuleKey, type ApprovableCommandType, type ApprovalDecision, type CommandType, type ExtensionUxPreferences, type NavigationRule, type NavigationRuleMatch, type PolicyPreferences } from "@portus/protocol";
 import {
   TerminalSettingsSchema,
   type TerminalClientMessage,
@@ -27,8 +27,8 @@ import { ScrollArea } from "./components/ui/scroll-area.js";
 import { Textarea } from "./components/ui/textarea.js";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs.js";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip.js";
-import { commandGroups } from "./gui/commandGroups.js";
-import { Diagnostics, NativeRadioGroupField, Section, SelectField, StatusBadge, StatusGrid } from "./gui/components.js";
+import { commandGroups, commandSupportsApproval } from "./gui/commandGroups.js";
+import { ApprovalRequests, Diagnostics, NativeRadioGroupField, Section, SelectField, StatusBadge, StatusGrid } from "./gui/components.js";
 import { connectRuntimePort, isRecord, readLocalStorageValue, readStatus, readStatusMessage, sendRuntimeMessage, type RuntimePort } from "./gui/chromeApi.js";
 import {
   describeNavigationPolicy,
@@ -145,6 +145,20 @@ export function SidePanelApp(): React.JSX.Element {
     }
   }
 
+  async function mutateApprovalPolicy(commandType: ApprovableCommandType, required: boolean): Promise<void> {
+    await mutateStatus(
+      { type: "portus.approval-policy.set", commandType, required },
+      required ? `Approval required for ${commandType}.` : `Approval removed for ${commandType}.`
+    );
+  }
+
+  async function decideApproval(approvalId: string, decision: ApprovalDecision): Promise<void> {
+    await mutateStatus(
+      { type: "portus.approval.decide", approvalId, decision },
+      decision === "approved" ? "Command approved." : "Command rejected."
+    );
+  }
+
   async function mutateUx(message: Record<string, unknown>): Promise<void> {
     setIsError(false);
     try {
@@ -201,6 +215,14 @@ export function SidePanelApp(): React.JSX.Element {
             enabled
           });
           latest = readStatus(response);
+          if (commandSupportsApproval(command.type)) {
+            const approvalResponse = await sendRuntimeMessage({
+              type: "portus.approval-policy.set",
+              commandType: command.type,
+              required: false
+            });
+            latest = readStatus(approvalResponse);
+          }
         }
       }
       if (latest) applyStatus(latest);
@@ -252,6 +274,11 @@ export function SidePanelApp(): React.JSX.Element {
               </Tooltip>
             </div>
           </div>
+          <ApprovalRequests
+            busy={busy}
+            onDecision={(approvalId, decision) => void decideApproval(approvalId, decision)}
+            requests={status?.pendingApprovals ?? []}
+          />
         </header>
 
         <div className={activeView === "terminal" ? "min-h-0 h-full" : "hidden"}>
@@ -291,6 +318,7 @@ export function SidePanelApp(): React.JSX.Element {
               status={status}
               mutateManualRule={mutateManualRule}
               mutateCommandPolicy={mutateCommandPolicy}
+              mutateApprovalPolicy={mutateApprovalPolicy}
               mutatePolicy={mutatePolicy}
               mutateSettings={mutateSettings}
               mutateUx={mutateUx}
@@ -311,6 +339,7 @@ function SettingsPanel({
   navigationRuleValue,
   mutateManualRule,
   mutateCommandPolicy,
+  mutateApprovalPolicy,
   mutatePolicy,
   mutateSettings,
   mutateUx,
@@ -331,6 +360,7 @@ function SettingsPanel({
   navigationRuleValue: string;
   mutateManualRule(type: "portus.policy.allow.add" | "portus.policy.block.add", listName: "allowlist" | "blocklist"): Promise<void>;
   mutateCommandPolicy(commandType: CommandType, enabled: boolean): Promise<void>;
+  mutateApprovalPolicy(commandType: ApprovableCommandType, required: boolean): Promise<void>;
   mutatePolicy(message: Record<string, unknown>, successMessage: string): Promise<void>;
   mutateSettings(message: Record<string, unknown>, successMessage: string): Promise<void>;
   mutateUx(message: Record<string, unknown>): Promise<void>;
@@ -793,21 +823,36 @@ function SettingsPanel({
         <div className="grid gap-[var(--portus-subsection-gap)]">
           <FieldDescription className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-[var(--portus-subsection-gap)] mb-[var(--portus-panel-gap)]">
             <InfoIcon aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
-            <span className="leading-none">The following permissions allow for specific commands to be available through the CLI.</span>
+            <span className="leading-none">Allow commands through the CLI and optionally require one-time approval before selected state-changing commands run.</span>
           </FieldDescription>
           <Accordion className="gap-[var(--portus-subsection-gap)]">
             {commandGroups.map((group) => (
               <AccordionItem key={group.title} title={group.title}>
-                <div className="grid grid-cols-2 gap-x-3 gap-y-2">
+                <div className="grid gap-y-2">
                   {group.commands.map((command) => (
-                    <label className="grid min-h-7 grid-cols-[auto_minmax(0,1fr)] items-center gap-[var(--portus-subsection-gap)] text-xs" key={command.type}>
-                      <Checkbox
-                        checked={policy ? policy.commandPolicy[command.type] !== false : true}
-                        disabled={!policy}
-                        onCheckedChange={(value) => void mutateCommandPolicy(command.type, value === true)}
-                      />
+                    <div className="grid min-h-7 grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 text-xs" key={command.type}>
                       <span className="break-words">{command.label}</span>
-                    </label>
+                      <label className="flex items-center gap-1.5">
+                        <Checkbox
+                          aria-label={command.label}
+                          checked={policy ? policy.commandPolicy[command.type] !== false : true}
+                          disabled={!policy}
+                          onCheckedChange={(value) => void mutateCommandPolicy(command.type, value === true)}
+                        />
+                        <span>Allow</span>
+                      </label>
+                      {commandSupportsApproval(command.type) ? (
+                        <label className="flex items-center gap-1.5">
+                          <Checkbox
+                            checked={policy?.approvalPolicy[command.type] === true}
+                            aria-label={`Require approval for ${command.label}`}
+                            disabled={!policy}
+                            onCheckedChange={(value) => void mutateApprovalPolicy(command.type as ApprovableCommandType, value === true)}
+                          />
+                          <span>Approve</span>
+                        </label>
+                      ) : <span aria-hidden="true" className="w-16" />}
+                    </div>
                   ))}
                 </div>
               </AccordionItem>

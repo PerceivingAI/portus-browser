@@ -2054,3 +2054,78 @@ test("gates download commands by policy and capability before routing", async ()
   assert.deepEqual(routed.map((command) => command.type), ["download.list", "download.get", "download.wait"]);
   assert.equal(routed[0].targetBrowserId, routedRegister.result.browserId);
 });
+
+test("requires exact-session approval before routing configured commands", async () => {
+  const approvals = [];
+  const routed = [];
+  const bridgeClient = {
+    async sendRequest(type, payload) {
+      approvals.push({ type, payload });
+      return {
+        approvalId: payload.approvalId,
+        decision: "approved",
+        decidedAt: "2026-04-28T00:00:01.000Z"
+      };
+    },
+    async sendCommand(command) {
+      routed.push(command);
+      return { tab: { tabId: 7, url: "https://example.com/path" } };
+    }
+  };
+  const broker = createBroker({ brokerToken: TEST_BROKER_TOKEN, now: fixedClock() });
+  const approvalRegistration = registrationWithCommandPolicy({ "tab.navigate": true });
+  approvalRegistration.policyPreferences.approvalPolicy = { "tab.navigate": true };
+  const registered = await broker.handleRequest(request("req_approval_reg", "bridge.register", approvalRegistration), { bridgeClient });
+  const browserId = registered.result.browserId;
+
+  const response = await broker.handleRequest(request("req_approval_command", "tab.navigate", {
+    browserId,
+    tabId: 7,
+    url: "https://user:password@example.com/path?token=secret#section"
+  }, { timeoutMs: 1000 }));
+
+  assert.equal(response.ok, true);
+  assert.equal(approvals.length, 1);
+  assert.equal(approvals[0].type, "approval.request");
+  assert.equal(approvals[0].payload.browserId, browserId);
+  assert.equal(approvals[0].payload.commandType, "tab.navigate");
+  assert.equal(approvals[0].payload.summary.url, "https://example.com/path");
+  assert.equal(JSON.stringify(approvals[0]).includes("secret"), false);
+  assert.equal(JSON.stringify(approvals[0]).includes("password"), false);
+  assert.equal(routed.length, 1);
+  assert.equal(routed[0].targetBrowserId, browserId);
+  assert.ok(routed[0].timeoutMs > 0 && routed[0].timeoutMs <= 1000);
+});
+
+test("fails closed when command approval is rejected or times out", async () => {
+  for (const scenario of ["rejected", "timeout"]) {
+    const routed = [];
+    const bridgeClient = {
+      async sendRequest(_type, payload) {
+        if (scenario === "timeout") return new Promise(() => undefined);
+        throw {
+          code: "COMMAND_REJECTED_BY_USER",
+          message: "User rejected command action.click.",
+          details: { approvalId: payload.approvalId }
+        };
+      },
+      async sendCommand(command) {
+        routed.push(command);
+        return { action: {} };
+      }
+    };
+    const broker = createBroker({ brokerToken: TEST_BROKER_TOKEN, now: fixedClock() });
+    const approvalRegistration = registrationWithCommandPolicy({ "action.click": true });
+    approvalRegistration.policyPreferences.approvalPolicy = { "action.click": true };
+    const registered = await broker.handleRequest(request(`req_approval_${scenario}_reg`, "bridge.register", approvalRegistration), { bridgeClient });
+    const response = await broker.handleRequest(request(`req_approval_${scenario}`, "action.click", {
+      browserId: registered.result.browserId,
+      tabId: 7,
+      elementId: "el_001"
+    }, { timeoutMs: scenario === "timeout" ? 10 : 1000 }));
+
+    assert.equal(response.ok, false);
+    assert.equal(response.error.code, scenario === "timeout" ? "COMMAND_TIMEOUT" : "COMMAND_REJECTED_BY_USER");
+    assert.equal(routed.length, 0);
+  }
+});

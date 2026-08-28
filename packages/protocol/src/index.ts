@@ -14,6 +14,7 @@ export const SnapshotIdSchema = z.string().regex(/^snap_[A-Za-z0-9_-]+$/);
 export const ElementIdSchema = z.string().regex(/^el_[A-Za-z0-9_-]+$/);
 export const RecipeIdSchema = z.string().regex(/^(recipe_[A-Za-z0-9_-]+|[a-z0-9][a-z0-9-]*)$/);
 export const CommandIdSchema = z.string().regex(/^cmd_[A-Za-z0-9_-]+$/);
+export const ApprovalIdSchema = z.string().regex(/^approval_[A-Za-z0-9_-]+$/);
 export const IsoDateTimeSchema = z.string().datetime({ offset: true });
 
 export const ErrorCodeSchema = z.enum([
@@ -33,6 +34,7 @@ export const ErrorCodeSchema = z.enum([
   "COMMAND_TIMEOUT",
   "CAPABILITY_UNAVAILABLE",
   "ACTION_UNSUPPORTED",
+  "COMMAND_REJECTED_BY_USER",
   "ACTION_FAILED",
   "DISMISS_TARGET_NOT_FOUND",
   "SNAPSHOT_STALE",
@@ -200,6 +202,52 @@ export const CommandTypeSchema = z.enum([
   "bridge.disconnect"
 ]);
 
+export const APPROVABLE_COMMAND_TYPES = [
+  "tab.open",
+  "tab.navigate",
+  "tab.history.back",
+  "tab.history.forward",
+  "tab.activate",
+  "tab.close",
+  "action.click",
+  "action.hover",
+  "action.drag",
+  "action.fillForm",
+  "action.upload",
+  "action.type",
+  "action.press",
+  "action.scroll",
+  "page.dismiss",
+  "dialog.dismiss",
+  "dialog.accept",
+  "console.clear",
+  "policy.allow.add",
+  "policy.allow.remove",
+  "policy.block.add",
+  "policy.block.remove",
+  "policy.retention.set"
+] as const;
+
+export const ApprovableCommandTypeSchema = z.enum(APPROVABLE_COMMAND_TYPES);
+export const ApprovalPolicySchema = z.partialRecord(ApprovableCommandTypeSchema, z.boolean());
+export const ApprovalDecisionSchema = z.enum(["approved", "rejected"]);
+
+export const CommandApprovalRequestSchema = z.object({
+  approvalId: ApprovalIdSchema,
+  browserId: BrowserIdSchema,
+  commandType: ApprovableCommandTypeSchema,
+  requestedAt: IsoDateTimeSchema,
+  expiresAt: IsoDateTimeSchema,
+  timeoutMs: z.number().int().positive(),
+  summary: JsonObjectSchema
+}).strict();
+
+export const CommandApprovalResultSchema = z.object({
+  approvalId: ApprovalIdSchema,
+  decision: ApprovalDecisionSchema,
+  decidedAt: IsoDateTimeSchema
+}).strict();
+
 export const DEFAULT_COMMAND_POLICY = {
   "browser.list": true,
   "tab.list": true,
@@ -250,6 +298,7 @@ export const DEFAULT_COMMAND_POLICY = {
 
 export const PolicyModeSchema = z.enum(["blocklist", "allowlist"]);
 export const CommandPolicySchema = z.partialRecord(CommandTypeSchema, z.boolean());
+export const DEFAULT_APPROVAL_POLICY = {} as const satisfies Partial<Record<z.infer<typeof ApprovableCommandTypeSchema>, boolean>>;
 export const SidePanelDefaultViewSchema = z.enum(["terminal", "settings"]);
 export const IconClickBehaviorSchema = z.enum(["popup", "side-panel"]);
 export const DEFAULT_SETTINGS_PROFILE_NAME = "Default_Profile" as const;
@@ -280,6 +329,7 @@ export const PolicyPreferencesSchema = z.object({
     ...DEFAULT_COMMAND_POLICY,
     ...policy
   })),
+  approvalPolicy: ApprovalPolicySchema.default(DEFAULT_APPROVAL_POLICY),
   advancedBackendEnabled: z.boolean().default(false),
   sessionStepRetentionLimit: z.number().int().min(0).max(1000).default(10)
 }).strict();
@@ -979,6 +1029,11 @@ export type NavigationRule = z.infer<typeof NavigationRuleSchema>;
 export type PolicyMode = z.infer<typeof PolicyModeSchema>;
 export type CommandType = z.infer<typeof CommandTypeSchema>;
 export type CommandPolicy = z.infer<typeof CommandPolicySchema>;
+export type ApprovableCommandType = z.infer<typeof ApprovableCommandTypeSchema>;
+export type ApprovalPolicy = z.infer<typeof ApprovalPolicySchema>;
+export type ApprovalDecision = z.infer<typeof ApprovalDecisionSchema>;
+export type CommandApprovalRequest = z.infer<typeof CommandApprovalRequestSchema>;
+export type CommandApprovalResult = z.infer<typeof CommandApprovalResultSchema>;
 export type PolicyPreferences = z.infer<typeof PolicyPreferencesSchema>;
 export type SidePanelDefaultView = z.infer<typeof SidePanelDefaultViewSchema>;
 export type IconClickBehavior = z.infer<typeof IconClickBehaviorSchema>;

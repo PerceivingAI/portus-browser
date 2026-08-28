@@ -1,10 +1,10 @@
 import * as React from "react";
 import { createRoot } from "react-dom/client";
-import { SETTINGS_PROFILE_CREATE_OPTION } from "@portus/protocol";
+import { SETTINGS_PROFILE_CREATE_OPTION, type ApprovalDecision } from "@portus/protocol";
 import { Button } from "./components/ui/button.js";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip.js";
 import { cn } from "./lib/utils.js";
-import { Section, Diagnostics, SelectField, StatusBadge, StatusGrid } from "./gui/components.js";
+import { ApprovalRequests, Section, Diagnostics, SelectField, StatusBadge, StatusGrid } from "./gui/components.js";
 import { closeSidePanelFromPopupGesture, closeWindow, connectRuntimePort, openSidePanelFromPopupGesture, readStatus, readStatusMessage, sendRuntimeMessage } from "./gui/chromeApi.js";
 import { describeNavigationPolicy, labelForBridgeState } from "./gui/status.js";
 import type { PortusExtensionStatus } from "./index.js";
@@ -62,6 +62,13 @@ export function PopupApp(): React.JSX.Element {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function decideApproval(approvalId: string, decision: ApprovalDecision): Promise<void> {
+    await mutateStatus(
+      { type: "portus.approval.decide", approvalId, decision },
+      decision === "approved" ? "Command approved." : "Command rejected."
+    );
   }
 
   async function openPanel(): Promise<void> {
@@ -128,6 +135,12 @@ export function PopupApp(): React.JSX.Element {
               { label: "Broker", value: status?.brokerState ?? "unknown" },
               { label: "Browser ID", value: status?.browserId ?? "none" }
             ]}
+          />
+
+          <ApprovalRequests
+            busy={busy}
+            onDecision={(approvalId, decision) => void decideApproval(approvalId, decision)}
+            requests={status?.pendingApprovals ?? []}
           />
 
           <div className="grid gap-[var(--portus-subsection-gap)]">

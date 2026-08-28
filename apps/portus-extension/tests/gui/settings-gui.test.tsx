@@ -315,6 +315,57 @@ describe("Settings view rendered GUI", () => {
     });
   });
 
+  test("configures approval independently from command allow policy", async () => {
+    const user = userEvent.setup();
+    render(<SidePanelApp />);
+
+    await user.click(await screen.findByRole("button", { name: "Navigation" }));
+    const allowOpen = screen.getByRole("checkbox", { name: "Open URL" });
+    const approveOpen = screen.getByRole("checkbox", { name: "Require approval for Open URL" });
+    expect(allowOpen).toBeChecked();
+    expect(approveOpen).not.toBeChecked();
+
+    await user.click(approveOpen);
+    expect(runtime().messages).toContainEqual({
+      type: "portus.approval-policy.set",
+      commandType: "tab.open",
+      required: true
+    });
+    expect(approveOpen).toBeChecked();
+
+    await user.click(allowOpen);
+    expect(allowOpen).not.toBeChecked();
+    expect(approveOpen).toBeChecked();
+  });
+
+  test("shows pending approvals in the popup and resolves one explicit request", async () => {
+    const user = userEvent.setup();
+    const status = createStatus();
+    status.pendingApprovals = [{
+      approvalId: "approval_000001",
+      browserId: "br_test",
+      commandType: "action.click",
+      requestedAt: "2026-05-21T00:00:00.000Z",
+      expiresAt: "2026-05-21T00:00:30.000Z",
+      timeoutMs: 30000,
+      summary: { tabId: 7, elementId: "el_001" }
+    }];
+    runtime().setStatus(status);
+    render(<PopupApp />);
+
+    expect(await screen.findByRole("heading", { name: "Command approval required" })).toBeInTheDocument();
+    expect(screen.getByText("action.click")).toBeInTheDocument();
+    expect(screen.getByText("el_001")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Approve" }));
+
+    expect(runtime().messages).toContainEqual({
+      type: "portus.approval.decide",
+      approvalId: "approval_000001",
+      decision: "approved"
+    });
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "Command approval required" })).not.toBeInTheDocument());
+  });
+
   test("terminal unresponsive state exposes restart behind destructive confirmation", async () => {
     const user = userEvent.setup();
     runtime().setStatus(createStatus({
@@ -511,6 +562,19 @@ class GuiRuntimeController {
             [String(message.commandType) as CommandType]: message.enabled === true
           }
         });
+        return this.response();
+      case "portus.approval-policy.set": {
+        const approvalPolicy = { ...this.status.policyPreferences.approvalPolicy };
+        const commandType = String(message.commandType) as keyof typeof approvalPolicy;
+        if (message.required === true) approvalPolicy[commandType] = true;
+        else delete approvalPolicy[commandType];
+        this.updatePolicy({ approvalPolicy });
+        return this.response();
+      }
+      case "portus.approval.decide":
+        this.status.pendingApprovals = this.status.pendingApprovals.filter(
+          (approval) => approval.approvalId !== message.approvalId
+        );
         return this.response();
       case "portus.terminal.settings.set": {
         const terminal = { ...defaultTerminalSettings(), ...(isRecord(message.settings) ? message.settings : {}) };
@@ -788,6 +852,7 @@ function createStatus({
     browserId: bridgeState === "connected" ? "br_test" : null,
     nativeHostName: "com.portus.browser",
     nativeHostState: bridgeState === "connected" ? "connected" : "disconnected",
+    pendingApprovals: [],
     policyPreferences: policy,
     settingsProfiles: {
       activeProfileId: activeMetadata.profileId,
@@ -832,6 +897,7 @@ function defaultPolicyPreferences(): PortusExtensionStatus["policyPreferences"] 
     allowedNavigationRules: [],
     blockedNavigationRules: [],
     commandPolicy: { ...DEFAULT_COMMAND_POLICY },
+    approvalPolicy: {},
     navigationPolicyEnabled: true,
     policyMode: "blocklist",
     sessionStepRetentionLimit: 10

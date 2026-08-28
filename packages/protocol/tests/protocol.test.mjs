@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   ActionRequestSchema,
+  ApprovableCommandTypeSchema,
   BrowserSessionSchema,
   CommandTypeSchema,
+  CommandApprovalRequestSchema,
+  CommandApprovalResultSchema,
   DEFAULT_COMMAND_POLICY,
   DEFAULT_TERMINAL_PROFILE_ID,
   DownloadGetResultSchema,
@@ -123,6 +126,38 @@ test("includes existing-tab navigation in default command policy", () => {
   assert.equal(policy.commandPolicy["action.fillForm"], false);
   assert.equal(policy.commandPolicy["network.list"], true);
   assert.equal(policy.advancedBackendEnabled, false);
+  assert.deepEqual(policy.approvalPolicy, {});
+  assert.equal(ApprovableCommandTypeSchema.safeParse("action.click").success, true);
+  assert.equal(ApprovableCommandTypeSchema.safeParse("browser.list").success, false);
+  const approvalPolicy = PolicyPreferencesSchema.parse({
+    approvalPolicy: { "action.click": true }
+  });
+  assert.equal(approvalPolicy.approvalPolicy["action.click"], true);
+  assert.throws(() => PolicyPreferencesSchema.parse({
+    approvalPolicy: { "browser.list": true }
+  }));
+});
+
+test("validates command approval request and decision contracts", () => {
+  const approval = CommandApprovalRequestSchema.parse({
+    approvalId: "approval_000001",
+    browserId: "br_001",
+    commandType: "action.click",
+    requestedAt: now,
+    expiresAt: "2026-04-28T00:00:30.000Z",
+    timeoutMs: 30000,
+    summary: { tabId: 7, elementId: "el_001" }
+  });
+  const result = CommandApprovalResultSchema.parse({
+    approvalId: approval.approvalId,
+    decision: "approved",
+    decidedAt: now
+  });
+  assert.equal(result.decision, "approved");
+  assert.throws(() => CommandApprovalRequestSchema.parse({
+    ...approval,
+    commandType: "browser.list"
+  }));
 });
 
 test("validates bounded upload action requests", () => {
@@ -213,10 +248,11 @@ test("validates success and error response envelopes", () => {
 });
 
 test("exports all documented error codes", () => {
-  assert.equal(ErrorCodeSchema.options.length, 24);
+  assert.equal(ErrorCodeSchema.options.length, 25);
   assert.ok(ErrorCodeSchema.options.includes("BROWSER_ACCESS_DENIED"));
   assert.ok(ErrorCodeSchema.options.includes("NAVIGATION_BLOCKED"));
   assert.ok(ErrorCodeSchema.options.includes("COMMAND_DISABLED_BY_POLICY"));
+  assert.ok(ErrorCodeSchema.options.includes("COMMAND_REJECTED_BY_USER"));
   assert.ok(ErrorCodeSchema.options.includes("UPLOAD_PATH_DENIED"));
   assert.ok(ErrorCodeSchema.options.includes("DISMISS_TARGET_NOT_FOUND"));
   assert.ok(ErrorCodeSchema.options.includes("TERMINAL_UNAVAILABLE"));

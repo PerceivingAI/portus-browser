@@ -9,10 +9,13 @@ import { z } from "zod";
 import { DEFAULT_PORTUS_CONFIG, PortusConfigSchema, TerminalConfigSchema, applyEnvironmentOverrides, getSettingsProfilesPath, loadOrCreateBrokerToken, type PortusConfig } from "@portus/config";
 import { BrokerEventBus } from "@portus/events";
 import {
+  ApprovableCommandTypeSchema,
   BrowserIdSchema,
   BrowserNameSchema,
   BrowserSessionSchema,
   BrokerEventTypeSchema,
+  CommandApprovalRequestSchema,
+  CommandApprovalResultSchema,
   CommandEnvelopeSchema,
   CommandTypeSchema,
   DEFAULT_COMMAND_POLICY,
@@ -43,6 +46,7 @@ import {
   type BrowserSession,
   type CommandEnvelope,
   type CommandType,
+  type ApprovableCommandType,
   type EventEnvelope,
   type PolicyPreferences,
   type PortusError,
@@ -301,6 +305,7 @@ export class BrokerCore {
   private nextBrowserNumber = 1;
   private nextCommandNumber = 1;
   private nextSessionStepNumber = 1;
+  private nextApprovalNumber = 1;
   private nextSettingsProfileWriteNumber = 1;
 
   constructor(options: BrokerCoreOptions = {}) {
@@ -1525,7 +1530,7 @@ export class BrokerCore {
       ? this.authorizeUploadPayload(request.payload, record.session.browserId)
       : request.payload;
 
-    const command = CommandEnvelopeSchema.parse({
+    let command = CommandEnvelopeSchema.parse({
       commandId: this.createCommandId(),
       type: request.type,
       args: commandArgs,
@@ -1533,6 +1538,13 @@ export class BrokerCore {
       targetTabId: typeof commandArgs.tabId === "number" ? commandArgs.tabId : undefined,
       timeoutMs: request.timeoutMs ?? this.config.commands.timeoutMs
     });
+    try {
+      command = await this.requireCommandApproval(record, command);
+    } catch (error) {
+      const portusError = normalizeBrokerError(error);
+      this.recordSessionStep(record, request, "failed", portusError);
+      throw portusError;
+    }
 
     if (request.type.startsWith("action.")) {
       this.events.publish({
@@ -1605,6 +1617,50 @@ export class BrokerCore {
       }
       throw portusError;
     }
+
+  }
+
+  private async requireCommandApproval(
+    record: BrowserSessionRecord,
+    command: CommandEnvelope
+  ): Promise<CommandEnvelope> {
+    const commandType = ApprovableCommandTypeSchema.safeParse(command.type);
+    if (!commandType.success || record.policyPreferences.approvalPolicy[commandType.data] !== true) return command;
+    if (!record.bridgeClient?.sendRequest) {
+      throw brokerError("CAPABILITY_UNAVAILABLE", "Browser session does not support command approval.", false);
+    }
+
+    const timeoutMs = command.timeoutMs ?? this.config.commands.timeoutMs;
+    const requestedAt = this.now();
+    const approval = CommandApprovalRequestSchema.parse({
+      approvalId: this.createApprovalId(),
+      browserId: record.session.browserId,
+      commandType: commandType.data,
+      requestedAt: requestedAt.toISOString(),
+      expiresAt: new Date(requestedAt.getTime() + timeoutMs).toISOString(),
+      timeoutMs,
+      summary: createCommandApprovalSummary(commandType.data, command.args)
+    });
+    const startedAt = Date.now();
+    const result = CommandApprovalResultSchema.parse(await withBrokerTimeout(
+      record.bridgeClient.sendRequest("approval.request", approval, timeoutMs),
+      command
+    ));
+    if (result.approvalId !== approval.approvalId) {
+      throw brokerError("INVALID_MESSAGE", "Browser session returned a mismatched command approval.", false);
+    }
+    if (result.decision !== "approved") {
+      throw brokerError("COMMAND_REJECTED_BY_USER", `User rejected command ${command.type}.`, false);
+    }
+
+    const remainingTimeoutMs = timeoutMs - (Date.now() - startedAt);
+    if (remainingTimeoutMs <= 0) {
+      throw brokerError("COMMAND_TIMEOUT", `Command approval timed out for ${command.type}.`, true);
+    }
+    return CommandEnvelopeSchema.parse({
+      ...command,
+      timeoutMs: remainingTimeoutMs
+    });
   }
 
   private resolveTargetSession(browserId: string | undefined): BrowserSessionRecord {
@@ -1882,6 +1938,10 @@ export class BrokerCore {
 
   private createCommandId(): string {
     return `cmd_${String(this.nextCommandNumber++).padStart(6, "0")}`;
+  }
+
+  private createApprovalId(): string {
+    return `approval_${String(this.nextApprovalNumber++).padStart(6, "0")}`;
   }
 
   private createSessionStepId(): string {
@@ -2389,6 +2449,71 @@ function urlFromBrowserEventPayload(payload: Record<string, unknown>): string | 
   if (!isRecord(payload.tab)) return undefined;
   return typeof payload.tab.url === "string" ? payload.tab.url : undefined;
 }
+
+function createCommandApprovalSummary(
+  commandType: ApprovableCommandType,
+  args: Record<string, unknown>
+): Record<string, unknown> {
+  const summary: Record<string, unknown> = {};
+  copyApprovalNumber(args, summary, "tabId");
+  copyApprovalNumber(args, summary, "windowId");
+  copyApprovalNumber(args, summary, "limit");
+  copyApprovalString(args, summary, "snapshotId");
+  copyApprovalString(args, summary, "elementId");
+  copyApprovalString(args, summary, "sourceElementId");
+  copyApprovalString(args, summary, "targetElementId");
+  copyApprovalString(args, summary, "key");
+  copyApprovalString(args, summary, "kind");
+  copyApprovalString(args, summary, "strategy");
+  copyApprovalString(args, summary, "match");
+  if (typeof args.url === "string") summary.url = sanitizeApprovalTarget(args.url);
+  if (typeof args.value === "string" && commandType.startsWith("policy.")) {
+    summary.ruleValue = sanitizeApprovalTarget(args.value);
+  }
+  if (typeof args.active === "boolean") summary.active = args.active;
+  if (typeof args.dryRun === "boolean") summary.dryRun = args.dryRun;
+  if (typeof args.text === "string") summary.textLength = args.text.length;
+  if (Array.isArray(args.fields)) {
+    summary.fieldCount = args.fields.length;
+    const elementIds: string[] = [];
+    for (const field of args.fields) {
+      if (isRecord(field) && typeof field.elementId === "string") elementIds.push(field.elementId);
+    }
+    summary.elementIds = elementIds;
+  }
+  if (Array.isArray(args.files)) summary.fileCount = args.files.length;
+  return summary;
+}
+
+function copyApprovalNumber(
+  source: Record<string, unknown>,
+  target: Record<string, unknown>,
+  key: string
+): void {
+  if (typeof source[key] === "number") target[key] = source[key];
+}
+
+function copyApprovalString(
+  source: Record<string, unknown>,
+  target: Record<string, unknown>,
+  key: string
+): void {
+  if (typeof source[key] === "string") target[key] = source[key];
+}
+
+function sanitizeApprovalTarget(value: string): string {
+  try {
+    const url = new URL(value);
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return value.slice(0, 200);
+  }
+}
+
 
 function redactUrlFromPayload(payload: Record<string, unknown>, redactUrls: boolean): string | undefined {
   if (typeof payload.url !== "string") return undefined;
